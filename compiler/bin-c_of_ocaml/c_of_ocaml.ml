@@ -23,27 +23,142 @@ let times = Debug.find "times"
 
 let usage = "Usage: c_of_ocaml [options] program.bc -o program.c"
 
-(* The JavaScript runtime tells which primitives are pure *)
-let load_primitive_kinds () =
-  List.iter Js_of_ocaml_compiler_runtime_files.runtime ~f:(fun t ->
-      let filename = Builtins.File.name t in
-      let fragments = Linker.Fragment.parse_builtin t in
-      Linker.load_fragments ~target_env:Target_env.Isomorphic ~filename fragments);
-  Linker.check_deps ();
-  List.iter
-    ~f:(fun name -> Primitive.register name `Pure None None)
-    [ "%int_add"
-    ; "%int_sub"
-    ; "%int_mul"
-    ; "%int_neg"
-    ; "%int_and"
-    ; "%int_or"
-    ; "%int_xor"
-    ; "%int_lsl"
-    ; "%int_lsr"
-    ; "%int_asr"
-    ; "%direct_obj_tag"
-    ]
+(* The primitives without side effects which cannot raise. We do not use
+   the purity declared by the JavaScript runtime: some of its primitives
+   cannot raise, while their C version can. The other primitives are
+   assumed to have side effects and to raise. *)
+let pure_primitives =
+  [ "%int_add"
+  ; "%int_sub"
+  ; "%int_mul"
+  ; "%int_neg"
+  ; "%int_and"
+  ; "%int_or"
+  ; "%int_xor"
+  ; "%int_lsl"
+  ; "%int_lsr"
+  ; "%int_asr"
+  ; "%direct_obj_tag"
+  ; "caml_int_compare"
+  ; "caml_bswap16"
+  ; "caml_string_compare"
+  ; "caml_string_equal"
+  ; "caml_string_notequal"
+  ; "caml_string_lessthan"
+  ; "caml_string_lessequal"
+  ; "caml_string_greaterthan"
+  ; "caml_string_greaterequal"
+  ; "caml_ml_string_length"
+  ; "caml_ml_bytes_length"
+  ; "caml_string_unsafe_get"
+  ; "caml_string_concat"
+  ; "caml_bytes_of_string"
+  ; "caml_string_of_bytes"
+  ; "caml_obj_tag"
+  ; "caml_hash"
+  ; "caml_lazy_make_forward"
+  ; "caml_sys_const_backend_type"
+  ; "caml_sys_const_big_endian"
+  ; "caml_sys_const_int_size"
+  ; "caml_sys_const_max_wosize"
+  ; "caml_sys_const_ostype_cygwin"
+  ; "caml_sys_const_ostype_unix"
+  ; "caml_sys_const_ostype_win32"
+  ; "caml_sys_const_word_size"
+  ; "caml_sys_const_naked_pointers_checked"
+  ; "caml_sys_const_runtime5"
+  ]
+  @ List.map
+      ~f:(fun f -> "caml_" ^ f ^ "_float")
+      [ "add"
+      ; "sub"
+      ; "mul"
+      ; "div"
+      ; "neg"
+      ; "abs"
+      ; "sqrt"
+      ; "cbrt"
+      ; "exp"
+      ; "exp2"
+      ; "expm1"
+      ; "log"
+      ; "log10"
+      ; "log1p"
+      ; "log2"
+      ; "sin"
+      ; "cos"
+      ; "tan"
+      ; "asin"
+      ; "acos"
+      ; "atan"
+      ; "atan2"
+      ; "sinh"
+      ; "cosh"
+      ; "tanh"
+      ; "asinh"
+      ; "acosh"
+      ; "atanh"
+      ; "erf"
+      ; "erfc"
+      ; "floor"
+      ; "ceil"
+      ; "trunc"
+      ; "round"
+      ; "fmod"
+      ; "power"
+      ; "hypot"
+      ; "copysign"
+      ; "ldexp"
+      ; "frexp"
+      ; "modf"
+      ; "nextafter"
+      ; "fma"
+      ; "signbit"
+      ; "classify"
+      ; "eq"
+      ; "neq"
+      ; "lt"
+      ; "le"
+      ; "gt"
+      ; "ge"
+      ]
+  @ [ "caml_float_of_int"; "caml_int_of_float"; "caml_float_compare" ]
+  @ List.concat_map
+      ~f:(fun t ->
+        List.map
+          ~f:(fun f -> Printf.sprintf "caml_%s_%s" t f)
+          [ "add"
+          ; "sub"
+          ; "mul"
+          ; "neg"
+          ; "and"
+          ; "or"
+          ; "xor"
+          ; "shift_left"
+          ; "shift_right"
+          ; "shift_right_unsigned"
+          ; "of_int"
+          ; "to_int"
+          ; "of_float"
+          ; "to_float"
+          ; "of_int32"
+          ; "to_int32"
+          ; "of_nativeint"
+          ; "to_nativeint"
+          ; "bits_of_float"
+          ; "float_of_bits"
+          ; "compare"
+          ; "bswap"
+          ])
+      [ "int64"; "int32"; "nativeint" ]
+
+(* Primitives without side effects reading mutable data *)
+let mutable_primitives =
+  [ "caml_bytes_unsafe_get"; "caml_array_unsafe_get"; "caml_floatarray_unsafe_get" ]
+
+let register_primitives () =
+  List.iter ~f:(fun name -> Primitive.register name `Pure None None) pure_primitives;
+  List.iter ~f:(fun name -> Primitive.register name `Mutable None None) mutable_primitives
 
 let compile ~profile ~input_file ~output_file =
   let ic = open_in_bin input_file in
@@ -97,7 +212,7 @@ let () =
   | Some input_file, Some output_file -> (
       Config.set_target `C;
       Config.set_effects_backend `Disabled;
-      load_primitive_kinds ();
+      register_primitives ();
       try compile ~profile:!profile ~input_file ~output_file
       with Failure msg ->
         prerr_endline msg;

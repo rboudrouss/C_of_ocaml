@@ -3,7 +3,6 @@
  (libraries
   c_of_ocaml_compiler
   js_of_ocaml-compiler
-  js_of_ocaml-compiler.runtime-files
   compiler-libs.common)
  (modes
   byte
