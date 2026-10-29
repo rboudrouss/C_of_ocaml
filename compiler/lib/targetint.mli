@@ -15,6 +15,9 @@ val to_int_exn : t -> int
 val to_float : t -> float
 
 val to_int32 : t -> int32
+(** The low 32 bits *)
+
+val to_int64 : t -> int64
 
 (* of *)
 
@@ -25,6 +28,8 @@ val of_int_exn : int -> t
 val of_int32_exn : int32 -> t
 
 val of_int32_truncate : int32 -> t
+
+val of_int64_truncate : int64 -> t
 
 val of_int32_warning_on_overflow : int32 -> t
 
