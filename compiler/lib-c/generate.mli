@@ -21,9 +21,13 @@ val f :
   -> global_flow_data:Global_flow.state * Global_flow.info
   -> deadcode_sentinel:Code.Var.t
   -> debug_info:bool
+  -> in_cps:Effects.in_cps
+  -> trampolined_calls:Effects.trampolined_calls
   -> Closure_conversion.closure Code.Var.Map.t
   -> string
-(** [f p ~global_flow_data ~deadcode_sentinel ~debug_info closures] is the C
-    translation of the whole program [p], whose closures are [closures] (see
-    {!Closure_conversion.f}). With [debug_info], it records backtraces at the
-    locations of the debug events of [p]. *)
+(** [f p ~global_flow_data ~deadcode_sentinel ~debug_info ~in_cps
+     ~trampolined_calls closures] is the C translation of the whole program [p],
+    whose closures are [closures] (see {!Closure_conversion.f}). With
+    [debug_info], it records backtraces at the locations of the debug events of
+    [p]. With effect handlers (double translation), [in_cps] are the CPS calls
+    and [trampolined_calls] those which may bounce (see {!Effects.f}). *)

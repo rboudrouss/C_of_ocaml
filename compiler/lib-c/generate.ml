@@ -32,6 +32,13 @@ open Code
 
 let word_size = 4
 
+(* Effect handlers: functions which may perform an effect have a CPS
+   version, run on fibers by the runtime (see camlc.h) *)
+let double_translation () =
+  match Config.effects () with
+  | `Double_translation -> true
+  | `Disabled | `Cps | `Jspi | `Native -> false
+
 (****)
 
 let sanitize s =
@@ -121,6 +128,15 @@ type output =
   ; debug_info : bool  (** Record backtraces *)
   ; locations : string String.Hashtbl.t  (** The C names of the locations *)
   ; location_defs : Buffer.t
+  ; in_cps : Var.Set.t  (** The CPS calls *)
+  ; trampolined : Var.Set.t  (** The CPS calls which may bounce *)
+  ; cps_pairs : Var.t Var.Map.t
+        (** The CPS version of each function with two versions, which share a
+            closure *)
+  ; cps_sides : Var.Set.t  (** The CPS versions *)
+  ; mutable cps_apply_arities : IntSet.t
+        (** Arities (with the continuation) of the [camlc_apply_cpsN] and
+            [camlc_call_cpsN] functions used *)
   }
 
 (* A static description of a source location, for backtraces *)
@@ -664,6 +680,29 @@ let primitive out name (args : parg list) =
                   | "%with_stack"
                   | "%with_stack_bind" )
                 , _ ) -> Checked "camlc_raise_unhandled_effect()"
+              (* Effect handlers (see [Effects]) *)
+              | "caml_perform_effect", 2 when double_translation () ->
+                  Checked (c_call "camlc_perform_effect" args)
+              | "caml_reperform_effect", 4 when double_translation () ->
+                  Checked (c_call "camlc_reperform_effect" args)
+              | "caml_resume_stack", 3 when double_translation () ->
+                  Checked (c_call "camlc_resume_stack" args)
+              | "caml_resume", 4 when double_translation () ->
+                  Checked (c_call "camlc_resume" args)
+              | "caml_raise_unhandled", 1 when double_translation () ->
+                  Checked (c_call "camlc_raise_unhandled" args)
+              | "caml_alloc_stack", 3 when double_translation () ->
+                  plain (c_call "camlc_alloc_stack" args)
+              | "caml_push_trap", 1 when double_translation () ->
+                  plain (c_call "camlc_push_trap" args)
+              | "caml_pop_trap", 0 when double_translation () -> plain "camlc_pop_trap()"
+              | "caml_maybe_attach_backtrace", 2 when double_translation () ->
+                  Plain (Value, arg 0, false)
+              | "caml_continuation_use_noexc", 1 when double_translation () ->
+                  plain (c_call "camlc_continuation_use_noexc" args)
+              | "caml_continuation_use_and_update_handler_noexc", 4
+                when double_translation () ->
+                  plain (c_call "camlc_continuation_use_and_update_handler_noexc" args)
               | _ ->
                   if String.length name > 0 && Char.equal name.[0] '%'
                   then
@@ -1136,9 +1175,13 @@ let alloc_block ctx ~dst ~tag ~prefix fields =
 (* The start of the environment, and the position of the code pointer of
    each function. In a closure with several functions, a function of arity 2
    or more takes three words, as in native code: the compactor of OCaml 4.14
-   finds the Infix headers from the arities. *)
+   finds the Infix headers from the arities. With effect handlers, each
+   function takes three words: its code pointer, its closure info and the
+   code pointer of its CPS version (or 0). *)
 let closure_layout functions =
-  let size arity = if List.length functions > 1 && arity >= 2 then 3 else 2 in
+  let size arity =
+    if double_translation () || (List.length functions > 1 && arity >= 2) then 3 else 2
+  in
   let rec layout pos l =
     match l with
     | [] -> assert false
@@ -1152,6 +1195,9 @@ let closure_layout functions =
 let translate_closure ctx f =
   let info = Var.Map.find f ctx.closures in
   match info.functions with
+  | _ when Var.Set.mem f ctx.out.cps_sides ->
+      (* A CPS version, in the closure of its direct-style version *)
+      ()
   | (f0, _) :: _ when not (Var.equal f f0) ->
       (* Allocated with the first function of the closure *)
       ()
@@ -1166,7 +1212,14 @@ let translate_closure ctx f =
                  ]
                in
                let code =
-                 if List.length functions > 1 && arity >= 2
+                 if double_translation ()
+                 then
+                   code
+                   @ [ (match Var.Map.find_opt g ctx.out.cps_pairs with
+                       | Some c -> Printf.sprintf "(value)&%s" (fun_name ctx.out c)
+                       | None -> "0")
+                     ]
+                 else if List.length functions > 1 && arity >= 2
                  then code @ [ "Val_unit" ]
                  else code
                in
@@ -1196,23 +1249,37 @@ let translate_closure ctx f =
 
 let apply_arity out n = out.apply_arities <- IntSet.add n out.apply_arities
 
+let out_cps_apply_arity out n =
+  out.cps_apply_arities <- IntSet.add n out.cps_apply_arities
+
 let param_reprs ctx g =
   Var.Hashtbl.find_opt ctx.out.fun_reprs g |> Option.value ~default:[]
 
-(* The function statically known to be called by an application, if any *)
-let unique_callee ctx x ~f ~exact =
+(* A CPS call: its last argument is the continuation *)
+let is_cps_call ctx x = double_translation () && Var.Set.mem x ctx.out.in_cps
+
+type callee =
+  | Known of Var.t  (** The function statically known to be called *)
+  | Known_direct of Var.t
+      (** A CPS call of a function without CPS version: it is called in
+          direct style, and its result passed to the continuation *)
+  | Unknown
+
+let callee ctx x ~f ~exact =
   if exact
   then
     match Global_flow.get_unique_closure ctx.global_flow_info ~call:x f with
-    | Some (g, _, false) when Var.Map.mem g ctx.closures -> Some g
-    | Some _ | None -> None
-  else None
+    | Some (g, _, cont) when Var.Map.mem g ctx.closures ->
+        if cont then Known_direct g else Known g
+    | Some _ | None -> Unknown
+  else Unknown
 
 (* The representation of the parameters of the function called *)
 let callee_reprs ctx x ~f ~args ~exact =
-  match unique_callee ctx x ~f ~exact with
-  | Some g -> param_reprs ctx g
-  | None -> List.map args ~f:(fun _ -> Value)
+  match callee ctx x ~f ~exact with
+  | Known g -> param_reprs ctx g
+  | Known_direct g -> param_reprs ctx g @ [ Value ]
+  | Unknown -> List.map args ~f:(fun _ -> Value)
 
 (* The arguments of an application which are unboxed numbers passed to a
    parameter holding values: they are boxed before the call *)
@@ -1223,7 +1290,8 @@ let boxed_arguments ctx x ~f ~args ~exact =
 (* The C function called by an application, its arguments ([n] arguments
    and a closure in all cases), and the representation of its parameters.
    The numbers to box are boxed first, into slots of the shadow stack
-   ([bx], see [boxing_prelude]). *)
+   ([bx], see [boxing_prelude]). For [Known_direct], the arguments are those
+   of the function, its closure, then the continuation. *)
 let apply ctx x ~f ~args ~exact =
   let n = List.length args in
   let reprs = callee_reprs ctx x ~f ~args ~exact in
@@ -1239,10 +1307,19 @@ let apply ctx x ~f ~args ~exact =
         else as_repr ctx r a)
   in
   let fe = as_value ctx f in
-  match unique_callee ctx x ~f ~exact with
-  | Some g -> fun_name ctx.out g, args @ [ fe ], reprs
-  | None ->
-      if exact
+  match callee ctx x ~f ~exact with
+  | Known g -> fun_name ctx.out g, args @ [ fe ], reprs
+  | Known_direct g ->
+      let args, k = List.take (n - 1) args in
+      fun_name ctx.out g, args @ [ fe ] @ k, reprs
+  | Unknown ->
+      if is_cps_call ctx x
+      then (
+        out_cps_apply_arity ctx.out n;
+        ( Printf.sprintf (if exact then "camlc_call_cps%d" else "camlc_apply_cps%d") n
+        , fe :: args
+        , reprs ))
+      else if exact
       then Printf.sprintf "((%s)Field(%s, 0))" (fun_type n) fe, args @ [ fe ], reprs
       else (
         apply_arity ctx.out n;
@@ -1274,27 +1351,88 @@ let boxing_prelude ctx traps x ~f ~args ~exact =
 
 (* An application whose result is returned: the frame is released before
    the call, which is a tail call when the callee has the signature of the
-   function (as required by [musttail]) *)
+   function (as required by [musttail]).
+
+   A CPS call which may bounce, unless it is a tail call, first decrements
+   [camlc_cps_depth]: when it gets negative, the call is returned to the
+   trampoline ([camlc_cps_bounce]), which performs it on a shorter stack. *)
 let translate_tail_call ctx x ~f ~args ~exact =
+  let n = List.length args in
   let k = boxing_prelude ctx [] x ~f ~args ~exact in
+  let kind = callee ctx x ~f ~exact in
   let callee, args, reprs = apply ctx x ~f ~args ~exact in
-  let types = List.map (reprs @ [ Value ]) ~f:c_type in
+  let types =
+    List.map
+      (match kind with
+      | Known_direct _ -> fst (List.take (n - 1) reprs) @ [ Value; Value ]
+      | Known _ | Unknown -> reprs @ [ Value ])
+      ~f:c_type
+  in
   let temps =
     List.mapi (List.combine types args) ~f:(fun i (t, a) ->
         Printf.sprintf "%s t%d = %s;" t i a)
   in
-  let call = c_call callee (List.mapi args ~f:(fun i _ -> Printf.sprintf "t%d" i)) in
-  line
-    ctx
-    "{ %s%s %sreturn %s; }"
-    (String.concat ~sep:" " temps)
-    (if Var.Hashtbl.length ctx.slots = 0
-     then if k > 0 then Printf.sprintf " camlc_sp = bx + %d;" k else ""
-     else " camlc_sp = fp + FRAME_SIZE;")
-    (match ctx.arity with
-    | Some reprs' when List.equal ~eq:repr_equal reprs reprs' -> "CAMLC_MUSTTAIL "
-    | Some _ | None -> "")
-    call
+  let t i = Printf.sprintf "t%d" i in
+  let musttail =
+    match kind, ctx.arity with
+    | (Known _ | Unknown), Some reprs' -> List.equal ~eq:repr_equal reprs reprs'
+    | Known_direct _, _ | _, None -> false
+  in
+  let bounce =
+    if
+      is_cps_call ctx x
+      && Var.Set.mem x ctx.out.trampolined
+      && (not musttail)
+      && List.for_all reprs ~f:(fun r -> repr_equal r Value)
+    then
+      (* The closure, then the arguments *)
+      let closure, arguments =
+        match kind with
+        | Known _ -> n, List.init ~len:n ~f:Fun.id
+        | Known_direct _ -> n - 1, List.init ~len:(n - 1) ~f:Fun.id @ [ n ]
+        | Unknown -> 0, List.init ~len:n ~f:(fun i -> i + 1)
+      in
+      Printf.sprintf
+        " if (CAMLC_UNLIKELY(--camlc_cps_depth < 0)) { %s return camlc_cps_bounce(%s, \
+         %d); }"
+        (String.concat
+           ~sep:" "
+           (List.mapi arguments ~f:(fun i j ->
+                Printf.sprintf "camlc_bounce_args[%d] = %s;" i (t j))))
+        (t closure)
+        n
+    else ""
+  in
+  let pop =
+    if Var.Hashtbl.length ctx.slots = 0
+    then if k > 0 then Printf.sprintf " camlc_sp = bx + %d;" k else ""
+    else " camlc_sp = fp + FRAME_SIZE;"
+  in
+  match kind with
+  | Known_direct _ ->
+      (* The continuation is kept on the shadow stack during the call *)
+      let call = c_call callee (List.init ~len:n ~f:t) in
+      line
+        ctx
+        "{ %s%s%s value *ks = camlc_sp - 1; if (CAMLC_UNLIKELY(ks < camlc_stack_limit)) \
+         return camlc_stack_overflow(); *ks = t%d; camlc_sp = ks; value r = %s; camlc_sp \
+         = ks + 1; if (CAMLC_UNLIKELY(Is_exception_result(r))) return r; return ((value \
+         (*)(value, value))Field(*ks, 0))(r, *ks); }"
+        (String.concat ~sep:" " temps)
+        pop
+        bounce
+        n
+        call
+  | Known _ | Unknown ->
+      let call = c_call callee (List.mapi args ~f:(fun i _ -> t i)) in
+      line
+        ctx
+        "{ %s%s%s %sreturn %s; }"
+        (String.concat ~sep:" " temps)
+        pop
+        bounce
+        (if musttail then "CAMLC_MUSTTAIL " else "")
+        call
 
 let translate_instr ctx traps i =
   match i with
@@ -1310,6 +1448,7 @@ let translate_instr ctx traps i =
       in
       match e with
       | Apply { f; args; exact } ->
+          if is_cps_call ctx x then failwith "c_of_ocaml: a CPS call is not a tail call";
           let k = boxing_prelude ctx traps x ~f ~args ~exact in
           let callee, args, _ = apply ctx x ~f ~args ~exact in
           if k = 0
@@ -1356,6 +1495,9 @@ let translate_instr ctx traps i =
           | r -> line ctx "%s = %s;" dst (constant_repr ctx.out c r))
       | Special (Alias_prim name) ->
           failwith (Printf.sprintf "c_of_ocaml: unsupported alias primitive %s" name)
+      | Prim (Extern ("caml_cps_closure", _), [ Pv d; Pv _ ]) ->
+          (* The closure of the direct-style version holds both versions *)
+          define ctx x Value (as_value ctx d)
       | Prim (Extern (name, _), args) -> (
           let args = List.map args ~f:(fun a -> prim_arg ctx a) in
           let n = List.length args in
@@ -1526,6 +1668,7 @@ let expr_uses ctx x e acc =
       | Some info -> use_list ctx info.free_variables acc
       | None -> acc)
   | Constant _ | Special _ -> acc
+  | Prim (Extern ("caml_cps_closure", _), [ Pv d; _ ]) -> use ctx d acc
   | Prim (_, args) -> use_prim_args ctx args acc
 
 (* How an instruction may trigger a garbage collection: [`Call] if its
@@ -1543,6 +1686,7 @@ let gc_point ctx i =
       | Some { functions = (f0, _) :: _; free_variables = _ :: _; _ } when Var.equal x f0
         -> `Alloc
       | Some _ | None -> `No)
+  | Let (_, Prim (Extern ("caml_cps_closure", _), _)) -> `No
   | Let (x, Field (_, _, Float)) ->
       (* The float is boxed if the variable holds a value *)
       if repr_equal (var_repr ctx x) Value then `Call else `No
@@ -1863,10 +2007,28 @@ let collect_functions p =
       | None -> acc)
     []
 
-let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
+let f
+    (p : program)
+    ~global_flow_data
+    ~deadcode_sentinel
+    ~debug_info
+    ~in_cps
+    ~trampolined_calls
+    closures =
   let global_flow_state, global_flow_info = global_flow_data in
   let facts = compute_facts p closures in
-  (* Which numbers can be unboxed. Closures hold values. *)
+  let cps_pairs, cps_sides, public_name =
+    Var.Hashtbl.fold
+      (fun x (d, c) (cps_pairs, cps_sides, public_name) ->
+        ( Var.Map.add d c cps_pairs
+        , Var.Set.add c cps_sides
+        , Var.Map.add d x (Var.Map.add c x public_name) ))
+      global_flow_info.Global_flow.info_cps_closures
+      (Var.Map.empty, Var.Set.empty, Var.Map.empty)
+  in
+  let functions = collect_functions p in
+  (* Which numbers can be unboxed. Closures hold values, and so do the
+     parameters of the CPS versions, which the runtime may call. *)
   Typing.reset ();
   register_typing_primitives ();
   let types =
@@ -1876,6 +2038,10 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
         (fun _ (info : Closure_conversion.closure) acc -> info.free_variables @ acc)
         closures
         []
+    in
+    let boxed =
+      List.fold_left functions ~init:boxed ~f:(fun acc (f, params, _) ->
+          if Var.Set.mem f cps_sides then params @ acc else acc)
     in
     Typing.f ~global_flow_state ~global_flow_info ~fun_info ~deadcode_sentinel ~boxed p
   in
@@ -1895,9 +2061,13 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
     ; debug_info
     ; locations = String.Hashtbl.create 1024
     ; location_defs = Buffer.create 4096
+    ; in_cps
+    ; trampolined = trampolined_calls
+    ; cps_pairs
+    ; cps_sides
+    ; cps_apply_arities = IntSet.empty
     }
   in
-  let functions = collect_functions p in
   List.iter functions ~f:(fun (f, params, _) ->
       out.max_arity <- max out.max_arity (List.length params);
       Var.Hashtbl.replace
@@ -1919,7 +2089,14 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
       in
       let env =
         List.mapi info.free_variables ~f:(fun j x -> x, Env (startenv - k + j))
-        @ List.map2 info.functions positions ~f:(fun (g, _) pos -> g, Sibling (pos - k))
+        @ List.concat
+            (List.map2 info.functions positions ~f:(fun (g, _) pos ->
+                 (* The code refers to a function with two versions by the
+                    variable bound to its closure *)
+                 let l = Sibling (pos - k) in
+                 match Var.Map.find_opt g public_name with
+                 | Some x -> [ g, l; x, l ]
+                 | None -> [ g, l ]))
       in
       translate_function
         out
@@ -1992,19 +2169,33 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
         (String.concat
            ~sep:", "
            (List.map (Var.Hashtbl.find out.fun_reprs f @ [ Value ]) ~f:c_type)));
+  let dt = double_translation () in
   for m = 1 to out.max_arity - 1 do
-    Printf.bprintf b "static value camlc_pap%d(%s);\n" m (fun_params m)
+    Printf.bprintf b "static value camlc_pap%d(%s);\n" m (fun_params m);
+    if dt
+    then Printf.bprintf b "static value camlc_pap_cps%d(%s);\n" m (fun_params (m + 1))
   done;
   Buffer.add_char b '\n';
   Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
   Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
   Printf.bprintf
     b
-    "const value camlc_pap_code[] = { 0%s };\n\n"
+    "const value camlc_pap_code[] = { 0%s };\n"
     (String.concat
        ~sep:""
        (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
             Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
+  Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
+  Printf.bprintf
+    b
+    "const value camlc_pap_cps_code[] = { 0%s };\n\n"
+    (if dt
+     then
+       String.concat
+         ~sep:""
+         (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
+              Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
+     else "");
   Buffer.add_string b "static struct camlc_data {\n  value unused;\n";
   Buffer.add_buffer b out.data_fields;
   Buffer.add_string b "} camlc_data = {\n  .unused = 0,\n";
@@ -2017,29 +2208,59 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
   Buffer.add_buffer b out.location_defs;
   Buffer.add_char b '\n';
   (* Partial applications: the closure holds the function and the
-     arguments already given *)
+     arguments already given (after the code pointer of the CPS version, with
+     effect handlers), see [camlc_make_pap] *)
+  let e = if dt then 3 else 2 in
   for m = 1 to out.max_arity - 1 do
     Printf.bprintf
       b
       "static value camlc_pap%d(%s) {\n\
-      \  mlsize_t k = Wosize_val(env) - 3;\n\
+      \  mlsize_t k = Wosize_val(env) - %d;\n\
       \  value *argv = camlc_sp - (k + %d);\n\
       \  value r;\n\
       \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
       \  camlc_sp = argv;\n\
-      \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, 3 + i);\n\
-       %s  r = camlc_applyv(Field(env, 2), k + %d, argv);\n\
+      \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, %d + i);\n\
+       %s  r = camlc_applyv(Field(env, %d), k + %d, argv);\n\
       \  camlc_sp = argv + k + %d;\n\
       \  return r;\n\
        }\n\n"
       m
       (fun_params m)
+      (e + 1)
       m
+      (e + 1)
       (String.concat
          ~sep:""
          (List.init ~len:m ~f:(fun i -> Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
+      e
       m
-      m
+      m;
+    if dt
+    then
+      (* CPS version: the last argument is the continuation *)
+      Printf.bprintf
+        b
+        "static value camlc_pap_cps%d(%s) {\n\
+        \  mlsize_t k = Wosize_val(env) - 4;\n\
+        \  value *argv = camlc_sp - (k + %d);\n\
+        \  value r;\n\
+        \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
+        \  camlc_sp = argv;\n\
+        \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, 4 + i);\n\
+         %s  r = camlc_applyv_cps(Field(env, 3), k + %d, argv);\n\
+        \  camlc_sp = argv + k + %d;\n\
+        \  return r;\n\
+         }\n\n"
+        m
+        (fun_params (m + 1))
+        (m + 1)
+        (String.concat
+           ~sep:""
+           (List.init ~len:(m + 1) ~f:(fun i ->
+                Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
+        m
+        (m + 1)
   done;
   (* Exact calls with the arguments in an array *)
   Printf.bprintf
@@ -2058,6 +2279,73 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
   Printf.bprintf
     b
     "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
+  (* Same, for the CPS versions, the last argument being the continuation *)
+  Printf.bprintf
+    b
+    "value camlc_call_exact_cps(value f, int n, value *args) {\n  switch (n) {\n";
+  if dt
+  then
+    for n = 1 to out.max_arity do
+      Printf.bprintf
+        b
+        "  case %d: return ((%s)Field(f, 2))(%s);\n"
+        n
+        (fun_type (n + 1))
+        (String.concat
+           ~sep:", "
+           (List.init ~len:(n + 1) ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
+    done;
+  Printf.bprintf
+    b
+    "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
+  (* CPS calls of unknown functions, which may not have a CPS version *)
+  IntSet.iter
+    (fun m ->
+      let n = m - 1 in
+      let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
+      let params = String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)) in
+      Printf.bprintf
+        b
+        "static value camlc_direct_k%d(value f, %s, value k) {\n\
+        \  value *ks = camlc_sp - 1, r;\n\
+        \  if (CAMLC_UNLIKELY(ks < camlc_stack_limit)) return camlc_stack_overflow();\n\
+        \  *ks = k;\n\
+        \  camlc_sp = ks;\n\
+        \  r = ((%s)Field(f, 0))(%s, f);\n\
+        \  camlc_sp = ks + 1;\n\
+        \  if (CAMLC_UNLIKELY(Is_exception_result(r))) return r;\n\
+        \  return ((value (*)(value, value))Field(*ks, 0))(r, *ks);\n\
+         }\n\n\
+         static inline value camlc_call_cps%d(value f, %s, value k) {\n\
+        \  value c = Field(f, 2);\n\
+        \  if (c) CAMLC_MUSTTAIL return ((%s)c)(%s, k, f);\n\
+        \  CAMLC_MUSTTAIL return camlc_direct_k%d(f, %s, k);\n\
+         }\n\n\
+         static inline value camlc_apply_cps%d(value f, %s, value k) {\n\
+        \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
+        \    CAMLC_MUSTTAIL return camlc_call_cps%d(f, %s, k);\n\
+        \  value args[%d] = { %s, k };\n\
+        \  return camlc_applyv_cps(f, %d, args);\n\
+         }\n\n"
+        n
+        params
+        (fun_type n)
+        (String.concat ~sep:", " args)
+        m
+        params
+        (fun_type m)
+        (String.concat ~sep:", " args)
+        n
+        (String.concat ~sep:", " args)
+        m
+        params
+        n
+        m
+        (String.concat ~sep:", " args)
+        m
+        (String.concat ~sep:", " args)
+        n)
+    out.cps_apply_arities;
   IntSet.iter
     (fun n ->
       let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in

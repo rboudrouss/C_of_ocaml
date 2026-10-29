@@ -62,6 +62,13 @@ static value *camlc_stack_top;
 
 static scan_roots_hook camlc_prev_scan_roots_hook = NULL;
 
+/* Effect handlers: the current fiber and the pending call (see below) */
+static value camlc_fiber = Val_unit;
+static value camlc_bounce_f = Val_unit;
+static int camlc_bounce_n = 0;
+#define CAMLC_MAX_BOUNCE_ARGS 256
+value camlc_bounce_args[CAMLC_MAX_BOUNCE_ARGS];
+
 static void camlc_scan_roots(scanning_action action,
                              scanning_action_flags flags, void *fdata,
                              caml_domain_state *domain)
@@ -69,6 +76,12 @@ static void camlc_scan_roots(scanning_action action,
   for (value *p = camlc_sp; p < camlc_stack_top; p++) {
     value v = *p;
     if (Is_block(v)) action(fdata, v, p);
+  }
+  if (Is_block(camlc_fiber)) action(fdata, camlc_fiber, &camlc_fiber);
+  if (Is_block(camlc_bounce_f)) action(fdata, camlc_bounce_f, &camlc_bounce_f);
+  for (int i = 0; i < camlc_bounce_n; i++) {
+    value v = camlc_bounce_args[i];
+    if (Is_block(v)) action(fdata, v, &camlc_bounce_args[i]);
   }
   if (camlc_prev_scan_roots_hook != NULL)
     camlc_prev_scan_roots_hook(action, flags, fdata, domain);
@@ -267,29 +280,39 @@ value camlc_get_cached_method(value obj, value tag, value cache_id)
 /****************************************************************/
 /* Applications */
 
+/* The closure of a partial application: the code pointer of the arity
+   left, the closure info, then, with effect handlers, the code pointer of
+   its CPS version (if [f] has one), and the function and the arguments
+   given */
 value camlc_make_pap(value f, int n, value *args)
 {
   /* [f] and [args] are not used after the allocation */
   int arity = Arity_closinfo(Closinfo_val(f));
-  mlsize_t wosize = 3 + n;
+  int e = camlc_double_translation ? 3 : 2;
+  mlsize_t wosize = e + 1 + n;
   value *fp = camlc_sp - (n + 1);
-  value r;
+  value r, cps = 0;
   if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
+  if (camlc_double_translation && Field(f, 2) != 0)
+    cps = camlc_pap_cps_code[arity - n];
   camlc_sp = fp;
   fp[0] = f;
   for (int i = 0; i < n; i++) fp[1 + i] = args[i];
   if (wosize <= Max_young_wosize) {
     r = camlc_alloc_small(wosize, Closure_tag);
     Field(r, 0) = camlc_pap_code[arity - n];
-    Field(r, 1) = Make_closinfo(arity - n, 2);
-    Field(r, 2) = fp[0];
-    for (int i = 0; i < n; i++) Field(r, 3 + i) = fp[1 + i];
+    Field(r, 1) = Make_closinfo(arity - n, e);
+    if (camlc_double_translation) Field(r, 2) = cps;
+    Field(r, e) = fp[0];
+    for (int i = 0; i < n; i++) Field(r, e + 1 + i) = fp[1 + i];
   } else {
     r = caml_alloc_shr(wosize, Closure_tag);
     Field(r, 0) = camlc_pap_code[arity - n];
-    Field(r, 1) = Make_closinfo(arity - n, 2);
-    caml_initialize(&Field(r, 2), fp[0]);
-    for (int i = 0; i < n; i++) caml_initialize(&Field(r, 3 + i), fp[1 + i]);
+    Field(r, 1) = Make_closinfo(arity - n, e);
+    if (camlc_double_translation) Field(r, 2) = cps;
+    caml_initialize(&Field(r, e), fp[0]);
+    for (int i = 0; i < n; i++)
+      caml_initialize(&Field(r, e + 1 + i), fp[1 + i]);
   }
   camlc_sp = fp + n + 1;
   return r;
@@ -323,6 +346,432 @@ value camlc_applyv(value f, int n, value *args)
   camlc_sp = fp + n + 1;
   return r;
 }
+
+
+/****************************************************************/
+/* Effect handlers (see camlc.h), following the CPS runtime of
+   wasm_of_ocaml (runtime/wasm/effect.wat).
+
+   A fiber is a block holding the handlers of the effect handler which
+   created it (for values, exceptions and effects), its continuation while
+   it is not running, its stack of exception handlers (a list of
+   closures), and the fiber it returns to (or unit). [camlc_fiber] is the
+   running fiber. A continuation is a block holding the first fiber of the
+   stack of fibers it resumes (unit once resumed) and the last one. */
+
+int camlc_cps_depth = 0;
+
+#if OCAML_VERSION_MAJOR >= 5
+
+#ifndef CAMLC_CPS_DEPTH
+#define CAMLC_CPS_DEPTH 200
+#endif
+
+#define Fiber_hval 0
+#define Fiber_hexn 1
+#define Fiber_heff 2
+#define Fiber_cont 3
+#define Fiber_exns 4
+#define Fiber_parent 5
+
+/* A static block, returned by a call which bounces */
+static value camlc_bounce_block[2] = {
+  Make_header(1, 0, CAMLC_STATIC_COLOR), Val_unit };
+#define CAMLC_BOUNCE ((value)&camlc_bounce_block[1])
+
+value camlc_cps_bounce(value f, int n)
+{
+  if (n > CAMLC_MAX_BOUNCE_ARGS)
+    caml_fatal_error("c_of_ocaml: too many arguments");
+  camlc_bounce_f = f;
+  camlc_bounce_n = n;
+  return CAMLC_BOUNCE;
+}
+
+static inline value camlc_continue(value k, value v)
+{
+  return ((value (*)(value, value))Field(k, 0))(v, k);
+}
+
+/* A CPS call from the runtime: [args] are the [n] arguments then the
+   continuation */
+static value camlc_cps_call(value f, int n, value *args)
+{
+  if (--camlc_cps_depth < 0) {
+    for (int i = 0; i <= n; i++) camlc_bounce_args[i] = args[i];
+    return camlc_cps_bounce(f, n + 1);
+  }
+  return camlc_applyv_cps(f, n, args);
+}
+
+/* Static closures of arity 1, without CPS version */
+#define CAMLC_STATIC_CLOSURE(name, code)                                    \
+  static value code(value, value);                                         \
+  static value name[4] = { Make_header(3, Closure_tag, CAMLC_STATIC_COLOR), \
+                           (value)&code, Make_closinfo(1, 3), 0 }
+#define Static_closure(name) ((value)&name[1])
+
+CAMLC_STATIC_CLOSURE(camlc_identity_closure, camlc_identity_code);
+CAMLC_STATIC_CLOSURE(camlc_raise_closure, camlc_raise_code);
+CAMLC_STATIC_CLOSURE(camlc_value_handler_closure, camlc_value_handler_code);
+CAMLC_STATIC_CLOSURE(camlc_exn_handler_closure, camlc_exn_handler_code);
+static value camlc_cps_rest_code(value, value);
+
+static value camlc_identity_code(value x, value env)
+{
+  (void)env;
+  return x;
+}
+
+static value camlc_raise_code(value exn, value env)
+{
+  (void)env;
+  return Make_exception_result(exn);
+}
+
+/* Over-application: the closure, of code [camlc_cps_rest_code], holds the
+   continuation then the arguments left */
+static value camlc_cps_rest_code(value v, value env)
+{
+  mlsize_t m = Wosize_val(env) - 4;
+  value *a = camlc_sp - (m + 1), r;
+  if (CAMLC_UNLIKELY(a < camlc_stack_limit)) return camlc_stack_overflow();
+  camlc_sp = a;
+  for (mlsize_t i = 0; i < m; i++) a[i] = Field(env, 4 + i);
+  a[m] = Field(env, 3);
+  r = camlc_applyv_cps(v, m, a);
+  camlc_sp = a + m + 1;
+  return r;
+}
+
+value camlc_applyv_cps(value f, int n, value *args)
+{
+  /* fp[0]: the function, fp[1 .. n]: the arguments, fp[n + 1]: the
+     continuation */
+  value *fp = camlc_sp - (n + 2);
+  value r;
+  int i = 0;
+  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
+  camlc_sp = fp;
+  fp[0] = f;
+  for (int j = 0; j <= n; j++) fp[1 + j] = args[j];
+  while (1) {
+    int arity = Arity_closinfo(Closinfo_val(fp[0]));
+    int remaining = n - i;
+    if (Field(fp[0], 2) != 0) {
+      /* A function with a CPS version */
+      if (arity == remaining) {
+        r = camlc_call_exact_cps(fp[0], arity, fp + 1 + i);
+      } else if (arity > remaining) {
+        r = camlc_make_pap(fp[0], remaining, fp + 1 + i);
+        if (!Is_exception_result(r)) r = camlc_continue(fp[1 + n], r);
+      } else {
+        /* Apply the result to the arguments left, then continue */
+        mlsize_t m = remaining - arity;
+        value *a = camlc_sp - (arity + 1);
+        if (CAMLC_UNLIKELY(a < camlc_stack_limit)) {
+          r = camlc_stack_overflow();
+          break;
+        }
+        camlc_sp = a;
+        for (int j = 0; j <= arity; j++) a[j] = Val_unit;
+        r = caml_alloc(4 + m, Closure_tag);
+        Field(r, 0) = (value)&camlc_cps_rest_code;
+        Field(r, 1) = Make_closinfo(1, 3);
+        Field(r, 2) = 0;
+        caml_modify(&Field(r, 3), fp[1 + n]);
+        for (mlsize_t j = 0; j < m; j++)
+          caml_modify(&Field(r, 4 + j), fp[1 + i + arity + j]);
+        for (int j = 0; j < arity; j++) a[j] = fp[1 + i + j];
+        a[arity] = r;
+        r = camlc_call_exact_cps(fp[0], arity, a);
+      }
+      break;
+    }
+    /* A function without CPS version, which cannot perform an effect:
+       it is applied in direct style */
+    if (arity >= remaining) {
+      r = camlc_applyv(fp[0], remaining, fp + 1 + i);
+      if (!Is_exception_result(r)) r = camlc_continue(fp[1 + n], r);
+      break;
+    }
+    r = camlc_call_exact(fp[0], arity, fp + 1 + i);
+    if (Is_exception_result(r)) break;
+    fp[0] = r;
+    i += arity;
+  }
+  camlc_sp = fp + n + 2;
+  return r;
+}
+
+/* Run CPS code until it returns: perform the calls which bounce, and pass
+   the exceptions to the handlers of the current fiber */
+static value camlc_cps_run(value res)
+{
+  while (1) {
+    if (res == CAMLC_BOUNCE) {
+      int n = camlc_bounce_n;
+      value *a = camlc_sp - (n + 1);
+      camlc_bounce_n = 0;
+      if (CAMLC_UNLIKELY(a < camlc_stack_limit)) {
+        res = camlc_stack_overflow();
+        continue;
+      }
+      camlc_sp = a;
+      a[0] = camlc_bounce_f;
+      camlc_bounce_f = Val_unit;
+      for (int i = 0; i < n; i++) a[1 + i] = camlc_bounce_args[i];
+      camlc_cps_depth = CAMLC_CPS_DEPTH;
+      res = camlc_applyv_cps(a[0], n - 1, a + 1);
+      camlc_sp = a + n + 1;
+    } else if (Is_exception_result(res)) {
+      value l = Field(camlc_fiber, Fiber_exns), h;
+      if (l == Val_unit) return res;
+      caml_modify(&Field(camlc_fiber, Fiber_exns), Field(l, 1));
+      h = Field(l, 0);
+      camlc_cps_depth = CAMLC_CPS_DEPTH;
+      res = camlc_continue(h, Extract_exception(res));
+    } else
+      return res;
+  }
+}
+
+value camlc_push_trap(value h)
+{
+  CAMLparam1(h);
+  value l = caml_alloc_small(2, 0);
+  Field(l, 0) = h;
+  Field(l, 1) = Field(camlc_fiber, Fiber_exns);
+  caml_modify(&Field(camlc_fiber, Fiber_exns), l);
+  CAMLreturn(Val_unit);
+}
+
+value camlc_pop_trap(void)
+{
+  value l = Field(camlc_fiber, Fiber_exns);
+  if (l == Val_unit) return Static_closure(camlc_raise_closure);
+  caml_modify(&Field(camlc_fiber, Fiber_exns), Field(l, 1));
+  return Field(l, 0);
+}
+
+/* Return to the parent fiber, and return its continuation */
+static value camlc_pop_fiber(void)
+{
+  value f = Field(camlc_fiber, Fiber_parent);
+  caml_modify(&Field(camlc_fiber, Fiber_parent), Val_unit);
+  camlc_fiber = f;
+  return Field(f, Fiber_cont);
+}
+
+/* The fiber is over: call its handler of values or of exceptions in the
+   parent fiber */
+static value camlc_call_handler(int handler, value x)
+{
+  value args[2];
+  value f = Field(camlc_fiber, handler);
+  args[0] = x;
+  args[1] = camlc_pop_fiber();
+  return camlc_cps_call(f, 1, args);
+}
+
+static value camlc_value_handler_code(value x, value env)
+{
+  (void)env;
+  return camlc_call_handler(Fiber_hval, x);
+}
+
+static value camlc_exn_handler_code(value x, value env)
+{
+  (void)env;
+  return camlc_call_handler(Fiber_hexn, x);
+}
+
+value camlc_alloc_stack(value hval, value hexn, value heff)
+{
+  CAMLparam3(hval, hexn, heff);
+  CAMLlocal1(exns);
+  value r;
+  exns = caml_alloc_small(2, 0);
+  Field(exns, 0) = Static_closure(camlc_exn_handler_closure);
+  Field(exns, 1) = Val_unit;
+  r = caml_alloc_small(6, 0);
+  Field(r, Fiber_hval) = hval;
+  Field(r, Fiber_hexn) = hexn;
+  Field(r, Fiber_heff) = heff;
+  Field(r, Fiber_cont) = Static_closure(camlc_value_handler_closure);
+  Field(r, Fiber_exns) = exns;
+  Field(r, Fiber_parent) = Val_unit;
+  CAMLreturn(r);
+}
+
+extern value caml_fresh_oo_id(value);
+
+value camlc_raise_unhandled(value eff)
+{
+  CAMLparam1(eff);
+  CAMLlocal1(exn);
+  const value *u = caml_named_value("Effect.Unhandled");
+  if (u == NULL) {
+    /* Module Effect not linked: a constant exception of the same name */
+    exn = caml_copy_string("Effect.Unhandled");
+    exn = caml_alloc_2(Object_tag, exn, caml_fresh_oo_id(Val_unit));
+  } else {
+    exn = caml_alloc_small(2, 0);
+    Field(exn, 0) = *u;
+    Field(exn, 1) = eff;
+  }
+  CAMLreturnT(value, Make_exception_result(exn));
+}
+
+/* Resume the stack of fibers from [stack] to [last] (if not unit) with
+   [k] as the continuation of the current fiber, and return the
+   continuation of [stack] */
+value camlc_resume_stack(value stack, value last, value k)
+{
+  if (Is_long(stack)) {
+    const value *e = caml_named_value("Effect.Continuation_already_resumed");
+    if (e == NULL) caml_fatal_error("c_of_ocaml: continuation already resumed");
+    return Make_exception_result(*e);
+  }
+  if (Is_long(last)) {
+    /* Before OCaml 5.2, the last fiber is not known */
+    last = stack;
+    while (Field(last, Fiber_parent) != Val_unit)
+      last = Field(last, Fiber_parent);
+  }
+  caml_modify(&Field(camlc_fiber, Fiber_cont), k);
+  caml_modify(&Field(last, Fiber_parent), camlc_fiber);
+  camlc_fiber = stack;
+  return Field(stack, Fiber_cont);
+}
+
+value camlc_perform_effect(value eff, value k)
+{
+  CAMLparam2(eff, k);
+  CAMLlocal1(cont);
+  value args[4], last;
+  int n;
+  if (Field(camlc_fiber, Fiber_parent) == Val_unit)
+    CAMLreturnT(value, camlc_raise_unhandled(eff));
+  caml_modify(&Field(camlc_fiber, Fiber_cont), k);
+  cont = caml_alloc_small(2, 0);
+  Field(cont, 0) = camlc_fiber;
+  Field(cont, 1) = camlc_fiber;
+  /* Run the effect handler in the parent fiber */
+  last = camlc_fiber;
+  args[0] = eff;
+  args[1] = cont;
+#if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 6
+  n = 2;
+#else
+  args[2] = last;
+  n = 3;
+#endif
+  {
+    value h = Field(last, Fiber_heff);
+    args[n] = camlc_pop_fiber();
+    CAMLdrop;
+    return camlc_cps_call(h, n, args);
+  }
+}
+
+value camlc_reperform_effect(value eff, value cont, value last, value k)
+{
+  value args[4], fiber, h;
+  int n;
+#if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 6
+  last = Field(cont, 1);
+#endif
+  if (Field(camlc_fiber, Fiber_parent) == Val_unit) {
+    /* Raise [Effect.Unhandled] where the effect was performed */
+    CAMLparam1(eff);
+    value r = camlc_resume_stack(camlc_continuation_use_noexc(cont), last, k);
+    if (Is_exception_result(r)) CAMLreturnT(value, r);
+    CAMLreturnT(value, camlc_raise_unhandled(eff));
+  }
+  fiber = camlc_fiber;
+  h = Field(fiber, Fiber_heff);
+  caml_modify(&Field(fiber, Fiber_cont), k);
+  caml_modify(&Field(last, Fiber_parent), fiber);
+  caml_modify(&Field(cont, 1), fiber);
+  args[0] = eff;
+  args[1] = cont;
+#if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 6
+  n = 2;
+#else
+  args[2] = fiber;
+  n = 3;
+#endif
+  args[n] = camlc_pop_fiber();
+  return camlc_cps_call(h, n, args);
+}
+
+value camlc_continuation_use_noexc(value cont)
+{
+  value stack = Field(cont, 0);
+  caml_modify(&Field(cont, 0), Val_unit);
+  return stack;
+}
+
+value camlc_continuation_use_and_update_handler_noexc(value cont, value hval,
+                                                      value hexn, value heff)
+{
+  value stack = camlc_continuation_use_noexc(cont), last;
+  if (Is_long(stack)) return stack;
+  last = Field(cont, 1);
+  caml_modify(&Field(last, Fiber_hval), hval);
+  caml_modify(&Field(last, Fiber_hexn), hexn);
+  caml_modify(&Field(last, Fiber_heff), heff);
+  return stack;
+}
+
+/* From direct-style code: run [f arg] on the stack of fibers from [stack]
+   to [last], until it returns */
+value camlc_resume(value f, value arg, value stack, value last)
+{
+  value *fp = camlc_sp - 5, r;
+  int depth = camlc_cps_depth;
+  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
+  camlc_sp = fp;
+  fp[0] = f;
+  fp[1] = arg;
+  fp[2] = stack;
+  fp[3] = last;
+  fp[4] = camlc_fiber;
+  /* A fresh fiber, so that effects do not go to the handlers of the
+     direct-style code */
+  r = caml_alloc_small(6, 0);
+  for (int i = 0; i < 6; i++) Field(r, i) = Val_unit;
+  camlc_fiber = r;
+  r = camlc_resume_stack(fp[2], fp[3], Static_closure(camlc_identity_closure));
+  if (!Is_exception_result(r)) {
+    value a[2];
+    a[0] = fp[1];
+    a[1] = r;
+    camlc_cps_depth = CAMLC_CPS_DEPTH;
+    r = camlc_cps_run(camlc_applyv_cps(fp[0], 1, a));
+  }
+  camlc_fiber = fp[4];
+  camlc_cps_depth = depth;
+  camlc_sp = fp + 5;
+  return r;
+}
+
+#else
+
+value camlc_cps_bounce(value f, int n)
+{
+  (void)f; (void)n;
+  caml_fatal_error("c_of_ocaml: effects are not supported");
+}
+
+value camlc_applyv_cps(value f, int n, value *args)
+{
+  (void)f; (void)n; (void)args;
+  caml_fatal_error("c_of_ocaml: effects are not supported");
+}
+
+#endif
 
 /****************************************************************/
 /* Callbacks from C (replaces the bytecode runtime's callback.c) */

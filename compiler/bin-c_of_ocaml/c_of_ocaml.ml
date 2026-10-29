@@ -169,7 +169,23 @@ let register_primitives () =
   List.iter ~f:(fun name -> Primitive.register name `Pure None None) pure_primitives;
   List.iter ~f:(fun name -> Primitive.register name `Mutable None None) mutable_primitives
 
-let compile ~profile ~debug_info ~input_file ~output_file =
+(* Whether the program uses effect handlers *)
+let uses_effects (p : Code.program) =
+  Code.Addr.Map.fold
+    (fun _ (block : Code.block) acc ->
+      acc
+      || List.exists block.body ~f:(fun i ->
+          match i with
+          | Code.Let (_, Prim (Extern (name, _), _)) -> (
+              match name with
+              | "%perform" | "%reperform" | "%resume" | "%with_stack" | "%with_stack_bind"
+                -> true
+              | _ -> false)
+          | _ -> false))
+    p.blocks
+    false
+
+let compile ~profile ~effects ~debug_info ~input_file ~output_file =
   let ic = open_in_bin input_file in
   (match Parse_bytecode.from_channel ic with
   | `Exe -> ()
@@ -186,6 +202,15 @@ let compile ~profile ~debug_info ~input_file ~output_file =
   in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
+  Config.set_effects_backend
+    (match effects with
+    | Some e -> e
+    | None ->
+        if
+          Ocaml_version.compare Ocaml_version.current [ 5; 0 ] >= 0
+          && uses_effects one.code
+        then `Double_translation
+        else `Disabled);
   let optimized, global_flow_data =
     Driver.optimize_for_wasm ~profile ~shapes:false one.code
   in
@@ -197,6 +222,8 @@ let compile ~profile ~debug_info ~input_file ~output_file =
       ~global_flow_data
       ~deadcode_sentinel:optimized.deadcode_sentinel
       ~debug_info
+      ~in_cps:optimized.in_cps
+      ~trampolined_calls:optimized.trampolined_calls
       closures
   in
   if times () then Format.eprintf "  code generation: %a@." Timer.print t;
@@ -210,6 +237,7 @@ let () =
   let output_file = ref None in
   let profile = ref Profile.O1 in
   let debug_info = ref false in
+  let effects = ref None in
   let spec =
     [ "-o", Arg.String (fun s -> output_file := Some s), "FILE Write the C code to FILE"
     ; ( "--opt"
@@ -225,6 +253,17 @@ let () =
     ; ( "--debug-info"
       , Arg.Set debug_info
       , " Record backtraces with the locations of the debug events (ocamlc -g)" )
+    ; ( "--effects"
+      , Arg.Symbol
+          ( [ "disabled"; "double-translation" ]
+          , fun s ->
+              effects :=
+                Some
+                  (match s with
+                  | "disabled" -> `Disabled
+                  | _ -> `Double_translation) )
+      , " Support of effect handlers (default: double-translation if the program \
+         performs effects)" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
     ; "--enable", Arg.String Config.Flag.enable, "OPT Enable the option OPT"
     ; "--disable", Arg.String Config.Flag.disable, "OPT Disable the option OPT"
@@ -235,10 +274,15 @@ let () =
   | None, None, Some dir -> write_runtime_files dir
   | Some input_file, Some output_file, None -> (
       Config.set_target `C;
-      Config.set_effects_backend `Disabled;
       register_primitives ();
       if !debug_info then Config.Flag.enable "debuginfo";
-      try compile ~profile:!profile ~debug_info:!debug_info ~input_file ~output_file
+      try
+        compile
+          ~profile:!profile
+          ~effects:!effects
+          ~debug_info:!debug_info
+          ~input_file
+          ~output_file
       with Failure msg ->
         prerr_endline msg;
         exit 1)

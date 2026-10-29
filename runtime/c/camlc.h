@@ -98,6 +98,45 @@ extern const int camlc_max_arity;
    arguments [args] */
 value camlc_make_pap(value f, int n, value *args);
 
+/* Effect handlers (OCaml 5, with double translation: c_of_ocaml
+   --effects=double-translation).
+
+   The functions which may perform an effect have a CPS version, taking a
+   continuation as last argument, whose code pointer follows the closure
+   info of the function in its closure (0 for the functions without CPS
+   version). The CPS code runs on fibers (see camlc_runtime.c), when
+   [caml_resume] runs a computation under an effect handler.
+
+   CPS calls are tail calls, which [musttail] cannot always make. Those
+   which are not tail calls decrement [camlc_cps_depth]: when it gets
+   negative, the call is returned to the trampoline ([camlc_cps_bounce],
+   the arguments being in [camlc_bounce_args]), which performs it with a
+   shorter stack. An exception result returned to the trampoline goes to
+   the innermost handler of the current fiber. */
+extern const int camlc_double_translation;
+extern int camlc_cps_depth;
+extern value camlc_bounce_args[];
+value camlc_cps_bounce(value f, int n);
+/* Generic CPS application: apply [f] to the [n] arguments [args], then
+   pass the result to the continuation [args[n]] */
+value camlc_applyv_cps(value f, int n, value *args);
+/* Defined by the generated code: call the CPS version of [f], of arity
+   [n], with [args] (the arguments then the continuation) */
+value camlc_call_exact_cps(value f, int n, value *args);
+extern const value camlc_pap_cps_code[];
+
+value camlc_perform_effect(value eff, value k);
+value camlc_reperform_effect(value eff, value cont, value last, value k);
+value camlc_resume_stack(value stack, value last, value k);
+value camlc_resume(value f, value arg, value stack, value last);
+value camlc_raise_unhandled(value eff);
+value camlc_alloc_stack(value hval, value hexn, value heff);
+value camlc_push_trap(value h);
+value camlc_pop_trap(void);
+value camlc_continuation_use_noexc(value cont);
+value camlc_continuation_use_and_update_handler_noexc(value cont, value hval,
+                                                      value hexn, value heff);
+
 /* Wrappers for C primitives, which may raise with longjmp */
 typedef value (*camlc_prim0)(void);
 typedef value (*camlc_prim1)(value);
