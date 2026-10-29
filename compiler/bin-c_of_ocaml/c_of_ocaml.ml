@@ -187,12 +187,18 @@ let compile ~profile ~input_file ~output_file =
   in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
-  let optimized, (_, global_flow_info) =
+  let optimized, global_flow_data =
     Driver.optimize_for_wasm ~profile ~shapes:false one.code
   in
   let t = Timer.make () in
   let p, closures = Closure_conversion.f optimized.program in
-  let c = Generate.f p ~global_flow_info closures in
+  let c =
+    Generate.f
+      p
+      ~global_flow_data
+      ~deadcode_sentinel:optimized.deadcode_sentinel
+      closures
+  in
   if times () then Format.eprintf "  code generation: %a@." Timer.print t;
   let oc = open_out_bin output_file in
   output_string oc c;

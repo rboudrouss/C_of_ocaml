@@ -158,12 +158,31 @@ static inline value camlc_int_mod(value a, value b)
 
 /* Floats */
 
-static inline value camlc_float_compare(value a, value b)
+static inline value camlc_float_compare_unboxed(double x, double y)
 {
-  double x = Double_val(a), y = Double_val(b);
   /* As caml_float_compare: nan is equal to itself and less than any
      other float */
   return Val_int((x > y) - (x < y) + (x == x) - (y == y));
+}
+
+static inline double camlc_double_of_bits(int64_t i)
+{
+  union { int64_t i; double d; } u;
+  u.i = i;
+  return u.d;
+}
+
+static inline int64_t camlc_bits_of_double(double d)
+{
+  union { int64_t i; double d; } u;
+  u.d = d;
+  return u.i;
+}
+
+static inline value camlc_store_double_flat(value a, value i, double d)
+{
+  Store_double_flat_field(a, Long_val(i), d);
+  return Val_unit;
 }
 
 /* Write barrier: no work for a block of the minor heap */
