@@ -63,11 +63,14 @@
 #pragma clang diagnostic pop
 
 /* Tail calls, with the tail call extension of WebAssembly (-mtail-call):
-   the caller and the callee must have the same signature */
+   the caller and the callee must have the same signature. Without it
+   (asyncify does not support it), tail calls are plain calls. */
 #ifdef __wasm_tail_call__
 #define CAMLC_MUSTTAIL __attribute__((musttail))
+#define CAMLC_TAIL_CALLS 1
 #else
 #define CAMLC_MUSTTAIL
+#define CAMLC_TAIL_CALLS 0
 #endif
 
 #define CAMLC_LIKELY(x) __builtin_expect(!!(x), 1)

@@ -1369,7 +1369,8 @@ let boxing_prelude ctx traps x ~f ~args ~exact =
    the call, which is a tail call when the callee has the signature of the
    function (as required by [musttail]).
 
-   A CPS call which may bounce, unless it is a tail call, first decrements
+   A CPS call which may bounce, unless it is a tail call (with
+   [CAMLC_TAIL_CALLS]), first decrements
    [camlc_cps_depth]: when it gets negative, the call is returned to the
    trampoline ([camlc_cps_bounce]), which performs it on a shorter stack. *)
 let translate_tail_call ctx x ~f ~args ~exact =
@@ -1398,7 +1399,6 @@ let translate_tail_call ctx x ~f ~args ~exact =
     if
       is_cps_call ctx x
       && Var.Set.mem x ctx.out.trampolined
-      && (not musttail)
       && List.for_all reprs ~f:(fun r -> repr_equal r Value)
     then
       (* The closure, then the arguments *)
@@ -1409,8 +1409,10 @@ let translate_tail_call ctx x ~f ~args ~exact =
         | Unknown -> 0, List.init ~len:n ~f:(fun i -> i + 1)
       in
       Printf.sprintf
-        " if (CAMLC_UNLIKELY(--camlc_cps_depth < 0)) { %s return camlc_cps_bounce(%s, \
+        " if (%sCAMLC_UNLIKELY(--camlc_cps_depth < 0)) { %s return camlc_cps_bounce(%s, \
          %d); }"
+        (* No need to bounce for a tail call *)
+        (if musttail then "!CAMLC_TAIL_CALLS && " else "")
         (String.concat
            ~sep:" "
            (List.mapi arguments ~f:(fun i j ->
