@@ -116,7 +116,8 @@ type output =
   ; global_data_size : int
   ; fun_names : string Var.Hashtbl.t  (** C name of each function *)
   ; types : Typing.t
-  ; fun_reprs : repr list Var.Hashtbl.t  (** The representation of the parameters of each function *)
+  ; fun_reprs : repr list Var.Hashtbl.t
+        (** The representation of the parameters of each function *)
   ; debug_info : bool  (** Record backtraces *)
   ; locations : string String.Hashtbl.t  (** The C names of the locations *)
   ; location_defs : Buffer.t
@@ -131,7 +132,9 @@ let location out (pi : Parse_info.t) ~fun_name ~is_raise =
   in
   (* As in native code: the module, then the function *)
   let defname =
-    let m = String.capitalize_ascii (Filename.remove_extension (Filename.basename file)) in
+    let m =
+      String.capitalize_ascii (Filename.remove_extension (Filename.basename file))
+    in
     match fun_name with
     | Some f -> m ^ "." ^ f
     | None -> m
@@ -180,7 +183,8 @@ let fun_params arity =
 
 (* Static data *)
 
-let header ~wosize ~tag = Printf.sprintf "Make_header(%d, %d, CAMLC_STATIC_COLOR)" wosize tag
+let header ~wosize ~tag =
+  Printf.sprintf "Make_header(%d, %d, CAMLC_STATIC_COLOR)" wosize tag
 
 let words_of_bytes s =
   (* Little-endian words of the string [s] followed by the padding of
@@ -245,8 +249,10 @@ and block_constant out c =
         out
         ~tag:Obj.double_array_tag
         (List.concat_map (Array.to_list a) ~f:int64_words)
-  | Int64 i -> emit_block out ~tag:Obj.custom_tag ("(value)&caml_int64_ops" :: int64_words i)
-  | Int32 i -> emit_block out ~tag:Obj.custom_tag [ "(value)&caml_int32_ops"; int32_word i ]
+  | Int64 i ->
+      emit_block out ~tag:Obj.custom_tag ("(value)&caml_int64_ops" :: int64_words i)
+  | Int32 i ->
+      emit_block out ~tag:Obj.custom_tag [ "(value)&caml_int32_ops"; int32_word i ]
   | NativeInt i ->
       emit_block out ~tag:Obj.custom_tag [ "(value)&caml_nativeint_ops"; int32_word i ]
   | Tuple (tag, a, _, _) ->
@@ -304,7 +310,11 @@ let noraise_primitives =
     ]
 
 let float_binops =
-  [ "caml_add_float", "+"; "caml_sub_float", "-"; "caml_mul_float", "*"; "caml_div_float", "/" ]
+  [ "caml_add_float", "+"
+  ; "caml_sub_float", "-"
+  ; "caml_mul_float", "*"
+  ; "caml_div_float", "/"
+  ]
 
 let float_comparisons =
   [ "caml_eq_float", "=="
@@ -332,7 +342,8 @@ let float_functions =
   ]
 
 (* The boxed integers, with the C type of their unboxed representation *)
-let boxed_ints = [ "int64", Unboxed_int64; "int32", Unboxed_int32; "nativeint", Unboxed_nativeint ]
+let boxed_ints =
+  [ "int64", Unboxed_int64; "int32", Unboxed_int32; "nativeint", Unboxed_nativeint ]
 
 (* Arithmetic on boxed integers, computed on unsigned integers to wrap
    around *)
@@ -437,8 +448,9 @@ let primitive out name (args : parg list) =
   let boxed_int_op =
     List.find_map boxed_ints ~f:(fun (t, r) ->
         let p = "caml_" ^ t ^ "_" in
-        if String.length name > String.length p
-           && String.equal (String.sub name ~pos:0 ~len:(String.length p)) p
+        if
+          String.length name > String.length p
+          && String.equal (String.sub name ~pos:0 ~len:(String.length p)) p
         then
           Some
             ( r
@@ -450,18 +462,24 @@ let primitive out name (args : parg list) =
   in
   let pure (r, e) = Plain (r, e, false) in
   let boxed_int_of name =
-    List.find_map boxed_ints ~f:(fun (t, r) -> if String.equal t name then Some r else None)
+    List.find_map boxed_ints ~f:(fun (t, r) ->
+        if String.equal t name then Some r else None)
   in
   match lookup float_binops, lookup float_comparisons, lookup float_functions, n with
-  | Some op, _, _, 2 -> pure (Double, Printf.sprintf "(%s %s %s)" (arg Double 0) op (arg Double 1))
+  | Some op, _, _, 2 ->
+      pure (Double, Printf.sprintf "(%s %s %s)" (arg Double 0) op (arg Double 1))
   | _, Some op, _, 2 ->
       pure (Value, Printf.sprintf "Val_bool(%s %s %s)" (arg Double 0) op (arg Double 1))
   | _, _, Some f, 1 -> pure (Double, Printf.sprintf "%s(%s)" f (arg Double 0))
   | _ -> (
       match specialized_comparison name args, boxed_int_op with
-      | Some ("compare", `Int), _ -> pure (Value, c_call "Camlc_int_compare" [ value 0; value 1 ])
+      | Some ("compare", `Int), _ ->
+          pure (Value, c_call "Camlc_int_compare" [ value 0; value 1 ])
       | Some (op, `Int), _ ->
-          pure (Value, Printf.sprintf "Val_bool((intnat)%s %s (intnat)%s)" (value 0) op (value 1))
+          pure
+            ( Value
+            , Printf.sprintf "Val_bool((intnat)%s %s (intnat)%s)" (value 0) op (value 1)
+            )
       | Some ("compare", `Number Double), _ ->
           pure (Value, c_call "camlc_float_compare_unboxed" [ arg Double 0; arg Double 1 ])
       | Some ("compare", `Number r), _ ->
@@ -475,7 +493,8 @@ let primitive out name (args : parg list) =
                 (arg r 1) )
       | Some (op, `Number r), _ ->
           pure (Value, Printf.sprintf "Val_bool(%s %s %s)" (arg r 0) op (arg r 1))
-      | None, Some (r, op) when n = 2 && List.exists boxed_int_binops ~f:(fun (o, _) -> String.equal o op) ->
+      | None, Some (r, op)
+        when n = 2 && List.exists boxed_int_binops ~f:(fun (o, _) -> String.equal o op) ->
           let u = unsigned_type r in
           pure
             ( r
@@ -490,7 +509,8 @@ let primitive out name (args : parg list) =
                 u
                 (arg r 1) )
       | None, Some (r, "neg") when n = 1 ->
-          pure (r, Printf.sprintf "(%s)(0 - (%s)%s)" (c_type r) (unsigned_type r) (arg r 0))
+          pure
+            (r, Printf.sprintf "(%s)(0 - (%s)%s)" (c_type r) (unsigned_type r) (arg r 0))
       | None, Some (r, "shift_left") when n = 2 ->
           pure
             ( r
@@ -502,7 +522,10 @@ let primitive out name (args : parg list) =
                 (value 1)
                 (bits r - 1) )
       | None, Some (r, "shift_right") when n = 2 ->
-          pure (r, Printf.sprintf "(%s >> (Long_val(%s) & %d))" (arg r 0) (value 1) (bits r - 1))
+          pure
+            ( r
+            , Printf.sprintf "(%s >> (Long_val(%s) & %d))" (arg r 0) (value 1) (bits r - 1)
+            )
       | None, Some (r, "shift_right_unsigned") when n = 2 ->
           pure
             ( r
@@ -533,10 +556,12 @@ let primitive out name (args : parg list) =
       | None, Some (r, conv)
         when n = 1
              && String.length conv > 3
-             && Option.is_some (boxed_int_of (String.sub conv ~pos:3 ~len:(String.length conv - 3)))
+             && Option.is_some
+                  (boxed_int_of (String.sub conv ~pos:3 ~len:(String.length conv - 3)))
         -> (
           let other =
-            Option.get (boxed_int_of (String.sub conv ~pos:3 ~len:(String.length conv - 3)))
+            Option.get
+              (boxed_int_of (String.sub conv ~pos:3 ~len:(String.length conv - 3)))
           in
           match String.sub conv ~pos:0 ~len:3 with
           | "of_" -> pure (r, Printf.sprintf "(%s)%s" (c_type r) (arg other 0))
@@ -547,89 +572,116 @@ let primitive out name (args : parg list) =
       | None, Some (Unboxed_int64, "float_of_bits") when n = 1 ->
           pure (Double, Printf.sprintf "camlc_double_of_bits(%s)" (arg Unboxed_int64 0))
       | _ -> (
-  match name, n with
-  | "caml_neg_float", 1 -> pure (Double, Printf.sprintf "(-%s)" (arg Double 0))
-  | "caml_float_of_int", 1 -> pure (Double, Printf.sprintf "(double)Long_val(%s)" (value 0))
-  | "caml_int_of_float", 1 -> pure (Value, Printf.sprintf "Val_long((intnat)%s)" (arg Double 0))
-  | "caml_float_compare", 2 ->
-      pure (Value, c_call "camlc_float_compare_unboxed" [ arg Double 0; arg Double 1 ])
-  | "caml_floatarray_unsafe_get", 2 ->
-      pure (Double, Printf.sprintf "Double_flat_field(%s, Long_val(%s))" (value 0) (value 1))
-  | "caml_floatarray_unsafe_set", 3 ->
-      pure (Value, c_call "camlc_store_double_flat" [ value 0; value 1; arg Double 2 ])
-  | "%identity", 1 -> pure (Value, value 0)
-  | ("caml_bytes_of_string" | "caml_string_of_bytes"), 1 -> pure (Value, value 0)
-  | _ -> (
-  let args = List.map args ~f:(fun a -> a.get Value) in
-  let arg i = List.nth args i in
-  let plain e = Plain (Value, e, not (StringSet.mem name nogc_primitives)) in
-  match name, n with
-  | "%int_add", 2 -> plain (c_call "Camlc_int_add" args)
-  | "%int_sub", 2 -> plain (c_call "Camlc_int_sub" args)
-  | ("%int_mul" | "%direct_int_mul"), 2 -> plain (c_call "Camlc_int_mul" args)
-  | "%int_neg", 1 -> plain (c_call "Camlc_int_neg" args)
-  | "%int_and", 2 -> plain (c_call "Camlc_int_and" args)
-  | "%int_or", 2 -> plain (c_call "Camlc_int_or" args)
-  | "%int_xor", 2 -> plain (c_call "Camlc_int_xor" args)
-  | "%int_lsl", 2 -> plain (c_call "Camlc_int_lsl" args)
-  | "%int_lsr", 2 -> plain (c_call "Camlc_int_lsr" args)
-  | "%int_asr", 2 -> plain (c_call "Camlc_int_asr" args)
-  | "%direct_int_div", 2 -> plain (c_call "Camlc_int_div_unsafe" args)
-  | "%direct_int_mod", 2 -> plain (c_call "Camlc_int_mod_unsafe" args)
-  | "%int_div", 2 -> Checked (c_call "camlc_int_div" args)
-  | "%int_mod", 2 -> Checked (c_call "camlc_int_mod" args)
-  | "caml_int_compare", 2 -> plain (c_call "Camlc_int_compare" args)
-  | "%direct_obj_tag", 1 -> plain (Printf.sprintf "Val_long(Tag_val(%s))" (arg 0))
-  | ("caml_ml_string_length" | "caml_ml_bytes_length"), 1 ->
-      plain (Printf.sprintf "Val_long(caml_string_length(%s))" (arg 0))
-  | ("caml_string_unsafe_get" | "caml_bytes_unsafe_get"), 2 ->
-      plain (Printf.sprintf "Val_int(Byte_u(%s, Long_val(%s)))" (arg 0) (arg 1))
-  | ("caml_string_unsafe_set" | "caml_bytes_unsafe_set"), 3 ->
-      plain
-        (Printf.sprintf
-           "(Byte_u(%s, Long_val(%s)) = (unsigned char)Long_val(%s), Val_unit)"
-           (arg 0)
-           (arg 1)
-           (arg 2))
-  | ("caml_string_get" | "caml_bytes_get"), 2 -> Checked (c_call "camlc_string_get" args)
-  | ("caml_string_set" | "caml_bytes_set"), 3 -> Checked (c_call "camlc_bytes_set" args)
-  | "caml_check_bound", 2 -> Checked (c_call "camlc_check_bound" args)
-  | "caml_check_bound_float", 2 -> Checked (c_call "camlc_check_bound_float" args)
-  | "caml_check_bound_gen", 2 -> Checked (c_call "camlc_check_bound_gen" args)
-  | "caml_array_unsafe_get", 2 -> plain (c_call "camlc_array_unsafe_get" args)
-  | "caml_array_unsafe_set_addr", 3 ->
-      plain
-        (Printf.sprintf
-           "(camlc_modify(&Field(%s, Long_val(%s)), %s), Val_unit)"
-           (arg 0)
-           (arg 1)
-           (arg 2))
-  | "caml_string_concat", 2 -> plain (c_call "camlc_string_concat" args)
-  | ("caml_register_global" | "caml_register_global_predef"), _ -> plain "Val_unit"
-  | "caml_register_global_by_index", 2 ->
-      plain
-        (Printf.sprintf
-           "(caml_modify(&Field(caml_global_data, Long_val(%s)), %s), Val_unit)"
-           (arg 1)
-           (arg 0))
-  | "caml_get_global_data", 0 -> plain "caml_global_data"
-  | "caml_oo_cache_id", 0 -> plain "camlc_oo_cache_id()"
-  | "caml_get_cached_method", 3 -> plain (c_call "camlc_get_cached_method" args)
-  | ("%perform" | "%reperform" | "%resume" | "%with_stack" | "%with_stack_bind"), _ ->
-      Checked "camlc_raise_unhandled_effect()"
-  | _ ->
-      if String.length name > 0 && Char.equal name.[0] '%'
-      then failwith (Printf.sprintf "c_of_ocaml: unsupported primitive %s" name);
-      (match String.Hashtbl.find_opt out.primitives name with
-      | Some n' when n <> n' ->
-          failwith
-            (Printf.sprintf "c_of_ocaml: primitive %s called with %d and %d arguments" name n n')
-      | _ -> String.Hashtbl.replace out.primitives name n);
-      if StringSet.mem name noraise_primitives && n <= 5
-      then plain (c_call name args)
-      else if n <= 5
-      then Checked (c_call (Printf.sprintf "camlc_ccall%d" n) (name :: args))
-      else Ccallv)))
+          match name, n with
+          | "caml_neg_float", 1 -> pure (Double, Printf.sprintf "(-%s)" (arg Double 0))
+          | "caml_float_of_int", 1 ->
+              pure (Double, Printf.sprintf "(double)Long_val(%s)" (value 0))
+          | "caml_int_of_float", 1 ->
+              pure (Value, Printf.sprintf "Val_long((intnat)%s)" (arg Double 0))
+          | "caml_float_compare", 2 ->
+              pure
+                ( Value
+                , c_call "camlc_float_compare_unboxed" [ arg Double 0; arg Double 1 ] )
+          | "caml_floatarray_unsafe_get", 2 ->
+              pure
+                ( Double
+                , Printf.sprintf "Double_flat_field(%s, Long_val(%s))" (value 0) (value 1)
+                )
+          | "caml_floatarray_unsafe_set", 3 ->
+              pure
+                ( Value
+                , c_call "camlc_store_double_flat" [ value 0; value 1; arg Double 2 ] )
+          | "%identity", 1 -> pure (Value, value 0)
+          | ("caml_bytes_of_string" | "caml_string_of_bytes"), 1 -> pure (Value, value 0)
+          | _ -> (
+              let args = List.map args ~f:(fun a -> a.get Value) in
+              let arg i = List.nth args i in
+              let plain e = Plain (Value, e, not (StringSet.mem name nogc_primitives)) in
+              match name, n with
+              | "%int_add", 2 -> plain (c_call "Camlc_int_add" args)
+              | "%int_sub", 2 -> plain (c_call "Camlc_int_sub" args)
+              | ("%int_mul" | "%direct_int_mul"), 2 -> plain (c_call "Camlc_int_mul" args)
+              | "%int_neg", 1 -> plain (c_call "Camlc_int_neg" args)
+              | "%int_and", 2 -> plain (c_call "Camlc_int_and" args)
+              | "%int_or", 2 -> plain (c_call "Camlc_int_or" args)
+              | "%int_xor", 2 -> plain (c_call "Camlc_int_xor" args)
+              | "%int_lsl", 2 -> plain (c_call "Camlc_int_lsl" args)
+              | "%int_lsr", 2 -> plain (c_call "Camlc_int_lsr" args)
+              | "%int_asr", 2 -> plain (c_call "Camlc_int_asr" args)
+              | "%direct_int_div", 2 -> plain (c_call "Camlc_int_div_unsafe" args)
+              | "%direct_int_mod", 2 -> plain (c_call "Camlc_int_mod_unsafe" args)
+              | "%int_div", 2 -> Checked (c_call "camlc_int_div" args)
+              | "%int_mod", 2 -> Checked (c_call "camlc_int_mod" args)
+              | "caml_int_compare", 2 -> plain (c_call "Camlc_int_compare" args)
+              | "%direct_obj_tag", 1 ->
+                  plain (Printf.sprintf "Val_long(Tag_val(%s))" (arg 0))
+              | ("caml_ml_string_length" | "caml_ml_bytes_length"), 1 ->
+                  plain (Printf.sprintf "Val_long(caml_string_length(%s))" (arg 0))
+              | ("caml_string_unsafe_get" | "caml_bytes_unsafe_get"), 2 ->
+                  plain
+                    (Printf.sprintf "Val_int(Byte_u(%s, Long_val(%s)))" (arg 0) (arg 1))
+              | ("caml_string_unsafe_set" | "caml_bytes_unsafe_set"), 3 ->
+                  plain
+                    (Printf.sprintf
+                       "(Byte_u(%s, Long_val(%s)) = (unsigned char)Long_val(%s), \
+                        Val_unit)"
+                       (arg 0)
+                       (arg 1)
+                       (arg 2))
+              | ("caml_string_get" | "caml_bytes_get"), 2 ->
+                  Checked (c_call "camlc_string_get" args)
+              | ("caml_string_set" | "caml_bytes_set"), 3 ->
+                  Checked (c_call "camlc_bytes_set" args)
+              | "caml_check_bound", 2 -> Checked (c_call "camlc_check_bound" args)
+              | "caml_check_bound_float", 2 ->
+                  Checked (c_call "camlc_check_bound_float" args)
+              | "caml_check_bound_gen", 2 -> Checked (c_call "camlc_check_bound_gen" args)
+              | "caml_array_unsafe_get", 2 -> plain (c_call "camlc_array_unsafe_get" args)
+              | "caml_array_unsafe_set_addr", 3 ->
+                  plain
+                    (Printf.sprintf
+                       "(camlc_modify(&Field(%s, Long_val(%s)), %s), Val_unit)"
+                       (arg 0)
+                       (arg 1)
+                       (arg 2))
+              | "caml_string_concat", 2 -> plain (c_call "camlc_string_concat" args)
+              | ("caml_register_global" | "caml_register_global_predef"), _ ->
+                  plain "Val_unit"
+              | "caml_register_global_by_index", 2 ->
+                  plain
+                    (Printf.sprintf
+                       "(caml_modify(&Field(caml_global_data, Long_val(%s)), %s), \
+                        Val_unit)"
+                       (arg 1)
+                       (arg 0))
+              | "caml_get_global_data", 0 -> plain "caml_global_data"
+              | "caml_oo_cache_id", 0 -> plain "camlc_oo_cache_id()"
+              | "caml_get_cached_method", 3 ->
+                  plain (c_call "camlc_get_cached_method" args)
+              | ( ( "%perform"
+                  | "%reperform"
+                  | "%resume"
+                  | "%with_stack"
+                  | "%with_stack_bind" )
+                , _ ) -> Checked "camlc_raise_unhandled_effect()"
+              | _ ->
+                  if String.length name > 0 && Char.equal name.[0] '%'
+                  then
+                    failwith (Printf.sprintf "c_of_ocaml: unsupported primitive %s" name);
+                  (match String.Hashtbl.find_opt out.primitives name with
+                  | Some n' when n <> n' ->
+                      failwith
+                        (Printf.sprintf
+                           "c_of_ocaml: primitive %s called with %d and %d arguments"
+                           name
+                           n
+                           n')
+                  | _ -> String.Hashtbl.replace out.primitives name n);
+                  if StringSet.mem name noraise_primitives && n <= 5
+                  then plain (c_call name args)
+                  else if n <= 5
+                  then Checked (c_call (Printf.sprintf "camlc_ccall%d" n) (name :: args))
+                  else Ccallv)))
 
 (* The types of the primitives computed on unboxed numbers, for {!Typing}:
    whether they take unboxed arguments, and their result *)
@@ -637,8 +689,10 @@ let register_typing_primitives () =
   let float = Typing.Number (Float, Unboxed) in
   let int = Typing.Int Normalized in
   List.iter float_binops ~f:(fun (name, _) -> Typing.register_prim name ~unbox:true float);
-  List.iter float_functions ~f:(fun (name, _) -> Typing.register_prim name ~unbox:true float);
-  List.iter float_comparisons ~f:(fun (name, _) -> Typing.register_prim name ~unbox:true int);
+  List.iter float_functions ~f:(fun (name, _) ->
+      Typing.register_prim name ~unbox:true float);
+  List.iter float_comparisons ~f:(fun (name, _) ->
+      Typing.register_prim name ~unbox:true int);
   Typing.register_prim "caml_neg_float" ~unbox:true float;
   Typing.register_prim "caml_float_of_int" ~unbox:false float;
   Typing.register_prim "caml_int_of_float" ~unbox:true int;
@@ -655,9 +709,20 @@ let register_typing_primitives () =
       in
       let typ = Typing.Number (number, Unboxed) in
       List.iter
-        ~f:(fun f -> Typing.register_prim (Printf.sprintf "caml_%s_%s" t f) ~unbox:true typ)
-        [ "add"; "sub"; "mul"; "and"; "or"; "xor"; "neg"; "shift_left"; "shift_right"
-        ; "shift_right_unsigned"; "of_float" ];
+        ~f:(fun f ->
+          Typing.register_prim (Printf.sprintf "caml_%s_%s" t f) ~unbox:true typ)
+        [ "add"
+        ; "sub"
+        ; "mul"
+        ; "and"
+        ; "or"
+        ; "xor"
+        ; "neg"
+        ; "shift_left"
+        ; "shift_right"
+        ; "shift_right_unsigned"
+        ; "of_float"
+        ];
       Typing.register_prim (Printf.sprintf "caml_%s_of_int" t) ~unbox:false typ;
       Typing.register_prim (Printf.sprintf "caml_%s_to_int" t) ~unbox:true int;
       Typing.register_prim (Printf.sprintf "caml_%s_to_float" t) ~unbox:true float;
@@ -677,7 +742,10 @@ let register_typing_primitives () =
               (Printf.sprintf "caml_%s_to_%s" t t')
               ~unbox:true
               (Typing.Number (number', Unboxed)))));
-  Typing.register_prim "caml_int64_bits_of_float" ~unbox:true (Typing.Number (Int64, Unboxed));
+  Typing.register_prim
+    "caml_int64_bits_of_float"
+    ~unbox:true
+    (Typing.Number (Int64, Unboxed));
   Typing.register_prim "caml_int64_float_of_bits" ~unbox:true float
 
 (* Primitives whose result is an integer *)
@@ -934,7 +1002,8 @@ let var ctx x =
   | Some Local -> local ctx x
   | Some (Env i) -> Printf.sprintf "Field(%s, %d)" (local ctx ctx.env_var) i
   | Some (Sibling 0) -> local ctx ctx.env_var
-  | Some (Sibling d) -> Printf.sprintf "((value)((value *)%s + %d))" (local ctx ctx.env_var) d
+  | Some (Sibling d) ->
+      Printf.sprintf "((value)((value *)%s + %d))" (local ctx ctx.env_var) d
   | None -> failwith (Format.asprintf "c_of_ocaml: unbound variable %a" Var.print x)
 
 let slot ctx x =
@@ -978,12 +1047,8 @@ let constant_repr out c r =
 
 let prim_arg ctx a =
   match a with
-  | Pv x ->
-      { a_typ = Typing.var_type ctx.out.types x
-      ; get = (fun r -> as_repr ctx r x)
-      }
-  | Pc c ->
-      { a_typ = Typing.constant_type c; get = (fun r -> constant_repr ctx.out c r) }
+  | Pv x -> { a_typ = Typing.var_type ctx.out.types x; get = (fun r -> as_repr ctx r x) }
+  | Pc c -> { a_typ = Typing.constant_type c; get = (fun r -> constant_repr ctx.out c r) }
 
 let line ctx fmt = Printf.bprintf ctx.buf ("  " ^^ fmt ^^ "\n")
 
@@ -1031,7 +1096,11 @@ let branch ctx (pc, args) =
   match moves with
   | [] -> Printf.sprintf "goto L%d;" pc
   | [ (p, a) ] ->
-      Printf.sprintf "{ %s = %s; goto L%d; }" (slot ctx p) (as_repr ctx (var_repr ctx p) a) pc
+      Printf.sprintf
+        "{ %s = %s; goto L%d; }"
+        (slot ctx p)
+        (as_repr ctx (var_repr ctx p) a)
+        pc
   | _ ->
       let temps =
         List.mapi moves ~f:(fun i (p, a) ->
@@ -1097,14 +1166,16 @@ let translate_closure ctx f =
                  ]
                in
                let code =
-                 if List.length functions > 1 && arity >= 2 then code @ [ "Val_unit" ] else code
+                 if List.length functions > 1 && arity >= 2
+                 then code @ [ "Val_unit" ]
+                 else code
                in
                if pos = 0
                then code
                else Printf.sprintf "Make_header(%d, Infix_tag, 0)" pos :: code))
       in
       if List.is_empty info.free_variables
-      then (
+      then
         (* A closed closure is static data *)
         let name =
           static_block
@@ -1112,7 +1183,7 @@ let translate_closure ctx f =
             (header ~wosize:(List.length prefix) ~tag:Obj.closure_tag :: prefix)
         in
         List.iter2 functions positions ~f:(fun (g, _) pos ->
-            line ctx "%s = (value)&%s[%d];" (slot ctx g) name (pos + 1)))
+            line ctx "%s = (value)&%s[%d];" (slot ctx g) name (pos + 1))
       else (
         alloc_block
           ctx
@@ -1121,8 +1192,7 @@ let translate_closure ctx f =
           ~prefix
           (List.map info.free_variables ~f:(fun x -> as_value ctx x));
         List.iter2 functions positions ~f:(fun (g, _) pos ->
-            if pos > 0
-            then line ctx "%s = (value)((value *)b + %d);" (slot ctx g) pos))
+            if pos > 0 then line ctx "%s = (value)((value *)b + %d);" (slot ctx g) pos))
 
 let apply_arity out n = out.apply_arities <- IntSet.add n out.apply_arities
 
@@ -1183,8 +1253,9 @@ let apply ctx x ~f ~args ~exact =
    the number of slots. *)
 let boxing_prelude ctx traps x ~f ~args ~exact =
   let boxed =
-    List.filter_map (List.combine args (boxed_arguments ctx x ~f ~args ~exact)) ~f:(fun (a, b) ->
-        if b then Some a else None)
+    List.filter_map
+      (List.combine args (boxed_arguments ctx x ~f ~args ~exact))
+      ~f:(fun (a, b) -> if b then Some a else None)
   in
   let k = List.length boxed in
   if k > 0
@@ -1208,7 +1279,10 @@ let translate_tail_call ctx x ~f ~args ~exact =
   let k = boxing_prelude ctx [] x ~f ~args ~exact in
   let callee, args, reprs = apply ctx x ~f ~args ~exact in
   let types = List.map (reprs @ [ Value ]) ~f:c_type in
-  let temps = List.mapi (List.combine types args) ~f:(fun i (t, a) -> Printf.sprintf "%s t%d = %s;" t i a) in
+  let temps =
+    List.mapi (List.combine types args) ~f:(fun i (t, a) ->
+        Printf.sprintf "%s t%d = %s;" t i a)
+  in
   let call = c_call callee (List.mapi args ~f:(fun i _ -> Printf.sprintf "t%d" i)) in
   line
     ctx
@@ -1270,7 +1344,11 @@ let translate_instr ctx traps i =
       | Field (y, i, (Non_float | Immediate)) ->
           define ctx x Value (Printf.sprintf "Field(%s, %d)" (as_value ctx y) i)
       | Field (y, i, Float) ->
-          define ctx x Double (Printf.sprintf "Double_flat_field(%s, %d)" (as_value ctx y) i)
+          define
+            ctx
+            x
+            Double
+            (Printf.sprintf "Double_flat_field(%s, %d)" (as_value ctx y) i)
       | Closure _ -> translate_closure ctx x
       | Constant c -> (
           match var_repr ctx x with
@@ -1316,16 +1394,23 @@ let translate_instr ctx traps i =
           | Eq _, [ a; b ] -> plain (Printf.sprintf "Val_bool(%s == %s)" a b)
           | Neq _, [ a; b ] -> plain (Printf.sprintf "Val_bool(%s != %s)" a b)
           | Lt, [ a; b ] -> plain (Printf.sprintf "Val_bool((intnat)%s < (intnat)%s)" a b)
-          | Le, [ a; b ] -> plain (Printf.sprintf "Val_bool((intnat)%s <= (intnat)%s)" a b)
-          | Ult, [ a; b ] -> plain (Printf.sprintf "Val_bool((uintnat)%s < (uintnat)%s)" a b)
-          | (Vectlength _ | Array_get _ | Not | IsInt _ | Eq _ | Neq _ | Lt | Le | Ult), _ ->
-              assert false
+          | Le, [ a; b ] ->
+              plain (Printf.sprintf "Val_bool((intnat)%s <= (intnat)%s)" a b)
+          | Ult, [ a; b ] ->
+              plain (Printf.sprintf "Val_bool((uintnat)%s < (uintnat)%s)" a b)
+          | (Vectlength _ | Array_get _ | Not | IsInt _ | Eq _ | Neq _ | Lt | Le | Ult), _
+            -> assert false
           | Extern _, _ -> assert false))
   | Assign (x, y) -> line ctx "%s = %s;" (slot ctx x) (as_repr ctx (var_repr ctx x) y)
   | Set_field (x, i, (Non_float | Immediate), y) ->
       line ctx "camlc_modify(&Field(%s, %d), %s);" (as_value ctx x) i (as_value ctx y)
   | Set_field (x, i, Float, y) ->
-      line ctx "Store_double_flat_field(%s, %d, %s);" (as_value ctx x) i (as_repr ctx Double y)
+      line
+        ctx
+        "Store_double_flat_field(%s, %d, %s);"
+        (as_value ctx x)
+        i
+        (as_repr ctx Double y)
   | Offset_ref (x, n) ->
       let x = as_value ctx x in
       line ctx "Field(%s, 0) = (value)((uintnat)Field(%s, 0) + %d);" x x (2 * n)
@@ -1354,7 +1439,9 @@ let translate_last ctx traps last =
           line
             ctx
             "%s"
-            (return_stmt ctx (Printf.sprintf "Make_exception_result(%s)" (as_value ctx x)))
+            (return_stmt
+               ctx
+               (Printf.sprintf "Make_exception_result(%s)" (as_value ctx x)))
       | { exn_var; id; _ } :: _ ->
           line ctx "%s = %s; goto H%d;" (slot ctx exn_var) (as_value ctx x) id)
   | Stop -> line ctx "%s" (return_stmt ctx "Val_unit")
@@ -1446,7 +1533,9 @@ let expr_uses ctx x e acc =
 let gc_point ctx i =
   match i with
   | Let (x, Apply { f; args; exact }) ->
-      if List.exists (boxed_arguments ctx x ~f ~args ~exact) ~f:Fun.id then `Alloc else `Call
+      if List.exists (boxed_arguments ctx x ~f ~args ~exact) ~f:Fun.id
+      then `Alloc
+      else `Call
   | Let (_, Block (_, [||], _, _, _)) -> `No
   | Let (_, Block _) -> `Alloc
   | Let (x, Closure _) -> (
@@ -1492,7 +1581,10 @@ let instr_uses ctx i acc =
 let cont_uses ctx live_in (pc, args) acc =
   let params = (Addr.Map.find pc ctx.blocks).params in
   let l = Addr.Hashtbl.find_opt live_in pc |> Option.value ~default:Var.Set.empty in
-  use_list ctx args (Var.Set.union acc (List.fold_left params ~init:l ~f:(fun l x -> Var.Set.remove x l)))
+  use_list
+    ctx
+    args
+    (Var.Set.union acc (List.fold_left params ~init:l ~f:(fun l x -> Var.Set.remove x l)))
 
 let live_out ctx live_in pc =
   let block = Addr.Map.find pc ctx.blocks in
@@ -1591,8 +1683,8 @@ let rooted_variables ctx pcs ~params =
       else
         repr_equal (var_repr ctx x) Value
         && (match Typing.var_type ctx.out.types x with
-           | Int _ -> false
-           | _ -> true)
+          | Int _ -> false
+          | _ -> true)
         && not
              (BitSet.mem ctx.facts.is_int (Var.idx x)
              || BitSet.mem ctx.facts.is_static (Var.idx x)))
@@ -1653,12 +1745,15 @@ let translate_function
       | Pushtrap (_, x, _) -> add_local x
       | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ());
   let rooted = rooted_variables ctx pcs ~params in
-  Var.Set.iter (fun x -> Var.Hashtbl.add ctx.slots x (Var.Hashtbl.length ctx.slots)) rooted;
+  Var.Set.iter
+    (fun x -> Var.Hashtbl.add ctx.slots x (Var.Hashtbl.length ctx.slots))
+    rooted;
   let frame_size = Var.Hashtbl.length ctx.slots in
   (* Body *)
   List.iteri params ~f:(fun i x ->
       if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (local ctx x) i);
-  if Var.Hashtbl.mem ctx.slots ctx.env_var then line ctx "%s = env;" (local ctx ctx.env_var);
+  if Var.Hashtbl.mem ctx.slots ctx.env_var
+  then line ctx "%s = env;" (local ctx ctx.env_var);
   line ctx "%s" (branch ctx (pc, args));
   List.iter pcs ~f:(fun pc ->
       let block = Addr.Map.find pc blocks in
@@ -1681,13 +1776,13 @@ let translate_function
           List.iter body ~f:(fun i -> translate_instr ctx traps i);
           translate_tail_call ctx x ~f ~args ~exact
       | None -> (
-      List.iter block.body ~f:(fun i -> translate_instr ctx traps i);
-      translate_last ctx traps block.branch;
-      match block.branch with
-      | Pushtrap (_, _, handler) ->
-          Printf.bprintf ctx.buf " H%d:;\n" (Addr.Hashtbl.find ctx.handler_ids pc);
-          line ctx "%s" (branch ctx handler)
-      | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ()));
+          List.iter block.body ~f:(fun i -> translate_instr ctx traps i);
+          translate_last ctx traps block.branch;
+          match block.branch with
+          | Pushtrap (_, _, handler) ->
+              Printf.bprintf ctx.buf " H%d:;\n" (Addr.Hashtbl.find ctx.handler_ids pc);
+              line ctx "%s" (branch ctx handler)
+          | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ()));
   let param_set = Var.Set.of_list params in
   let decls =
     List.filter_map (List.rev !locals) ~f:(fun x ->
@@ -1709,11 +1804,19 @@ let translate_function
     "%s(%s) {\n"
     name
     (if String.equal params_c "" then "void" else params_c);
-  List.iter [ Value; Double; Unboxed_int64; Unboxed_int32; Unboxed_nativeint ] ~f:(fun r ->
-      let l = List.filter_map decls ~f:(fun (r', d) -> if repr_equal r r' then Some d else None) in
+  List.iter
+    [ Value; Double; Unboxed_int64; Unboxed_int32; Unboxed_nativeint ]
+    ~f:(fun r ->
+      let l =
+        List.filter_map decls ~f:(fun (r', d) -> if repr_equal r r' then Some d else None)
+      in
       List.iteri l ~f:(fun i d ->
           if i mod 16 = 0
-          then Printf.bprintf out.functions (if i = 0 then "  %s " else ";\n  %s ") (c_type r);
+          then
+            Printf.bprintf
+              out.functions
+              (if i = 0 then "  %s " else ";\n  %s ")
+              (c_type r);
           if i mod 16 <> 0 then Buffer.add_string out.functions ", ";
           Buffer.add_string out.functions d);
       if not (List.is_empty l) then Buffer.add_string out.functions ";\n");
@@ -1744,10 +1847,8 @@ let global_data_size (p : program) =
     (fun _ block n ->
       List.fold_left block.body ~init:n ~f:(fun n i ->
           match i with
-          | Let
-              ( _
-              , Prim (Extern ("caml_register_global_by_index", _), [ _; Pc (Int i) ]) ) ->
-              max n (Targetint.to_int_exn i + 1)
+          | Let (_, Prim (Extern ("caml_register_global_by_index", _), [ _; Pc (Int i) ]))
+            -> max n (Targetint.to_int_exn i + 1)
           | _ -> n))
     p.blocks
     16
@@ -1908,7 +2009,8 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
   Buffer.add_buffer b out.data_fields;
   Buffer.add_string b "} camlc_data = {\n  .unused = 0,\n";
   Buffer.add_buffer b out.data;
-  Buffer.add_string b
+  Buffer.add_string
+    b
     "};\n\n\
      value *const camlc_static_data_begin = (value *)&camlc_data;\n\
      value *const camlc_static_data_end = (value *)(&camlc_data + 1);\n\n";
@@ -1926,8 +2028,7 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
       \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
       \  camlc_sp = argv;\n\
       \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, 3 + i);\n\
-       %s\
-      \  r = camlc_applyv(Field(env, 2), k + %d, argv);\n\
+       %s  r = camlc_applyv(Field(env, 2), k + %d, argv);\n\
       \  camlc_sp = argv + k + %d;\n\
       \  return r;\n\
        }\n\n"
@@ -1941,7 +2042,9 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
       m
   done;
   (* Exact calls with the arguments in an array *)
-  Printf.bprintf b "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
+  Printf.bprintf
+    b
+    "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
   for n = 1 to out.max_arity do
     Printf.bprintf
       b

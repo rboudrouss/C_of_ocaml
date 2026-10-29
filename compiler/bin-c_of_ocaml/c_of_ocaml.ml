@@ -173,8 +173,7 @@ let compile ~profile ~debug_info ~input_file ~output_file =
   let ic = open_in_bin input_file in
   (match Parse_bytecode.from_channel ic with
   | `Exe -> ()
-  | `Cmo _ | `Cma _ ->
-      failwith "c_of_ocaml: only bytecode executables are supported");
+  | `Cmo _ | `Cma _ -> failwith "c_of_ocaml: only bytecode executables are supported");
   let t = Timer.make () in
   let one =
     Parse_bytecode.from_exe

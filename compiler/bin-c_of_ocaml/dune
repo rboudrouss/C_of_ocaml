@@ -1,9 +1,6 @@
 (executable
  (name c_of_ocaml)
- (libraries
-  c_of_ocaml_compiler
-  js_of_ocaml-compiler
-  compiler-libs.common)
+ (libraries c_of_ocaml_compiler js_of_ocaml-compiler compiler-libs.common)
  (modes
   byte
   (best exe))
@@ -12,10 +9,7 @@
 
 (rule
  (target runtime_files.ml)
- (deps
-  gen/gen.exe
-  ../../runtime/c/camlc.h
-  ../../runtime/c/camlc_runtime.c)
+ (deps gen/gen.exe ../../runtime/c/camlc.h ../../runtime/c/camlc_runtime.c)
  (action
   (with-stdout-to
    %{target}
