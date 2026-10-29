@@ -17,8 +17,9 @@
  *)
 
 (* Copied from compiler/lib-wasm/typing.ml. Differences: return values are
-   never unboxed (the C code returns exceptions as values), and the free
-   variables of closures are boxed (closures hold values). *)
+   never unboxed (the C code returns exceptions as values), the free
+   variables of closures are boxed (closures hold values), and so are the
+   values given to parameters holding values. *)
 
 open! Stdlib
 open Code
@@ -599,6 +600,17 @@ let box_numbers ~boxed p st types =
       | Number (_, Boxed) | Int _ | Tuple _ | Bigarray _ | Null | Bot -> ())
   in
   List.iter ~f:box boxed;
+  (* A block or function parameter holding values gets values: unlike
+     wasm, the C code does not box at branches *)
+  Var.ISet.iter
+    (fun x ->
+      match st.global_flow_state.defs.(Var.idx x) with
+      | Phi { known; _ } -> (
+          match Var.Tbl.get types x with
+          | Number (_, Unboxed) -> ()
+          | _ -> Var.Set.iter box known)
+      | Expr _ -> ())
+    st.global_flow_state.vars;
   Code.fold_closures
     p
     (fun name_opt _ (pc, _) _ () ->
