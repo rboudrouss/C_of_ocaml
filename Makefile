@@ -7,6 +7,12 @@ tests:
 tests-wasm:
 	WASM_OF_OCAML=true dune build @runtest-wasm
 
+# Run the OCaml test suite with c_of_ocaml (emcc, node and the wasm32
+# sysroot of ocaml-emcc needed, see tools/c_of_ocaml_tests.sh)
+tests-c:
+	dune build compiler/bin-c_of_ocaml/c_of_ocaml.exe
+	tools/c_of_ocaml_tests.sh
+
 # Run the JS test suite using QuickJS-NG (`qjs`) in place of `node`.
 # Override the engine binary with JSOO_QUICKJS_BIN if `qjs` is not on PATH.
 tests-quickjs:
@@ -61,4 +67,4 @@ clean:
 bench:
 	$(MAKE) -C benchmarks bench
 
-.PHONY: all tests tests-wasm tests-quickjs tests-bun tests-bun-wasm test runtest runtests doc clean bench
+.PHONY: all tests tests-wasm tests-c tests-quickjs tests-bun tests-bun-wasm test runtest runtests doc clean bench
