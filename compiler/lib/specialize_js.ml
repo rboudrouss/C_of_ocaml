@@ -60,7 +60,8 @@ let specialize_instr opt_count ~target info i =
           Let (x, Prim (Extern (prim, None), [ Pc (String s) ]))
       | _ -> i)
   | ( Let (x, Prim (Extern (("caml_register_named_value" as prim), _), [ (Pv _ as y); z ]))
-    , _ ) -> (
+    , (`JavaScript | `Wasm) ) -> (
+      (* Not with C: the OCaml runtime and C stubs look up named values *)
       match the_string_of info y with
       | Some s when Primitive.need_named_value s ->
           incr opt_count;
