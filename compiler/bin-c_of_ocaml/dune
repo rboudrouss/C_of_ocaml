@@ -1,0 +1,12 @@
+(executable
+ (name c_of_ocaml)
+ (libraries
+  c_of_ocaml_compiler
+  js_of_ocaml-compiler
+  js_of_ocaml-compiler.runtime-files
+  compiler-libs.common)
+ (modes
+  byte
+  (best exe))
+ (flags
+  (:standard -safe-string -open Js_of_ocaml_compiler)))
