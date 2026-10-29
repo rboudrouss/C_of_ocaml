@@ -704,11 +704,21 @@ let alloc_block ctx ~dst ~tag ~prefix fields =
         line ctx "caml_initialize(&Field(b, %d), %s);" (i + List.length prefix) e));
   line ctx "%s = b;" dst
 
+(* The start of the environment, and the position of the code pointer of
+   each function. In a closure with several functions, a function of arity 2
+   or more takes three words, as in native code: the compactor of OCaml 4.14
+   finds the Infix headers from the arities. *)
 let closure_layout functions =
-  (* Position of the code pointer of each function and start of the
-     environment *)
-  let n = List.length functions in
-  (3 * n) - 1, List.mapi functions ~f:(fun k _ -> 3 * k)
+  let size arity = if List.length functions > 1 && arity >= 2 then 3 else 2 in
+  let rec layout pos l =
+    match l with
+    | [] -> assert false
+    | [ (_, arity) ] -> pos + size arity, [ pos ]
+    | (_, arity) :: r ->
+        let startenv, positions = layout (pos + size arity + 1) r in
+        startenv, pos :: positions
+  in
+  layout 0 functions
 
 let translate_closure ctx f =
   let info = Var.Map.find f ctx.closures in
@@ -725,6 +735,9 @@ let translate_closure ctx f =
                  [ Printf.sprintf "(value)&%s" (fun_name ctx.out g)
                  ; Printf.sprintf "Make_closinfo(%d, %d)" arity (startenv - pos)
                  ]
+               in
+               let code =
+                 if List.length functions > 1 && arity >= 2 then code @ [ "Val_unit" ] else code
                in
                if pos = 0
                then code
