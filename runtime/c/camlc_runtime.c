@@ -32,7 +32,6 @@
 #include <caml/osdeps.h>
 #include <caml/sys.h>
 #include <caml/gc_ctrl.h>
-#include <caml/dynlink.h>
 #if OCAML_VERSION_MAJOR >= 5
 #include <caml/codefrag.h>
 #include <caml/runtime_events.h>
@@ -512,6 +511,141 @@ CAMLexport void caml_iterate_named_values(caml_named_action f)
 }
 
 /****************************************************************/
+/* Backtraces (replaces the bytecode runtime's backtrace_byt.c)
+
+   A backtrace slot is a pointer to the location (struct camlc_location)
+   of a raise or of a call that an exception went through, generated with
+   the code (c_of_ocaml --debug-info). */
+
+#include <caml/backtrace_prim.h>
+
+int caml_alloc_backtrace_buffer(void)
+{
+  Caml_state->backtrace_buffer =
+      caml_stat_alloc_noexc(BACKTRACE_BUFFER_SIZE * sizeof(backtrace_slot));
+  if (Caml_state->backtrace_buffer == NULL) return -1;
+  return 0;
+}
+
+void caml_free_backtrace_buffer(backtrace_slot *backtrace_buffer)
+{
+  if (backtrace_buffer != NULL) caml_stat_free(backtrace_buffer);
+}
+
+static void camlc_backtrace_add(const struct camlc_location *loc)
+{
+  if (Caml_state->backtrace_buffer == NULL &&
+      caml_alloc_backtrace_buffer() == -1)
+    return;
+  if (Caml_state->backtrace_pos >= BACKTRACE_BUFFER_SIZE) return;
+  Caml_state->backtrace_buffer[Caml_state->backtrace_pos++] =
+      (backtrace_slot)loc;
+}
+
+void camlc_backtrace_raise(value exn, const struct camlc_location *loc,
+                           int reraise)
+{
+  if (exn != Caml_state->backtrace_last_exn || !reraise) {
+    Caml_state->backtrace_pos = 0;
+    Caml_state->backtrace_last_exn = exn;
+  }
+  camlc_backtrace_add(loc);
+}
+
+void camlc_backtrace_call(const struct camlc_location *loc)
+{
+  camlc_backtrace_add(loc);
+}
+
+int caml_debug_info_available(void) { return 1; }
+
+int caml_debug_info_status(void) { return 1; }
+
+debuginfo caml_debuginfo_extract(backtrace_slot slot)
+{
+  return (debuginfo)slot;
+}
+
+debuginfo caml_debuginfo_next(debuginfo dbg)
+{
+  (void)dbg;
+  return NULL;
+}
+
+void caml_debuginfo_location(debuginfo dbg, struct caml_loc_info *li)
+{
+  const struct camlc_location *loc = dbg;
+  li->loc_valid = 1;
+  li->loc_is_raise = loc->is_raise;
+  li->loc_filename = (char *)loc->filename;
+  li->loc_defname = (char *)loc->defname;
+  li->loc_is_inlined = 0;
+#if OCAML_VERSION_MAJOR >= 5
+  li->loc_start_lnum = li->loc_end_lnum = loc->line;
+  li->loc_start_chr = loc->start_chr;
+  li->loc_end_chr = loc->end_chr;
+  li->loc_end_offset = loc->end_chr;
+#else
+  li->loc_lnum = loc->line;
+  li->loc_startchr = loc->start_chr;
+  li->loc_endchr = loc->end_chr;
+#endif
+}
+
+/* The stack of compiled code cannot be walked: no current call stack */
+#if OCAML_VERSION_MAJOR >= 5
+size_t caml_get_callstack(size_t max_slots, backtrace_slot **buffer_p,
+                          size_t *alloc_size_p, ptrdiff_t alloc_idx)
+{
+  (void)max_slots; (void)buffer_p; (void)alloc_size_p; (void)alloc_idx;
+  return 0;
+}
+
+CAMLprim value caml_get_current_callstack(value max_frames)
+{
+  (void)max_frames;
+  return Atom(0);
+}
+
+CAMLprim value caml_get_continuation_callstack(value cont, value max_frames)
+{
+  (void)cont; (void)max_frames;
+  return Atom(0);
+}
+#else
+intnat caml_collect_current_callstack(value **ptrace, intnat *plen,
+                                      intnat max_frames, int alloc_idx)
+{
+  (void)ptrace; (void)plen; (void)max_frames; (void)alloc_idx;
+  return 0;
+}
+#endif
+
+/* Loading of bytecode (Dynlink, toplevel), not supported */
+value caml_add_debug_info(code_t code_start, value code_size,
+                          value events_heap)
+{
+  (void)code_start; (void)code_size; (void)events_heap;
+  return Val_unit;
+}
+
+value caml_remove_debug_info(code_t start)
+{
+  (void)start;
+  return Val_unit;
+}
+
+void caml_init_debug_info(void) {}
+
+#if OCAML_VERSION_MAJOR >= 5
+/* No shared libraries: this keeps dynlink.c, and the interpreter it
+   needs, out of the program */
+void caml_free_shared_libs(void) {}
+#endif
+
+void caml_load_main_debug_info(void) {}
+
+/****************************************************************/
 /* Startup (follows caml_startup_code_exn, without the bytecode) */
 
 static value camlc_run_program(void) { return camlc_program(); }
@@ -529,7 +663,6 @@ int main(int argc, char **argv)
   caml_init_locale();
   caml_init_custom_operations();
   caml_init_os_params();
-  caml_ext_table_init(&caml_shared_libs_path, 8);
   caml_init_gc();
   CAML_RUNTIME_EVENTS_INIT();
   exe_name = caml_executable_name();
@@ -572,9 +705,6 @@ int main(int argc, char **argv)
     Field(caml_global_data, i) = Val_unit;
 #endif
   caml_sys_init(exe_name, argv);
-  /* No debug information, as a program compiled without -g: uncaught
-     exceptions are printed without a backtrace, as by ocamlrun */
-  caml_init_debug_info();
   res = camlc_ccall0(camlc_run_program);
   if (Is_exception_result(res))
     caml_fatal_uncaught_exception(Extract_exception(res));

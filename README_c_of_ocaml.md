@@ -14,7 +14,8 @@ parsed into the intermediate code (`compiler/lib/code.mli`), optimized by
 
 ```sh
 ocamlfind ocamlc -package unix -linkpkg main.ml -o main.bc
-c_of_ocaml main.bc -o main.c          # --opt 2 or 3 for more optimizations
+c_of_ocaml main.bc -o main.c          # --opt 2 or 3 for more optimizations,
+                                      # --debug-info for backtraces (ocamlc -g)
 
 SYSROOT=$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32   # built by ocaml-emcc
 CFLAGS="-O2 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
@@ -64,8 +65,18 @@ See `runtime/c/camlc.h` for the conventions of the generated code.
   call of such a function in an exception handler). C primitives, which
   raise with `longjmp`, are called through wrappers which return the
   exception, except the ones known not to raise.
+- **Unboxed numbers**: the type analysis of wasm_of_ocaml
+  (`compiler/lib-c/typing.ml`) finds the floats and boxed integers that are
+  never needed boxed: they are C `double`s and integers, and the arithmetic
+  on them is inlined. The parameters of the functions only called directly
+  can be unboxed too.
 - **Callbacks** from C (`caml_callback*`) apply the closure with
   `camlc_applyv`.
+- **Backtraces** (`--debug-info`): a raise, and each call an exception goes
+  through, record a static description of their location (from the debug
+  events) in the backtrace buffer of the runtime, only when backtraces are
+  active. `camlc_runtime.c` replaces the runtime's `backtrace_byt.c`. The
+  call stack itself cannot be walked: `Printexc.get_callstack` is empty.
 
 ## C stubs
 
@@ -98,7 +109,6 @@ Not supported yet:
 
 - effect handlers (`--effects=disabled` only) and domains;
 - wasm64 (63-bit integers): `Targetint` has at most 32 bits;
-- backtraces, `Printexc.record_backtrace`;
 - marshaling closures (`Marshal.Closures`);
 - separate compilation: whole programs only;
 - deep recursion: the C stack of the wasm engine (about 1 MB in V8)

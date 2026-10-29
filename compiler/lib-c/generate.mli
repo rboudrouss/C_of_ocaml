@@ -20,8 +20,10 @@ val f :
      Code.program
   -> global_flow_data:Global_flow.state * Global_flow.info
   -> deadcode_sentinel:Code.Var.t
+  -> debug_info:bool
   -> Closure_conversion.closure Code.Var.Map.t
   -> string
-(** [f p ~global_flow_data ~deadcode_sentinel closures] is the C translation
-    of the whole program [p], whose closures are [closures] (see
-    {!Closure_conversion.f}) *)
+(** [f p ~global_flow_data ~deadcode_sentinel ~debug_info closures] is the C
+    translation of the whole program [p], whose closures are [closures] (see
+    {!Closure_conversion.f}). With [debug_info], it records backtraces at the
+    locations of the debug events of [p]. *)

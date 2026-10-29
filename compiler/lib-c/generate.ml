@@ -40,6 +40,18 @@ let sanitize s =
       | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> c
       | _ -> '_')
 
+let c_string s =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter s ~f:(fun c ->
+      match c with
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | ' ' .. '~' -> Buffer.add_char b c
+      | _ -> Buffer.add_string b (Printf.sprintf "\\%03o" (Char.code c)));
+  Buffer.add_char b '"';
+  Buffer.contents b
+
 let tagged_int i =
   (* [Targetint] has 31 bits: the tagged representation fits in 32 bits *)
   let i = Targetint.to_int32 i in
@@ -105,7 +117,42 @@ type output =
   ; fun_names : string Var.Hashtbl.t  (** C name of each function *)
   ; types : Typing.t
   ; fun_reprs : repr list Var.Hashtbl.t  (** The representation of the parameters of each function *)
+  ; debug_info : bool  (** Record backtraces *)
+  ; locations : string String.Hashtbl.t  (** The C names of the locations *)
+  ; location_defs : Buffer.t
   }
+
+(* A static description of a source location, for backtraces *)
+let location out (pi : Parse_info.t) ~fun_name ~is_raise =
+  let file =
+    match pi.name, pi.src with
+    | Some n, _ | None, Some n -> n
+    | None, None -> "_none_"
+  in
+  (* As in native code: the module, then the function *)
+  let defname =
+    let m = String.capitalize_ascii (Filename.remove_extension (Filename.basename file)) in
+    match fun_name with
+    | Some f -> m ^ "." ^ f
+    | None -> m
+  in
+  let key = Printf.sprintf "%s:%d:%d:%s:%b" file pi.line pi.col defname is_raise in
+  match String.Hashtbl.find_opt out.locations key with
+  | Some n -> "&" ^ n
+  | None ->
+      let n = Printf.sprintf "camlc_l%d" (String.Hashtbl.length out.locations) in
+      String.Hashtbl.add out.locations key n;
+      Printf.bprintf
+        out.location_defs
+        "static const struct camlc_location %s = { %s, %s, %d, %d, %d, %d };\n"
+        n
+        (c_string file)
+        (c_string defname)
+        pi.line
+        pi.col
+        pi.col
+        (if is_raise then 1 else 0);
+      "&" ^ n
 
 let fun_name out f =
   match Var.Hashtbl.find_opt out.fun_names f with
@@ -851,7 +898,28 @@ type fctx =
   ; traps : trap list Addr.Hashtbl.t  (** The handlers in scope in each block *)
   ; handler_ids : int Addr.Hashtbl.t  (** The handler of the [Pushtrap] ending a block *)
   ; buf : Buffer.t
+  ; mutable position : Parse_info.t option  (** The last debug event *)
+  ; source_name : string option  (** The name of the function in the source *)
   }
+
+(* Record a backtrace slot, if debug information is enabled: [`Call] when
+   an exception goes through a call, [`Raise reraise] when one is raised
+   (with the exception [e]) *)
+let backtrace_stmt ctx kind e =
+  match ctx.position with
+  | Some pi when ctx.out.debug_info -> (
+      match kind with
+      | `Call ->
+          Printf.sprintf
+            "if (Caml_state->backtrace_active) camlc_backtrace_call(%s); "
+            (location ctx.out pi ~fun_name:ctx.source_name ~is_raise:false)
+      | `Raise reraise ->
+          Printf.sprintf
+            "if (Caml_state->backtrace_active) camlc_backtrace_raise(%s, %s, %d); "
+            e
+            (location ctx.out pi ~fun_name:ctx.source_name ~is_raise:true)
+            (if reraise then 1 else 0))
+  | Some _ | None -> ""
 
 let local_name ctx x =
   if Var.equal x ctx.env_var then "env" else Printf.sprintf "v%d" (Var.idx x)
@@ -940,11 +1008,19 @@ let return_stmt ctx e =
 
 (* Jump to the handler of the innermost trap, or return the exception
    result [r] *)
-let raise_stmt ctx traps r =
-  match traps with
-  | [] -> return_stmt ctx r
-  | { exn_var; id; _ } :: _ ->
-      Printf.sprintf "{ %s = Extract_exception(%s); goto H%d; }" (slot ctx exn_var) r id
+let raise_stmt ?bt ctx traps r =
+  let pre =
+    match bt with
+    | None -> ""
+    | Some kind -> backtrace_stmt ctx kind (Printf.sprintf "Extract_exception(%s)" r)
+  in
+  let stmt =
+    match traps with
+    | [] -> return_stmt ctx r
+    | { exn_var; id; _ } :: _ ->
+        Printf.sprintf "{ %s = Extract_exception(%s); goto H%d; }" (slot ctx exn_var) r id
+  in
+  if String.equal pre "" then stmt else Printf.sprintf "{ %s%s }" pre stmt
 
 let branch ctx (pc, args) =
   let params = (Addr.Map.find pc ctx.blocks).params in
@@ -1150,9 +1226,12 @@ let translate_instr ctx traps i =
   match i with
   | Let (x, e) -> (
       let dst = slot ctx x in
-      let checked call =
+      let checked ?(bt = `Raise false) call =
         line ctx "r = %s;" call;
-        line ctx "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s" (raise_stmt ctx traps "r");
+        line
+          ctx
+          "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
+          (raise_stmt ~bt ctx traps "r");
         define ctx x Value "r"
       in
       match e with
@@ -1160,11 +1239,14 @@ let translate_instr ctx traps i =
           let k = boxing_prelude ctx traps x ~f ~args ~exact in
           let callee, args, _ = apply ctx x ~f ~args ~exact in
           if k = 0
-          then checked (c_call callee args)
+          then checked ~bt:`Call (c_call callee args)
           else (
             line ctx "r = %s;" (c_call callee args);
             line ctx "camlc_sp = bx + %d;" k;
-            line ctx "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s" (raise_stmt ctx traps "r");
+            line
+              ctx
+              "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
+              (raise_stmt ~bt:`Call ctx traps "r");
             define ctx x Value "r")
       | Block (tag, a, _, _, _) ->
           if Array.length a = 0
@@ -1215,7 +1297,7 @@ let translate_instr ctx traps i =
               line
                 ctx
                 "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
-                (raise_stmt ctx traps "r");
+                (raise_stmt ~bt:(`Raise false) ctx traps "r");
               define ctx x Value "r"
           | Checked e -> checked e)
       | Prim (p, args) -> (
@@ -1254,12 +1336,19 @@ let translate_instr ctx traps i =
         (as_value ctx x)
         (as_value ctx i)
         (as_value ctx y)
-  | Event _ -> ()
+  | Event pi -> ctx.position <- Some pi
 
 let translate_last ctx traps last =
   match last with
   | Return x -> line ctx "%s" (return_stmt ctx (as_value ctx x))
-  | Raise (x, _) -> (
+  | Raise (x, kind) -> (
+      let bt =
+        match kind with
+        | `Normal -> backtrace_stmt ctx (`Raise false) (as_value ctx x)
+        | `Reraise -> backtrace_stmt ctx (`Raise true) (as_value ctx x)
+        | `Notrace -> ""
+      in
+      if not (String.equal bt "") then line ctx "%s" bt;
       match traps with
       | [] ->
           line
@@ -1522,6 +1611,7 @@ let translate_function
     ~param_reprs
     ~env
     ~static_env
+    ~source_name
     (pc, args) =
   let ctx =
     { out
@@ -1537,6 +1627,8 @@ let translate_function
     ; traps = Addr.Hashtbl.create 16
     ; handler_ids = Addr.Hashtbl.create 16
     ; buf = Buffer.create 4096
+    ; position = None
+    ; source_name
     }
   in
   List.iter env ~f:(fun (x, loc) -> Var.Hashtbl.replace ctx.locations x loc);
@@ -1670,7 +1762,7 @@ let collect_functions p =
       | None -> acc)
     []
 
-let f (p : program) ~global_flow_data ~deadcode_sentinel closures =
+let f (p : program) ~global_flow_data ~deadcode_sentinel ~debug_info closures =
   let global_flow_state, global_flow_info = global_flow_data in
   let facts = compute_facts p closures in
   (* Which numbers can be unboxed. Closures hold values. *)
@@ -1699,6 +1791,9 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel closures =
     ; fun_names = Var.Hashtbl.create 1024
     ; types
     ; fun_reprs = Var.Hashtbl.create 1024
+    ; debug_info
+    ; locations = String.Hashtbl.create 1024
+    ; location_defs = Buffer.create 4096
     }
   in
   let functions = collect_functions p in
@@ -1736,6 +1831,7 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel closures =
         ~param_reprs:(Var.Hashtbl.find out.fun_reprs f)
         ~env
         ~static_env:(List.is_empty info.free_variables)
+        ~source_name:(Var.get_name f)
         cont);
   translate_function
     out
@@ -1748,6 +1844,7 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel closures =
     ~param_reprs:[]
     ~env:[]
     ~static_env:true
+    ~source_name:None
     (p.start, []);
   (* Assemble the output *)
   let b = Buffer.create (Buffer.length out.data + Buffer.length out.functions + 65536) in
@@ -1815,6 +1912,8 @@ let f (p : program) ~global_flow_data ~deadcode_sentinel closures =
     "};\n\n\
      value *const camlc_static_data_begin = (value *)&camlc_data;\n\
      value *const camlc_static_data_end = (value *)(&camlc_data + 1);\n\n";
+  Buffer.add_buffer b out.location_defs;
+  Buffer.add_char b '\n';
   (* Partial applications: the closure holds the function and the
      arguments already given *)
   for m = 1 to out.max_arity - 1 do

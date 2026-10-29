@@ -169,7 +169,7 @@ let register_primitives () =
   List.iter ~f:(fun name -> Primitive.register name `Pure None None) pure_primitives;
   List.iter ~f:(fun name -> Primitive.register name `Mutable None None) mutable_primitives
 
-let compile ~profile ~input_file ~output_file =
+let compile ~profile ~debug_info ~input_file ~output_file =
   let ic = open_in_bin input_file in
   (match Parse_bytecode.from_channel ic with
   | `Exe -> ()
@@ -182,7 +182,7 @@ let compile ~profile ~input_file ~output_file =
       ~include_cmis:false
       ~link_info:false
       ~linkall:false
-      ~debug:false
+      ~debug:debug_info
       ic
   in
   close_in ic;
@@ -197,6 +197,7 @@ let compile ~profile ~input_file ~output_file =
       p
       ~global_flow_data
       ~deadcode_sentinel:optimized.deadcode_sentinel
+      ~debug_info
       closures
   in
   if times () then Format.eprintf "  code generation: %a@." Timer.print t;
@@ -209,6 +210,7 @@ let () =
   let runtime_dir = ref None in
   let output_file = ref None in
   let profile = ref Profile.O1 in
+  let debug_info = ref false in
   let spec =
     [ "-o", Arg.String (fun s -> output_file := Some s), "FILE Write the C code to FILE"
     ; ( "--opt"
@@ -221,6 +223,9 @@ let () =
     ; ( "--runtime-files"
       , Arg.String (fun s -> runtime_dir := Some s)
       , "DIR Write the C runtime support of the generated code to DIR" )
+    ; ( "--debug-info"
+      , Arg.Set debug_info
+      , " Record backtraces with the locations of the debug events (ocamlc -g)" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
     ; "--enable", Arg.String Config.Flag.enable, "OPT Enable the option OPT"
     ; "--disable", Arg.String Config.Flag.disable, "OPT Disable the option OPT"
@@ -233,7 +238,8 @@ let () =
       Config.set_target `C;
       Config.set_effects_backend `Disabled;
       register_primitives ();
-      try compile ~profile:!profile ~input_file ~output_file
+      if !debug_info then Config.Flag.enable "debuginfo";
+      try compile ~profile:!profile ~debug_info:!debug_info ~input_file ~output_file
       with Failure msg ->
         prerr_endline msg;
         exit 1)

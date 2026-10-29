@@ -245,6 +245,21 @@ static inline value camlc_bytes_set(value s, value i, value c)
 
 value camlc_string_concat(value a, value b);
 
+/* Backtraces: the locations of raises and calls */
+struct camlc_location {
+  const char *filename;
+  const char *defname;
+  int line, start_chr, end_chr;
+  int is_raise;
+};
+
+/* An exception is raised at [loc] ([reraise]: it may be the same as the
+   last one, whose backtrace goes on) */
+void camlc_backtrace_raise(value exn, const struct camlc_location *loc,
+                           int reraise);
+/* An exception goes through the call at [loc] */
+void camlc_backtrace_call(const struct camlc_location *loc);
+
 /* Objects */
 value camlc_oo_cache_id(void);
 value camlc_get_cached_method(value obj, value tag, value cache_id);
