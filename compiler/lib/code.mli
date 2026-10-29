@@ -181,9 +181,14 @@ type constant =
   | Int of Targetint.t
   | Int32 of Int32.t  (** Only produced when compiling to WebAssembly. *)
   | Int64 of Int64.t
-  | NativeInt of Int32.t  (** Only produced when compiling to WebAssembly. *)
+  | NativeInt of Int64.t
+      (** Only produced when compiling to WebAssembly or C. Native integers have
+          64 bits on 64-bit targets, 32 bits otherwise; they are sign-extended. *)
   | Tuple of int * constant array * array_or_not * Block_desc.t
   | Null_
+
+val nativeint_constant : nativeint -> constant
+(** A native integer constant, for the target *)
 
 module Constant : sig
   type t = constant

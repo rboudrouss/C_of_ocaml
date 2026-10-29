@@ -591,7 +591,7 @@ end = struct
             Int32 i
         | Some name when same_ident name ident_native ->
             let i : nativeint = Obj.magic x in
-            NativeInt (Int32.of_nativeint_warning_on_overflow i)
+            nativeint_constant i
         | Some name when same_ident name ident_64 -> Int64 (Obj.magic x : int64)
         | Some name ->
             failwith

@@ -33,8 +33,7 @@ end = struct
     | Const_base (Const_float s) -> Float (Int64.bits_of_float (float_of_string s))
     | Const_base (Const_int32 i) -> Int32 i
     | Const_base (Const_int64 i) -> Int64 i
-    | Const_base (Const_nativeint i) ->
-        NativeInt (Int32.of_nativeint_warning_on_overflow i)
+    | Const_base (Const_nativeint i) -> Code.nativeint_constant i
     | Const_immstring s -> String s
     | Const_float_array sl ->
         let l = List.map ~f:(fun f -> Int64.bits_of_float (float_of_string f)) sl in
