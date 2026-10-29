@@ -16,6 +16,11 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *)
 
-val f : Code.program -> Closure_conversion.closure Code.Var.Map.t -> string
-(** [f p closures] is the C translation of the whole program [p], whose
-    closures are [closures] (see {!Closure_conversion.f}) *)
+val f :
+     Code.program
+  -> global_flow_info:Global_flow.info
+  -> Closure_conversion.closure Code.Var.Map.t
+  -> string
+(** [f p ~global_flow_info closures] is the C translation of the whole
+    program [p], whose closures are [closures] (see
+    {!Closure_conversion.f}) *)

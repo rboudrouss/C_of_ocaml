@@ -310,12 +310,239 @@ let primitive out name args =
       else (* Handled by the caller: the arguments go on the shadow stack *)
         Checked ""
 
+(* Primitives which never trigger a garbage collection *)
+let nogc_primitives =
+  StringSet.of_list
+    [ "%identity"
+    ; "caml_bytes_of_string"
+    ; "caml_string_of_bytes"
+    ; "%int_add"
+    ; "%int_sub"
+    ; "%int_mul"
+    ; "%direct_int_mul"
+    ; "%int_neg"
+    ; "%int_and"
+    ; "%int_or"
+    ; "%int_xor"
+    ; "%int_lsl"
+    ; "%int_lsr"
+    ; "%int_asr"
+    ; "%direct_int_div"
+    ; "%direct_int_mod"
+    ; "%int_div"
+    ; "%int_mod"
+    ; "caml_int_compare"
+    ; "%direct_obj_tag"
+    ; "caml_ml_string_length"
+    ; "caml_ml_bytes_length"
+    ; "caml_string_unsafe_get"
+    ; "caml_bytes_unsafe_get"
+    ; "caml_string_unsafe_set"
+    ; "caml_bytes_unsafe_set"
+    ; "caml_array_unsafe_set_addr"
+    ; "caml_register_global"
+    ; "caml_register_global_predef"
+    ; "caml_register_global_by_index"
+    ; "caml_get_global_data"
+    ; "caml_oo_cache_id"
+    ; "caml_get_cached_method"
+    ]
+
+(* Primitives whose result is an integer *)
+let int_primitives =
+  StringSet.of_list
+    [ "%int_add"
+    ; "%int_sub"
+    ; "%int_mul"
+    ; "%direct_int_mul"
+    ; "%int_neg"
+    ; "%int_and"
+    ; "%int_or"
+    ; "%int_xor"
+    ; "%int_lsl"
+    ; "%int_lsr"
+    ; "%int_asr"
+    ; "%direct_int_div"
+    ; "%direct_int_mod"
+    ; "%int_div"
+    ; "%int_mod"
+    ; "caml_int_compare"
+    ; "%direct_obj_tag"
+    ; "caml_ml_string_length"
+    ; "caml_ml_bytes_length"
+    ; "caml_string_unsafe_get"
+    ; "caml_bytes_unsafe_get"
+    ; "caml_string_get"
+    ; "caml_bytes_get"
+    ; "caml_int_of_string"
+    ; "caml_int_of_float"
+    ; "caml_string_compare"
+    ; "caml_bytes_compare"
+    ; "caml_string_equal"
+    ; "caml_string_notequal"
+    ; "caml_string_lessthan"
+    ; "caml_string_lessequal"
+    ; "caml_string_greaterthan"
+    ; "caml_string_greaterequal"
+    ; "caml_bytes_equal"
+    ; "caml_bytes_notequal"
+    ; "caml_compare"
+    ; "caml_equal"
+    ; "caml_notequal"
+    ; "caml_lessthan"
+    ; "caml_lessequal"
+    ; "caml_greaterthan"
+    ; "caml_greaterequal"
+    ; "caml_float_compare"
+    ; "caml_eq_float"
+    ; "caml_neq_float"
+    ; "caml_lt_float"
+    ; "caml_le_float"
+    ; "caml_gt_float"
+    ; "caml_ge_float"
+    ; "caml_hash"
+    ; "caml_obj_tag"
+    ; "caml_ml_input_char"
+    ; "caml_ml_input_int"
+    ; "caml_ml_input"
+    ; "caml_ml_channel_size"
+    ; "caml_ml_pos_in"
+    ; "caml_ml_pos_out"
+    ; "caml_lex_engine"
+    ; "caml_new_lex_engine"
+    ; "caml_int64_to_int"
+    ; "caml_int32_to_int"
+    ; "caml_nativeint_to_int"
+    ; "caml_int64_compare"
+    ; "caml_int32_compare"
+    ; "caml_nativeint_compare"
+    ]
+
+(* Primitives whose arguments are integers *)
+let int_argument_primitives =
+  StringSet.of_list
+    [ "%int_add"
+    ; "%int_sub"
+    ; "%int_mul"
+    ; "%direct_int_mul"
+    ; "%int_neg"
+    ; "%int_and"
+    ; "%int_or"
+    ; "%int_xor"
+    ; "%int_lsl"
+    ; "%int_lsr"
+    ; "%int_asr"
+    ; "%direct_int_div"
+    ; "%direct_int_mod"
+    ; "%int_div"
+    ; "%int_mod"
+    ; "caml_int_compare"
+    ]
+
+(****)
+
+(* Program-wide facts about variables *)
+
+type facts =
+  { is_int : BitSet.t  (** The variable holds an integer *)
+  ; is_static : BitSet.t  (** The variable holds static data, outside the heap *)
+  }
+
+let compute_facts (p : program) closures =
+  let is_int = BitSet.create' (Var.count ()) in
+  let is_static = BitSet.create' (Var.count ()) in
+  let set_int x = BitSet.set is_int (Var.idx x) in
+  let int x = BitSet.mem is_int (Var.idx x) in
+  let int_arg a =
+    match a with
+    | Pv x -> set_int x
+    | Pc _ -> ()
+  in
+  (* Definitions and uses which imply an integer *)
+  Addr.Map.iter
+    (fun _ block ->
+      List.iter block.body ~f:(fun i ->
+          match i with
+          | Let (x, Constant (Int _)) -> set_int x
+          | Let (x, Constant (Tuple (_, [||], _, _))) -> BitSet.set is_static (Var.idx x)
+          | Let (x, Constant _) -> BitSet.set is_static (Var.idx x)
+          | Let (x, Closure _) -> (
+              match Var.Map.find_opt x closures with
+              | Some { Closure_conversion.free_variables = []; _ } ->
+                  BitSet.set is_static (Var.idx x)
+              | Some _ | None -> ())
+          | Let (x, Block (_, [||], _, _, _)) -> BitSet.set is_static (Var.idx x)
+          | Let (x, Field (_, _, Immediate)) -> set_int x
+          | Let (x, Prim (Array_get Immediate, _)) -> set_int x
+          | Let (x, Prim ((Vectlength _ | Not | IsInt _ | Eq _ | Neq _), _)) -> set_int x
+          | Let (x, Prim ((Lt | Le | Ult), args)) ->
+              set_int x;
+              List.iter args ~f:int_arg
+          | Let (x, Prim (Extern (name, _), args)) ->
+              if StringSet.mem name int_primitives then set_int x;
+              if StringSet.mem name int_argument_primitives then List.iter args ~f:int_arg
+          | Offset_ref _ | Let _ | Assign _ | Set_field _ | Array_set _ | Event _ -> ());
+      match block.branch with
+      | Switch (x, _) -> set_int x
+      | _ -> ())
+    p.blocks;
+  (* Block parameters and assigned variables all of whose values are
+     integers *)
+  let sources = Var.Hashtbl.create 1024 in
+  let add_source x y =
+    Var.Hashtbl.replace
+      sources
+      x
+      (y :: (Var.Hashtbl.find_opt sources x |> Option.value ~default:[]))
+  in
+  let add_cont (pc, args) =
+    let params = (Addr.Map.find pc p.blocks).params in
+    List.iter2 params args ~f:add_source
+  in
+  Addr.Map.iter
+    (fun _ block ->
+      List.iter block.body ~f:(fun i ->
+          match i with
+          | Assign (x, y) -> add_source x y
+          | Let (_, Closure (params, cont, _)) ->
+              (* Function parameters can be anything *)
+              List.iter params ~f:(fun x -> add_source x x);
+              add_cont cont
+          | _ -> ());
+      match block.branch with
+      | Branch cont | Poptrap cont -> add_cont cont
+      | Cond (_, c1, c2) ->
+          add_cont c1;
+          add_cont c2
+      | Switch (_, conts) -> Array.iter conts ~f:add_cont
+      | Pushtrap (c1, x, c2) ->
+          add_source x x;
+          add_cont c1;
+          add_cont c2
+      | Return _ | Raise _ | Stop -> ())
+    p.blocks;
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    Var.Hashtbl.iter
+      (fun x l ->
+        if (not (int x)) && List.for_all l ~f:(fun y -> (not (Var.equal x y)) && int y)
+        then (
+          set_int x;
+          changed := true))
+      sources
+  done;
+  (* An assigned variable or a block parameter is static only if it is
+     always the same static value: we do not track that *)
+  Var.Hashtbl.iter (fun x _ -> BitSet.unset is_static (Var.idx x)) sources;
+  { is_int; is_static }
+
 (****)
 
 (* Functions *)
 
 type location =
-  | Slot of int  (** In the frame of the function *)
+  | Local  (** A variable of the function *)
   | Env of int  (** A field of the closure *)
   | Sibling of int  (** A function of the same closure, at this offset in words *)
 
@@ -326,34 +553,40 @@ type trap =
 
 type fctx =
   { out : output
+  ; facts : facts
+  ; global_flow_info : Global_flow.info
   ; blocks : block Addr.Map.t
   ; closures : Closure_conversion.closure Var.Map.t
+  ; env_var : Var.t  (** Stands for the closure of the function *)
+  ; static_env : bool  (** The closure is static data *)
   ; locations : location Var.Hashtbl.t
-  ; mutable slot_count : int
+  ; slots : int Var.Hashtbl.t  (** The variables in the frame *)
   ; traps : trap list Addr.Hashtbl.t  (** The handlers in scope in each block *)
   ; handler_ids : int Addr.Hashtbl.t  (** The handler of the [Pushtrap] ending a block *)
   ; buf : Buffer.t
   }
 
+let local_name ctx x =
+  if Var.equal x ctx.env_var then "env" else Printf.sprintf "v%d" (Var.idx x)
+
+let local ctx x =
+  match Var.Hashtbl.find_opt ctx.slots x with
+  | Some i -> Printf.sprintf "fp[%d]" i
+  | None -> local_name ctx x
+
 let var ctx x =
   match Var.Hashtbl.find_opt ctx.locations x with
-  | Some (Slot i) -> Printf.sprintf "fp[%d]" i
-  | Some (Env i) -> Printf.sprintf "Field(fp[0], %d)" i
-  | Some (Sibling 0) -> "fp[0]"
-  | Some (Sibling d) -> Printf.sprintf "((value)((value *)fp[0] + %d))" d
+  | Some Local -> local ctx x
+  | Some (Env i) -> Printf.sprintf "Field(%s, %d)" (local ctx ctx.env_var) i
+  | Some (Sibling 0) -> local ctx ctx.env_var
+  | Some (Sibling d) -> Printf.sprintf "((value)((value *)%s + %d))" (local ctx ctx.env_var) d
   | None -> failwith (Format.asprintf "c_of_ocaml: unbound variable %a" Var.print x)
 
 let slot ctx x =
   match Var.Hashtbl.find_opt ctx.locations x with
-  | Some (Slot i) -> Printf.sprintf "fp[%d]" i
+  | Some Local -> local ctx x
   | Some (Env _ | Sibling _) | None ->
-      failwith (Format.asprintf "c_of_ocaml: variable %a has no slot" Var.print x)
-
-let add_slot ctx x =
-  if not (Var.Hashtbl.mem ctx.locations x)
-  then (
-    Var.Hashtbl.add ctx.locations x (Slot ctx.slot_count);
-    ctx.slot_count <- ctx.slot_count + 1)
+      failwith (Format.asprintf "c_of_ocaml: variable %a is not local" Var.print x)
 
 let prim_arg ctx a =
   match a with
@@ -362,13 +595,16 @@ let prim_arg ctx a =
 
 let line ctx fmt = Printf.bprintf ctx.buf ("  " ^^ fmt ^^ "\n")
 
-let return_stmt e = Printf.sprintf "{ camlc_sp = fp + FRAME_SIZE; return %s; }" e
+let return_stmt ctx e =
+  if Var.Hashtbl.length ctx.slots = 0
+  then Printf.sprintf "return %s;" e
+  else Printf.sprintf "{ value res = %s; camlc_sp = fp + FRAME_SIZE; return res; }" e
 
 (* Jump to the handler of the innermost trap, or return the exception
    result [r] *)
 let raise_stmt ctx traps r =
   match traps with
-  | [] -> return_stmt r
+  | [] -> return_stmt ctx r
   | { exn_var; id; _ } :: _ ->
       Printf.sprintf "{ %s = Extract_exception(%s); goto H%d; }" (slot ctx exn_var) r id
 
@@ -475,21 +711,32 @@ let translate_instr ctx traps i =
         line ctx "%s = r;" dst
       in
       match e with
-      | Apply { f; args; exact } ->
+      | Apply { f; args; exact } -> (
           let n = List.length args in
-          let f = var ctx f in
+          let fe = var ctx f in
           let args = List.map args ~f:(fun x -> var ctx x) in
-          if exact
-          then
-            checked
-              (Printf.sprintf
-                 "((%s)Field(%s, 0))(%s)"
-                 (fun_type n)
-                 f
-                 (String.concat ~sep:", " (args @ [ f ])))
-          else (
-            apply_arity ctx.out n;
-            checked (c_call (Printf.sprintf "camlc_apply%d" n) (f :: args)))
+          let unique =
+            if exact
+            then
+              match Global_flow.get_unique_closure ctx.global_flow_info ~call:x f with
+              | Some (g, _, false) when Var.Map.mem g ctx.closures -> Some g
+              | Some _ | None -> None
+            else None
+          in
+          match unique with
+          | Some g -> checked (c_call (fun_name ctx.out g) (args @ [ fe ]))
+          | None ->
+              if exact
+              then
+                checked
+                  (Printf.sprintf
+                     "((%s)Field(%s, 0))(%s)"
+                     (fun_type n)
+                     fe
+                     (String.concat ~sep:", " (args @ [ fe ])))
+              else (
+                apply_arity ctx.out n;
+                checked (c_call (Printf.sprintf "camlc_apply%d" n) (fe :: args))))
       | Block (tag, a, _, _, _) ->
           if Array.length a = 0
           then line ctx "%s = Atom(%d);" dst tag
@@ -563,20 +810,29 @@ let translate_instr ctx traps i =
   | Set_field (x, i, Float, y) ->
       line ctx "Store_double_flat_field(%s, %d, Double_val(%s));" (var ctx x) i (var ctx y)
   | Offset_ref (x, n) ->
-      line ctx "Field(%s, 0) = (value)((uintnat)Field(%s, 0) + %d);" (var ctx x) (var ctx x) (2 * n)
+      line
+        ctx
+        "Field(%s, 0) = (value)((uintnat)Field(%s, 0) + %d);"
+        (var ctx x)
+        (var ctx x)
+        (2 * n)
   | Array_set (x, i, y) ->
       line ctx "caml_modify(&Field(%s, Long_val(%s)), %s);" (var ctx x) (var ctx i) (var ctx y)
   | Event _ -> ()
 
 let translate_last ctx traps last =
   match last with
-  | Return x -> line ctx "%s" (return_stmt (var ctx x))
+  | Return x -> line ctx "%s" (return_stmt ctx (var ctx x))
   | Raise (x, _) -> (
       match traps with
-      | [] -> line ctx "%s" (return_stmt (Printf.sprintf "Make_exception_result(%s)" (var ctx x)))
+      | [] ->
+          line
+            ctx
+            "%s"
+            (return_stmt ctx (Printf.sprintf "Make_exception_result(%s)" (var ctx x)))
       | { exn_var; id; _ } :: _ ->
           line ctx "%s = %s; goto H%d;" (slot ctx exn_var) (var ctx x) id)
-  | Stop -> line ctx "%s" (return_stmt "Val_unit")
+  | Stop -> line ctx "%s" (return_stmt ctx "Val_unit")
   | Branch cont -> line ctx "%s" (branch ctx cont)
   | Cond (x, c1, c2) ->
       line ctx "if (%s != Val_false) %s" (var ctx x) (branch ctx c1);
@@ -627,33 +883,232 @@ let function_blocks ctx pc =
   visit pc [];
   List.rev !order
 
-let translate_function out blocks closures ~name ~params ~env (pc, args) =
+(****)
+
+(* Liveness, to find the variables which must survive a garbage
+   collection: they are kept in the frame of the function *)
+
+(* The local variables used by an expression, the variables of the
+   enclosing functions standing for the closure *)
+let use ctx x acc =
+  match Var.Hashtbl.find_opt ctx.locations x with
+  | Some Local -> Var.Set.add x acc
+  | Some (Env _ | Sibling _) -> Var.Set.add ctx.env_var acc
+  | None -> acc
+
+let use_list ctx l acc = List.fold_left l ~init:acc ~f:(fun acc x -> use ctx x acc)
+
+let use_prim_args ctx l acc =
+  List.fold_left l ~init:acc ~f:(fun acc a ->
+      match a with
+      | Pv x -> use ctx x acc
+      | Pc _ -> acc)
+
+let expr_uses ctx x e acc =
+  match e with
+  | Apply { f; args; _ } -> use ctx f (use_list ctx args acc)
+  | Block (_, a, _, _, _) -> use_list ctx (Array.to_list a) acc
+  | Field (y, _, _) -> use ctx y acc
+  | Closure _ -> (
+      match Var.Map.find_opt x ctx.closures with
+      | Some info -> use_list ctx info.free_variables acc
+      | None -> acc)
+  | Constant _ | Special _ -> acc
+  | Prim (_, args) -> use_prim_args ctx args acc
+
+(* How an instruction may trigger a garbage collection: [`Call] if its
+   operands are read before, [`Alloc] if they are read after *)
+let gc_point ctx i =
+  match i with
+  | Let (_, Apply _) -> `Call
+  | Let (_, Block (_, [||], _, _, _)) -> `No
+  | Let (_, Block _) -> `Alloc
+  | Let (x, Closure _) -> (
+      match Var.Map.find_opt x ctx.closures with
+      | Some { functions = (f0, _) :: _; free_variables = _ :: _; _ } when Var.equal x f0
+        -> `Alloc
+      | Some _ | None -> `No)
+  | Let (_, Field (_, _, Float)) -> `Call
+  | Let (_, Prim (Extern (name, _), _)) ->
+      if StringSet.mem name nogc_primitives then `No else `Call
+  | Let (_, Prim ((Vectlength Generic | Array_get Float), _)) -> `No
+  | Let (_, (Field _ | Constant _ | Special _ | Prim _)) -> `No
+  | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ -> `No
+
+let instr_defs i =
+  match i with
+  | Let (x, _) | Assign (x, _) -> Some x
+  | Set_field _ | Offset_ref _ | Array_set _ | Event _ -> None
+
+let instr_uses ctx i acc =
+  match i with
+  | Let (x, e) -> expr_uses ctx x e acc
+  | Assign (_, y) -> use ctx y acc
+  | Set_field (x, _, _, y) -> use ctx x (use ctx y acc)
+  | Offset_ref (x, _) -> use ctx x acc
+  | Array_set (x, y, z) -> use ctx x (use ctx y (use ctx z acc))
+  | Event _ -> acc
+
+let cont_uses ctx live_in (pc, args) acc =
+  let params = (Addr.Map.find pc ctx.blocks).params in
+  let l = Addr.Hashtbl.find_opt live_in pc |> Option.value ~default:Var.Set.empty in
+  use_list ctx args (Var.Set.union acc (List.fold_left params ~init:l ~f:(fun l x -> Var.Set.remove x l)))
+
+let live_out ctx live_in pc =
+  let block = Addr.Map.find pc ctx.blocks in
+  let acc =
+    match block.branch with
+    | Return x | Raise (x, _) -> use ctx x Var.Set.empty
+    | Stop -> Var.Set.empty
+    | Branch cont | Poptrap cont | Pushtrap (cont, _, _) ->
+        cont_uses ctx live_in cont Var.Set.empty
+    | Cond (x, c1, c2) ->
+        use ctx x (cont_uses ctx live_in c1 (cont_uses ctx live_in c2 Var.Set.empty))
+    | Switch (x, conts) ->
+        use
+          ctx
+          x
+          (Array.fold_left conts ~init:Var.Set.empty ~f:(fun acc c ->
+               cont_uses ctx live_in c acc))
+  in
+  (* The handler of the innermost trap may be reached from any point of
+     the block *)
+  match Addr.Hashtbl.find ctx.traps pc with
+  | [] -> acc
+  | { exn_var; id } :: _ ->
+      let handler =
+        Addr.Hashtbl.fold
+          (fun pc' id' h ->
+            if id = id'
+            then
+              match (Addr.Map.find pc' ctx.blocks).branch with
+              | Pushtrap (_, _, h) -> Some h
+              | _ -> h
+            else h)
+          ctx.handler_ids
+          None
+      in
+      let h =
+        match handler with
+        | Some h -> h
+        | None -> assert false
+      in
+      Var.Set.remove exn_var (cont_uses ctx live_in h acc)
+
+(* The variables which must be kept in the frame *)
+let rooted_variables ctx pcs ~params =
+  let live_in = Addr.Hashtbl.create 64 in
+  let block_live_in pc live =
+    let block = Addr.Map.find pc ctx.blocks in
+    List.fold_right block.body ~init:live ~f:(fun i live ->
+        let live =
+          match instr_defs i with
+          | Some x -> Var.Set.remove x live
+          | None -> live
+        in
+        instr_uses ctx i live)
+  in
+  let changed = ref true in
+  let rpcs = List.rev pcs in
+  while !changed do
+    changed := false;
+    List.iter rpcs ~f:(fun pc ->
+        let l = block_live_in pc (live_out ctx live_in pc) in
+        match Addr.Hashtbl.find_opt live_in pc with
+        | Some l' when Var.Set.equal l l' -> ()
+        | _ ->
+            Addr.Hashtbl.replace live_in pc l;
+            changed := true)
+  done;
+  let rooted = ref Var.Set.empty in
+  List.iter pcs ~f:(fun pc ->
+      let block = Addr.Map.find pc ctx.blocks in
+      ignore
+        (List.fold_right block.body ~init:(live_out ctx live_in pc) ~f:(fun i live ->
+             let def = instr_defs i in
+             let live_after =
+               match def with
+               | Some x -> Var.Set.remove x live
+               | None -> live
+             in
+             (match gc_point ctx i with
+             | `No -> ()
+             | `Call -> rooted := Var.Set.union !rooted live_after
+             | `Alloc ->
+                 let l = instr_uses ctx i live_after in
+                 rooted :=
+                   Var.Set.union
+                     !rooted
+                     (match def with
+                     | Some x -> Var.Set.remove x l
+                     | None -> l));
+             instr_uses ctx i live_after)));
+  ignore params;
+  Var.Set.filter
+    (fun x ->
+      if Var.equal x ctx.env_var
+      then not ctx.static_env
+      else
+        not
+          (BitSet.mem ctx.facts.is_int (Var.idx x)
+          || BitSet.mem ctx.facts.is_static (Var.idx x)))
+    !rooted
+
+(****)
+
+let translate_function
+    out
+    facts
+    global_flow_info
+    blocks
+    closures
+    ~name
+    ~params
+    ~env
+    ~static_env
+    (pc, args) =
   let ctx =
     { out
+    ; facts
+    ; global_flow_info
     ; blocks
     ; closures
+    ; env_var = Var.fresh ()
+    ; static_env
     ; locations = Var.Hashtbl.create 64
-    ; slot_count = 1 (* the closure *)
+    ; slots = Var.Hashtbl.create 16
     ; traps = Addr.Hashtbl.create 16
     ; handler_ids = Addr.Hashtbl.create 16
     ; buf = Buffer.create 4096
     }
   in
   List.iter env ~f:(fun (x, loc) -> Var.Hashtbl.replace ctx.locations x loc);
-  List.iter params ~f:(fun x -> add_slot ctx x);
+  let locals = ref [] in
+  let add_local x =
+    if not (Var.Hashtbl.mem ctx.locations x)
+    then (
+      Var.Hashtbl.add ctx.locations x Local;
+      locals := x :: !locals)
+  in
+  List.iter params ~f:add_local;
   let pcs = function_blocks ctx pc in
   List.iter pcs ~f:(fun pc ->
       let block = Addr.Map.find pc blocks in
-      List.iter block.params ~f:(fun x -> add_slot ctx x);
+      List.iter block.params ~f:add_local;
       List.iter block.body ~f:(fun i ->
           match i with
-          | Let (x, _) -> add_slot ctx x
-          | Assign (x, _) -> add_slot ctx x
+          | Let (x, _) | Assign (x, _) -> add_local x
           | Set_field _ | Offset_ref _ | Array_set _ | Event _ -> ());
       match block.branch with
-      | Pushtrap (_, x, _) -> add_slot ctx x
+      | Pushtrap (_, x, _) -> add_local x
       | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ());
-  List.iteri params ~f:(fun i x -> line ctx "%s = a%d;" (slot ctx x) i);
+  let rooted = rooted_variables ctx pcs ~params in
+  Var.Set.iter (fun x -> Var.Hashtbl.add ctx.slots x (Var.Hashtbl.length ctx.slots)) rooted;
+  let frame_size = Var.Hashtbl.length ctx.slots in
+  (* Body *)
+  List.iteri params ~f:(fun i x ->
+      if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (local ctx x) i);
+  if Var.Hashtbl.mem ctx.slots ctx.env_var then line ctx "%s = env;" (local ctx ctx.env_var);
   line ctx "%s" (branch ctx (pc, args));
   List.iter pcs ~f:(fun pc ->
       let block = Addr.Map.find pc blocks in
@@ -666,22 +1121,53 @@ let translate_function out blocks closures ~name ~params ~env (pc, args) =
           Printf.bprintf ctx.buf " H%d:;\n" (Addr.Hashtbl.find ctx.handler_ids pc);
           line ctx "%s" (branch ctx handler)
       | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ());
-  let frame_size = ctx.slot_count in
-  Printf.bprintf
-    out.functions
-    "%s {\n\
-    \  value *fp = camlc_sp - FRAME_SIZE;\n\
-    \  value r, b, *argv;\n\
-    \  (void)r; (void)b; (void)argv;\n\
-    \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();\n\
-    \  camlc_sp = fp;\n\
-    \  for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;\n\
-    \  %s\n\
-     %s}\n\
-     #undef FRAME_SIZE\n\n"
-    (Printf.sprintf "#define FRAME_SIZE %d\n%s" frame_size name)
-    (if List.is_empty params && List.is_empty env then "" else "fp[0] = env;")
-    (Buffer.contents ctx.buf)
+  let param_set = Var.Set.of_list params in
+  let decls =
+    List.filter_map (List.rev !locals) ~f:(fun x ->
+        if Var.Hashtbl.mem ctx.slots x || Var.Set.mem x param_set
+        then None
+        else Some (local_name ctx x))
+  in
+  let params_c =
+    String.concat
+      ~sep:", "
+      (List.map params ~f:(fun x ->
+           if Var.Hashtbl.mem ctx.slots x
+           then
+             Printf.sprintf
+               "value a%d"
+               (let rec index i l =
+                  match l with
+                  | y :: r -> if Var.equal x y then i else index (i + 1) r
+                  | [] -> assert false
+                in
+                index 0 params)
+           else "value " ^ local_name ctx x)
+      @ if List.is_empty env then [] else [ "value env" ])
+  in
+  Printf.bprintf out.functions "%s(%s) {\n" name (if String.equal params_c "" then "void" else params_c);
+  if not (List.is_empty decls)
+  then
+    List.iteri decls ~f:(fun i d ->
+        if i mod 16 = 0 then Buffer.add_string out.functions (if i = 0 then "  value " else ";\n  value ");
+        if i mod 16 <> 0 then Buffer.add_string out.functions ", ";
+        Buffer.add_string out.functions d);
+  if not (List.is_empty decls) then Buffer.add_string out.functions ";\n";
+  Buffer.add_string out.functions "  value r, b, *argv;\n  (void)r; (void)b; (void)argv;\n";
+  if frame_size > 0
+  then
+    Printf.bprintf
+      out.functions
+      "#define FRAME_SIZE %d\n\
+      \  value *fp = camlc_sp - FRAME_SIZE;\n\
+      \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();\n\
+      \  camlc_sp = fp;\n\
+      \  for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;\n"
+      frame_size;
+  Buffer.add_buffer out.functions ctx.buf;
+  Buffer.add_string out.functions "}\n";
+  if frame_size > 0 then Buffer.add_string out.functions "#undef FRAME_SIZE\n";
+  Buffer.add_char out.functions '\n'
 
 (****)
 
@@ -710,7 +1196,8 @@ let collect_functions p =
       | None -> acc)
     []
 
-let f (p : program) closures =
+let f (p : program) ~global_flow_info closures =
+  let facts = compute_facts p closures in
   let out =
     { data = Buffer.create 65536
     ; functions = Buffer.create 65536
@@ -745,23 +1232,25 @@ let f (p : program) closures =
       in
       translate_function
         out
+        facts
+        global_flow_info
         p.blocks
         closures
-        ~name:
-          (Printf.sprintf
-             "static value %s(%s)"
-             (fun_name out f)
-             (fun_params (List.length params)))
+        ~name:(Printf.sprintf "static value %s" (fun_name out f))
         ~params
         ~env
+        ~static_env:(List.is_empty info.free_variables)
         cont);
   translate_function
     out
+    facts
+    global_flow_info
     p.blocks
     closures
-    ~name:"value camlc_program(void)"
+    ~name:"value camlc_program"
     ~params:[]
     ~env:[]
+    ~static_env:true
     (p.start, []);
   (* Assemble the output *)
   let b = Buffer.create (Buffer.length out.data + Buffer.length out.functions + 65536) in
