@@ -118,3 +118,24 @@ Not supported yet:
   ocaml-emcc runs compiled programs in a worker thread with a large
   stack);
 - signals and finalisers only run when the runtime polls by itself.
+
+## Next steps
+
+- **Effect handlers.** The way to go is the double translation of
+  js_of_ocaml (`--effects=double-translation`, `compiler/lib/effects.ml`):
+  the functions that may perform an effect get a CPS version, the others
+  keep their direct style, so programs without effects do not pay for
+  them. It needs, in the C backend, closures with the code pointers of
+  both versions (as `Gc_target.double_translation` in lib-wasm), and in
+  the runtime support the CPS primitives (`%perform`, `%resume`,
+  `%reperform`, `%with_stack`, `caml_push_trap`/`caml_pop_trap`, the
+  trampolines), as `runtime/wasm/effect.wat` does for wasm. CPS calls are
+  tail calls of various signatures, which `musttail` cannot always make:
+  they need a trampoline, or a uniform signature.
+- **wasm64.** `Targetint` has at most 32 bits, and nativeint constants are
+  32-bit in the intermediate code (`Code.constant`): both need 64-bit
+  variants. The C backend itself only has to know the word size
+  (`word_size`, tagged constants, string padding).
+- Shrink-wrapping: allocate the frame on the shadow stack only in the
+  branches that need it.
+
