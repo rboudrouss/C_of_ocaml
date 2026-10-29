@@ -30,7 +30,8 @@
 open! Stdlib
 open Code
 
-let word_size = 4
+(* 4 on wasm32 (31-bit integers), 8 on wasm64 (63-bit integers) *)
+let word_size () = if Targetint.num_bits () > 32 then 8 else 4
 
 (* Effect handlers: functions which may perform an effect have a CPS
    version, run on fibers by the runtime (see camlc.h) *)
@@ -60,9 +61,12 @@ let c_string s =
   Buffer.contents b
 
 let tagged_int i =
-  (* [Targetint] has 31 bits: the tagged representation fits in 32 bits *)
-  let i = Targetint.to_int32 i in
-  Printf.sprintf "((value)0x%lxu)" (Int32.add (Int32.shift_left i 1) 1l)
+  (* The tagged representation fits in a word *)
+  let i = Targetint.to_int64 i in
+  let t = Int64.add (Int64.shift_left i 1) 1L in
+  if word_size () = 8
+  then Printf.sprintf "((value)0x%LxULL)" t
+  else Printf.sprintf "((value)0x%lxu)" (Int64.to_int32 t)
 
 (* The representation of a variable in C: OCaml values, or unboxed numbers
    (see {!Typing}) *)
@@ -205,25 +209,30 @@ let header ~wosize ~tag =
 let words_of_bytes s =
   (* Little-endian words of the string [s] followed by the padding of
      OCaml strings *)
+  let word_size = word_size () in
   let len = String.length s in
   let wosize = (len / word_size) + 1 in
   let bytes = Bytes.make (wosize * word_size) '\000' in
   Bytes.blit_string ~src:s ~src_pos:0 ~dst:bytes ~dst_pos:0 ~len;
   Bytes.set bytes ((wosize * word_size) - 1) (Char.chr ((wosize * word_size) - 1 - len));
   List.init ~len:wosize ~f:(fun i ->
-      let w = ref 0l in
+      let w = ref 0L in
       for j = word_size - 1 downto 0 do
         w :=
-          Int32.logor
-            (Int32.shift_left !w 8)
-            (Int32.of_int (Char.code (Bytes.get bytes ((i * word_size) + j))))
+          Int64.logor
+            (Int64.shift_left !w 8)
+            (Int64.of_int (Char.code (Bytes.get bytes ((i * word_size) + j))))
       done;
-      Printf.sprintf "(value)0x%lxu" !w)
+      Printf.sprintf "(value)0x%LxULL" !w)
 
+(* The words of a 64-bit number *)
 let int64_words i =
-  [ Printf.sprintf "(value)0x%Lxu" (Int64.logand i 0xffffffffL)
-  ; Printf.sprintf "(value)0x%Lxu" (Int64.shift_right_logical i 32)
-  ]
+  if word_size () = 8
+  then [ Printf.sprintf "(value)0x%LxULL" i ]
+  else
+    [ Printf.sprintf "(value)0x%Lxu" (Int64.logand i 0xffffffffL)
+    ; Printf.sprintf "(value)0x%Lxu" (Int64.shift_right_logical i 32)
+    ]
 
 let int32_word i = Printf.sprintf "(value)0x%lxu" i
 
@@ -270,7 +279,14 @@ and block_constant out c =
   | Int32 i ->
       emit_block out ~tag:Obj.custom_tag [ "(value)&caml_int32_ops"; int32_word i ]
   | NativeInt i ->
-      emit_block out ~tag:Obj.custom_tag [ "(value)&caml_nativeint_ops"; int32_word i ]
+      emit_block
+        out
+        ~tag:Obj.custom_tag
+        [ "(value)&caml_nativeint_ops"
+        ; (if word_size () = 8
+           then Printf.sprintf "(value)0x%LxULL" i
+           else int32_word (Int64.to_int32 i))
+        ]
   | Tuple (tag, a, _, _) ->
       let fields = Array.to_list (Array.map a ~f:(fun c -> constant out c)) in
       emit_block out ~tag fields
@@ -377,7 +393,7 @@ let bits r =
   match r with
   | Unboxed_int64 -> 64
   | Unboxed_int32 -> 32
-  | Unboxed_nativeint -> 32
+  | Unboxed_nativeint -> 8 * word_size ()
   | Value | Double -> assert false
 
 (* Polymorphic comparisons specialized to integers or numbers, as allowed
@@ -1081,7 +1097,7 @@ let constant_repr out c r =
   | Double, Float f -> Printf.sprintf "camlc_double_of_bits(0x%LxULL)" f
   | Unboxed_int64, Int64 i -> Printf.sprintf "((int64_t)0x%LxULL)" i
   | Unboxed_int32, Int32 i -> Printf.sprintf "((int32_t)0x%lxU)" i
-  | Unboxed_nativeint, NativeInt i -> Printf.sprintf "((intnat)0x%lxU)" i
+  | Unboxed_nativeint, NativeInt i -> Printf.sprintf "((intnat)0x%LxULL)" i
   | _ -> failwith "c_of_ocaml: a constant of the wrong type"
 
 let prim_arg ctx a =
@@ -1466,7 +1482,7 @@ let translate_instr ctx traps i =
           then line ctx "%s = Atom(%d);" dst tag
           else if tag = Obj.double_array_tag
           then (
-            let wosize = Array.length a * 2 in
+            let wosize = Array.length a * 8 / word_size () in
             if wosize <= 256
             then line ctx "b = camlc_alloc_small(%d, Double_array_tag);" wosize
             else line ctx "b = caml_alloc_shr(%d, Double_array_tag);" wosize;
@@ -2130,7 +2146,7 @@ let f
   Printf.bprintf
     b
     "_Static_assert(sizeof(value) == %d, \"c_of_ocaml: wrong word size\");\n\n"
-    word_size;
+    (word_size ());
   String.Hashtbl.iter
     (fun name n ->
       if n <= 5

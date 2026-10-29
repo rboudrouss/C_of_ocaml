@@ -238,6 +238,7 @@ let () =
   let profile = ref Profile.O1 in
   let debug_info = ref false in
   let effects = ref None in
+  let word_size = ref 32 in
   let spec =
     [ "-o", Arg.String (fun s -> output_file := Some s), "FILE Write the C code to FILE"
     ; ( "--opt"
@@ -253,6 +254,10 @@ let () =
     ; ( "--debug-info"
       , Arg.Set debug_info
       , " Record backtraces with the locations of the debug events (ocamlc -g)" )
+    ; ( "--word-size"
+      , Arg.Symbol ([ "32"; "64" ], fun s -> word_size := int_of_string s)
+      , " Word size of the target, in bits: 32 for wasm32 (31-bit integers, the \
+         default), 64 for wasm64 (63-bit integers)" )
     ; ( "--effects"
       , Arg.Symbol
           ( [ "disabled"; "double-translation" ]
@@ -274,6 +279,7 @@ let () =
   | None, None, Some dir -> write_runtime_files dir
   | Some input_file, Some output_file, None -> (
       Config.set_target `C;
+      if !word_size = 64 then Targetint.set_num_bits 63;
       register_primitives ();
       if !debug_info then Config.Flag.enable "debuginfo";
       try
