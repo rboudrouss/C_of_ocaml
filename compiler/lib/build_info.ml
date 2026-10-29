@@ -90,6 +90,7 @@ let config_keys target =
     match target with
     | `JavaScript -> List.map ~f:fst effects_backends_javascript
     | `Wasm -> List.map ~f:fst effects_backends_wasm
+    | `C -> [ string_of_effects_backend `Disabled ]
   in
   let effects_get () = string_of_effects_backend (Config.effects ()) in
   [ Enum_key
@@ -121,7 +122,7 @@ let config_keys target =
           ; default = false
           }
       ]
-  | `JavaScript -> []
+  | `JavaScript | `C -> []
 
 let config_key_values = function
   | Bool_key _ -> [ "true"; "false" ]

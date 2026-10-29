@@ -140,9 +140,11 @@ end
 
 (** These parameters should be set at most once at the beginning of the program. *)
 
-val target : unit -> [ `JavaScript | `Wasm ]
+val target : unit -> [ `JavaScript | `Wasm | `C ]
 
-val set_target : [ `JavaScript | `Wasm ] -> unit
+val set_target : [ `JavaScript | `Wasm | `C ] -> unit
+(** [`C] is the target of c_of_ocaml: C code compiled to WebAssembly by
+    emscripten, with 31-bit integers *)
 
 type effects_backend =
   [ `Disabled

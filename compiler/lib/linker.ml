@@ -220,7 +220,7 @@ module Fragment = struct
       ; ( "wasm"
         , fun () ->
             match Config.target () with
-            | `JavaScript -> false
+            | `JavaScript | `C -> false
             | `Wasm -> true )
       ; ("introspect", fun () -> Config.introspect)
       ]

@@ -246,7 +246,7 @@ let eval_prim ~target x =
                  || Int64.equal
                       (quiet_nan (Int64.bits_of_float f))
                       (Int64.bits_of_float nan)
-             | `Wasm -> true -> Some (float (Int32.float_of_bits i))
+             | `Wasm | `C -> true -> Some (float (Int32.float_of_bits i))
       | "caml_int32_of_float", [ Float f ] ->
           int32 (Int32.of_float (Int64.float_of_bits f))
       | "caml_int32_to_float", [ Int32 i ] -> Some (float (Int32.to_float i))
@@ -281,7 +281,7 @@ let eval_prim ~target x =
                  || Int64.equal
                       (quiet_nan (Int64.bits_of_float f))
                       (Int64.bits_of_float nan)
-             | `Wasm -> true -> Some (float (Int32.float_of_bits i))
+             | `Wasm | `C -> true -> Some (float (Int32.float_of_bits i))
       | "caml_nativeint_of_float", [ Float f ] ->
           nativeint (Int32.of_float (Int64.float_of_bits f))
       | "caml_nativeint_to_float", [ NativeInt i ] -> Some (float (Int32.to_float i))
@@ -323,7 +323,7 @@ let eval_prim ~target x =
              | `JavaScript ->
                  (not (Float.is_nan (Int64.float_of_bits i)))
                  || Int64.equal (quiet_nan i) (Int64.bits_of_float nan)
-             | `Wasm -> true -> Some (Float i)
+             | `Wasm | `C -> true -> Some (Float i)
       | "caml_int64_of_float", [ Float f ] ->
           int64 (Int64.of_float (Int64.float_of_bits f))
       | "caml_int64_to_float", [ Int64 i ] -> Some (float (Int64.to_float i))
@@ -688,6 +688,7 @@ let eval_instr update_count inline_constant ~target info i =
         match target with
         | `JavaScript -> "js_of_ocaml"
         | `Wasm -> "wasm_of_ocaml"
+        | `C -> "c_of_ocaml"
       in
       incr update_count;
       [ Let (jsoo, Constant (String backend_name))
@@ -742,7 +743,8 @@ let eval_instr update_count inline_constant ~target info i =
                             | Some (Int _ as c), _ ->
                                 incr inline_constant;
                                 Pc c
-                            | Some (Int32 _ | NativeInt _ | NativeString _), `Wasm ->
+                            | Some (Int32 _ | NativeInt _ | NativeString _), (`Wasm | `C)
+                              ->
                                 (* Avoid duplicating the constant here as it would cause an
                                allocation *)
                                 arg

@@ -34,7 +34,7 @@ let double_translate () =
 let cps_for_tail_calls () =
   match Config.target () with
   | `JavaScript -> true
-  | `Wasm -> false
+  | `Wasm | `C -> false
 
 open Code
 

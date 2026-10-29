@@ -46,7 +46,7 @@ type config_key =
 
 val config_key_name : config_key -> string
 
-val config_keys : [ `JavaScript | `Wasm ] -> config_key list
+val config_keys : [ `JavaScript | `Wasm | `C ] -> config_key list
 
 val config_key_values : config_key -> string list
 
@@ -87,7 +87,7 @@ exception
     ; second : (string * string option)
     }
 
-val merge : [ `JavaScript | `Wasm ] -> string -> t -> string -> t -> t
+val merge : [ `JavaScript | `Wasm | `C ] -> string -> t -> string -> t -> t
 
 val kind : t -> kind
 

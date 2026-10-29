@@ -297,7 +297,7 @@ let body_size ~context info =
   let inline_comparisons =
     match Config.target () with
     | `JavaScript -> false
-    | `Wasm -> true
+    | `Wasm | `C -> true
   in
   cache ~info info.body_size (size ~inline_comparisons ~recurse:false ~context)
 
@@ -390,8 +390,8 @@ let interesting_parameters ~context info =
 *)
 let functor_like ~context info =
   (match Config.target (), context.profile with
-    | `Wasm, (O2 | O3) -> true
-    | `Wasm, O1 -> body_size ~context info <= 15
+    | (`Wasm | `C), (O2 | O3) -> true
+    | (`Wasm | `C), O1 -> body_size ~context info <= 15
     | `JavaScript, (O1 | O2) -> false
     | `JavaScript, O3 -> body_size ~context info <= 15)
   && (not info.recursive)
@@ -478,13 +478,13 @@ and should_inline ~context info args =
                       Var.equal
                       info.enclosing_function
                       context.enclosing_function
-          | `Wasm, _ | `JavaScript, `Double_translation -> true
+          | (`Wasm | `C), _ | `JavaScript, `Double_translation -> true
           | `JavaScript, (`Jspi | `Native) -> assert false)
         && (functor_like ~context info
            || (context.live_vars.(Var.idx info.f) = 1
               &&
               match Config.target () with
-              | `Wasm when Lazy.force context.in_loop ->
+              | (`Wasm | `C) when Lazy.force context.in_loop ->
                   (* Avoid inlining in a loop since, if the loop is not hot,
                    the code might never get optimized *)
                   body_size ~context info < 30 && not (contains_loop ~context info)

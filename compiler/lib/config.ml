@@ -272,18 +272,18 @@ end
 
 (****)
 
-let target_ : [ `JavaScript | `Wasm | `None ] ref = ref `None
+let target_ : [ `JavaScript | `Wasm | `C | `None ] ref = ref `None
 
 let target () =
   match !target_ with
   | `None -> failwith "target was not set"
-  | (`JavaScript | `Wasm) as t -> t
+  | (`JavaScript | `Wasm | `C) as t -> t
 
-let set_target (t : [ `JavaScript | `Wasm ]) =
+let set_target (t : [ `JavaScript | `Wasm | `C ]) =
   (match t with
   | `JavaScript -> Targetint.set_num_bits 32
-  | `Wasm -> Targetint.set_num_bits 31);
-  target_ := (t :> [ `JavaScript | `Wasm | `None ])
+  | `Wasm | `C -> Targetint.set_num_bits 31);
+  target_ := (t :> [ `JavaScript | `Wasm | `C | `None ])
 
 type effects_backend =
   [ `Disabled

@@ -199,7 +199,7 @@ let effects_and_exact_calls
       let p, trampolined_calls, in_cps = Effects.f ~flow_info:info ~live_vars p in
       let p =
         match Config.target () with
-        | `Wasm -> p
+        | `Wasm | `C -> p
         | `JavaScript -> Lambda_lifting.f p
       in
       p, trampolined_calls, in_cps, None, shapes
@@ -736,7 +736,8 @@ let optimize ~shapes ~profile ~keep_flow_data p =
          (match Config.target (), Config.effects () with
          | `JavaScript, (`Disabled | `Double_translation) -> Generate_closure.f
          | `JavaScript, `Cps
-         | `Wasm, (`Disabled | `Jspi | `Cps | `Double_translation | `Native) -> Fun.id
+         | (`Wasm | `C), (`Disabled | `Jspi | `Cps | `Double_translation | `Native) ->
+             Fun.id
          | `JavaScript, (`Jspi | `Native) -> assert false)
     +> map_fst5 deadcode'
   in

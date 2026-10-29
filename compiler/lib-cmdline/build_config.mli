@@ -17,7 +17,7 @@
  *)
 
 val process :
-  [ `JavaScript | `Wasm ] -> apply:string option -> print_and_exit:bool -> unit
+  [ `JavaScript | `Wasm | `C ] -> apply:string option -> print_and_exit:bool -> unit
 (** [process target ~apply ~print_and_exit] optionally parses and
     applies a build config string, then optionally prints the current
     config and exits. *)

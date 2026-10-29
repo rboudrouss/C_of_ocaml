@@ -519,7 +519,7 @@ module Constants : sig
   val parse : ?with_desc:bool -> Obj.t -> Code.constant
   (** [with_desc] (default [true]): record the Introcaml descriptor of blocks *)
 
-  val inlined : target:[ `JavaScript | `Wasm ] -> Code.constant -> bool
+  val inlined : target:[ `JavaScript | `Wasm | `C ] -> Code.constant -> bool
 end = struct
   (* In order to check that two custom objects share the same kind, we
      compare their identifier.  The identifier is currently extracted
@@ -623,7 +623,7 @@ end = struct
     | Int32 _ | NativeInt _ -> (
         match target with
         | `JavaScript -> true
-        | `Wasm -> false)
+        | `Wasm | `C -> false)
     | Null_ -> true
 end
 
@@ -919,7 +919,7 @@ let register_global_instrs var ?name ?by_index rem =
         Pc
           (match Config.target () with
           | `JavaScript -> NativeString (Native_string.of_string name)
-          | `Wasm -> String name)
+          | `Wasm | `C -> String name)
       in
       Let (Var.fresh (), Prim (Extern (prim, None), [ Pv var; name_pc ])) :: rem
   | None -> rem
@@ -940,7 +940,7 @@ let register_global g i rem =
            find them in caml_global_data. *)
         let by_index =
           match Config.target () with
-          | `Wasm -> Some i
+          | `Wasm | `C -> Some i
           | `JavaScript -> None
         in
         register_global_instrs var ~name:gn ?by_index rem
@@ -1014,7 +1014,7 @@ let get_global state instrs i =
                 g.is_const.(i) <- true;
                 g.vars.(i) <- Some x;
                 x, state, instrs
-            | `Wasm ->
+            | `Wasm | `C ->
                 let prim =
                   if Global_name.is_predef gn
                   then "caml_get_global_predef"
@@ -2241,7 +2241,7 @@ and compile infos pc state (instrs : instr list) =
             z;
         let prim, y, z =
           match Config.target () with
-          | `Wasm -> Extern (prim, Hints.find_ccall_opt infos.hints pc), y, z
+          | `Wasm | `C -> Extern (prim, Hints.find_ccall_opt infos.hints pc), y, z
           | `JavaScript -> (
               match prim with
               | "caml_equal"
@@ -3186,7 +3186,7 @@ let emit_block_descs descs body =
       Let (c, Constant (Constants.parse ~with_desc:false descs))
       :: Let (Var.fresh (), Prim (Extern ("caml_register_block_descs", None), [ Pv c ]))
       :: body
-  | (Some _ | None), (`JavaScript | `Wasm) -> body
+  | (Some _ | None), (`JavaScript | `Wasm | `C) -> body
 
 let emit_link_info ~symbols ~primitives ~crcs ~num_globals body =
   let primitives =
@@ -3213,7 +3213,7 @@ let emit_link_info ~symbols ~primitives ~crcs ~num_globals body =
   let body =
     match Config.target () with
     | `JavaScript -> body
-    | `Wasm ->
+    | `Wasm | `C ->
         Let
           ( Var.fresh ()
           , Prim
@@ -3720,7 +3720,7 @@ let predefined_exceptions () =
         let v_index = Var.fresh () in
         let by_index =
           match Config.target () with
-          | `Wasm -> Some index
+          | `Wasm | `C -> Some index
           | `JavaScript -> None
         in
         [ Let (v_name, Constant (String name))

@@ -576,7 +576,7 @@ let f_once_after p =
   let first_class_primitives =
     match Config.target (), Config.effects () with
     | `JavaScript, `Disabled -> true
-    | `JavaScript, (`Cps | `Double_translation) | `Wasm, _ -> false
+    | `JavaScript, (`Cps | `Double_translation) | (`Wasm | `C), _ -> false
     | `JavaScript, (`Jspi | `Native) -> assert false
   in
   let f = function
