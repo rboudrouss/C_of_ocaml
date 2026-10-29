@@ -70,6 +70,16 @@ See `runtime/c/camlc.h` for the conventions of the generated code.
   never needed boxed: they are C `double`s and integers, and the arithmetic
   on them is inlined. The parameters of the functions only called directly
   can be unboxed too.
+- **Effect handlers** (OCaml 5) use the double translation of
+  js_of_ocaml (`compiler/lib/effects.ml`), enabled when the program
+  performs effects (`--effects`): the functions which may perform an
+  effect also have a CPS version, whose code pointer follows the closure
+  info in their closure, while the rest of the program is unchanged.
+  Running a computation under a handler (`caml_resume` in
+  `camlc_runtime.c`, after the CPS runtime of wasm_of_ocaml) switches to
+  the CPS versions; fibers are OCaml blocks. CPS calls are tail calls when
+  `musttail` allows it; the others count the depth of the C stack, and
+  bounce to a trampoline beyond some depth.
 - **Callbacks** from C (`caml_callback*`) apply the closure with
   `camlc_applyv`.
 - **Backtraces** (`--debug-info`): a raise, and each call an exception goes
@@ -94,7 +104,7 @@ the arguments of the call site and calling the stub with its own signature.
 `tools/c_of_ocaml_tests.sh` runs the tests of `compiler/tests-ocaml` (see
 the script for its environment variables). All the tests pass, except:
 
-- effect handlers and domains, which are not supported;
+- domains, which are not supported (no threads), and the tests using them;
 - the tests that need arguments or files (`basic-io`, `basic-io-2`,
   `lib-channels/close_out`), and those which expect the behavior of the
   JavaScript runtime (`lib-digest/blake2_long_key`, `lib-obj/new_obj`,
@@ -107,7 +117,10 @@ the script for its environment variables). All the tests pass, except:
 
 Not supported yet:
 
-- effect handlers (`--effects=disabled` only) and domains;
+- domains;
+- effects cannot be performed through a callback from C (they raise
+  `Effect.Unhandled`, as with js_of_ocaml), and
+  `Effect.Deep.get_callstack` is empty;
 - wasm64 (63-bit integers): `Targetint` has at most 32 bits;
 - marshaling closures (`Marshal.Closures`);
 - separate compilation: whole programs only;
@@ -121,17 +134,6 @@ Not supported yet:
 
 ## Next steps
 
-- **Effect handlers.** The way to go is the double translation of
-  js_of_ocaml (`--effects=double-translation`, `compiler/lib/effects.ml`):
-  the functions that may perform an effect get a CPS version, the others
-  keep their direct style, so programs without effects do not pay for
-  them. It needs, in the C backend, closures with the code pointers of
-  both versions (as `Gc_target.double_translation` in lib-wasm), and in
-  the runtime support the CPS primitives (`%perform`, `%resume`,
-  `%reperform`, `%with_stack`, `caml_push_trap`/`caml_pop_trap`, the
-  trampolines), as `runtime/wasm/effect.wat` does for wasm. CPS calls are
-  tail calls of various signatures, which `musttail` cannot always make:
-  they need a trampoline, or a uniform signature.
 - **wasm64.** `Targetint` has at most 32 bits, and nativeint constants are
   32-bit in the intermediate code (`Code.constant`): both need 64-bit
   variants. The C backend itself only has to know the word size
