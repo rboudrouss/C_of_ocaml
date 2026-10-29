@@ -28,6 +28,10 @@ emcc $CFLAGS main.o camlc_runtime.o $SYSROOT/lib/libcamlrun.a -lm \
 node main.js
 ```
 
+For wasm64 (63-bit integers), pass `--word-size 64` to c_of_ocaml and
+`-m64` to emcc (and `-sMAXIMUM_MEMORY=16GB` when linking), with the wasm64
+sysroot; node 24 or later runs it.
+
 `libcamlrun.a` is linked without its interpreter: `camlc_runtime.c` defines
 `main` and replaces the runtime's `callback.c`. `c_of_ocaml --runtime-files
 DIR` writes `camlc.h` and `camlc_runtime.c` to `DIR`.
@@ -39,7 +43,7 @@ With ocaml-emcc, `ocaml-emcc build main.js --compiled` does all this.
 See `runtime/c/camlc.h` for the conventions of the generated code.
 
 - **Values** have the representation of the bytecode runtime, with 31-bit
-  integers (wasm32). Constants are static data, with headers that the GC
+  integers on wasm32 and 63-bit integers on wasm64. Constants are static data, with headers that the GC
   never marks, in a single structure (registered as static data in the
   page table of OCaml 4.14).
 - **Runtimes**: OCaml 4.14 and 5.x (`camlc_runtime.c` follows the startup
@@ -102,7 +106,9 @@ the arguments of the call site and calling the stub with its own signature.
 ## Testing
 
 `tools/c_of_ocaml_tests.sh` runs the tests of `compiler/tests-ocaml` (see
-the script for its environment variables). All the tests pass, except:
+the script for its environment variables; `WORD_SIZE=64` for wasm64), and
+`make tests-c` runs it for wasm32. All the tests pass, on wasm32 and
+wasm64, except:
 
 - domains, which are not supported (no threads), and the tests using them;
 - the tests that need arguments or files (`basic-io`, `basic-io-2`,
@@ -121,7 +127,6 @@ Not supported yet:
 - effects cannot be performed through a callback from C (they raise
   `Effect.Unhandled`, as with js_of_ocaml), and
   `Effect.Deep.get_callstack` is empty;
-- wasm64 (63-bit integers): `Targetint` has at most 32 bits;
 - marshaling closures (`Marshal.Closures`);
 - separate compilation: whole programs only;
 - deep recursion: the C stack of the wasm engine (about 1 MB in V8)
@@ -134,10 +139,6 @@ Not supported yet:
 
 ## Next steps
 
-- **wasm64.** `Targetint` has at most 32 bits, and nativeint constants are
-  32-bit in the intermediate code (`Code.constant`): both need 64-bit
-  variants. The C backend itself only has to know the word size
-  (`word_size`, tagged constants, string padding).
 - Shrink-wrapping: allocate the frame on the shadow stack only in the
   branches that need it.
 
