@@ -59,6 +59,14 @@
 #include <caml/domain_state.h>
 #pragma clang diagnostic pop
 
+/* Tail calls, with the tail call extension of WebAssembly (-mtail-call):
+   the caller and the callee must have the same signature */
+#ifdef __wasm_tail_call__
+#define CAMLC_MUSTTAIL __attribute__((musttail))
+#else
+#define CAMLC_MUSTTAIL
+#endif
+
 #define CAMLC_LIKELY(x) __builtin_expect(!!(x), 1)
 #define CAMLC_UNLIKELY(x) __builtin_expect(!!(x), 0)
 

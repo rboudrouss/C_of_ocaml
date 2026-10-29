@@ -610,6 +610,7 @@ type fctx =
   ; blocks : block Addr.Map.t
   ; closures : Closure_conversion.closure Var.Map.t
   ; env_var : Var.t  (** Stands for the closure of the function *)
+  ; arity : int option  (** The number of parameters of the function, not the toplevel *)
   ; static_env : bool  (** The closure is static data *)
   ; locations : location Var.Hashtbl.t
   ; slots : int Var.Hashtbl.t  (** The variables in the frame *)
@@ -753,6 +754,49 @@ let translate_closure ctx f =
 
 let apply_arity out n = out.apply_arities <- IntSet.add n out.apply_arities
 
+(* The C function called by an application, and its arguments: [n]
+   arguments and a closure in all cases *)
+let apply ctx x ~f ~args ~exact =
+  let n = List.length args in
+  let fe = var ctx f in
+  let args = List.map args ~f:(fun x -> var ctx x) in
+  let unique =
+    if exact
+    then
+      match Global_flow.get_unique_closure ctx.global_flow_info ~call:x f with
+      | Some (g, _, false) when Var.Map.mem g ctx.closures -> Some g
+      | Some _ | None -> None
+    else None
+  in
+  match unique with
+  | Some g -> fun_name ctx.out g, args @ [ fe ]
+  | None ->
+      if exact
+      then Printf.sprintf "((%s)Field(%s, 0))" (fun_type n) fe, args @ [ fe ]
+      else (
+        apply_arity ctx.out n;
+        Printf.sprintf "camlc_apply%d" n, fe :: args)
+
+(* An application whose result is returned: the frame is released before
+   the call, which is a tail call when the callee has the signature of the
+   function (as required by [musttail]) *)
+let translate_tail_call ctx x ~f ~args ~exact =
+  let n = List.length args in
+  let callee, args = apply ctx x ~f ~args ~exact in
+  let temps = List.mapi args ~f:(fun i a -> Printf.sprintf "value t%d = %s;" i a) in
+  let call =
+    c_call callee (List.mapi args ~f:(fun i _ -> Printf.sprintf "t%d" i))
+  in
+  line
+    ctx
+    "{ %s%s %sreturn %s; }"
+    (String.concat ~sep:" " temps)
+    (if Var.Hashtbl.length ctx.slots = 0 then "" else " camlc_sp = fp + FRAME_SIZE;")
+    (match ctx.arity with
+    | Some a when a = n -> "CAMLC_MUSTTAIL "
+    | Some _ | None -> "")
+    call
+
 let translate_instr ctx traps i =
   match i with
   | Let (x, e) -> (
@@ -763,32 +807,9 @@ let translate_instr ctx traps i =
         line ctx "%s = r;" dst
       in
       match e with
-      | Apply { f; args; exact } -> (
-          let n = List.length args in
-          let fe = var ctx f in
-          let args = List.map args ~f:(fun x -> var ctx x) in
-          let unique =
-            if exact
-            then
-              match Global_flow.get_unique_closure ctx.global_flow_info ~call:x f with
-              | Some (g, _, false) when Var.Map.mem g ctx.closures -> Some g
-              | Some _ | None -> None
-            else None
-          in
-          match unique with
-          | Some g -> checked (c_call (fun_name ctx.out g) (args @ [ fe ]))
-          | None ->
-              if exact
-              then
-                checked
-                  (Printf.sprintf
-                     "((%s)Field(%s, 0))(%s)"
-                     (fun_type n)
-                     fe
-                     (String.concat ~sep:", " (args @ [ fe ])))
-              else (
-                apply_arity ctx.out n;
-                checked (c_call (Printf.sprintf "camlc_apply%d" n) (fe :: args))))
+      | Apply { f; args; exact } ->
+          let callee, args = apply ctx x ~f ~args ~exact in
+          checked (c_call callee args)
       | Block (tag, a, _, _, _) ->
           if Array.length a = 0
           then line ctx "%s = Atom(%d);" dst tag
@@ -1126,6 +1147,7 @@ let translate_function
     ; blocks
     ; closures
     ; env_var = Var.fresh ()
+    ; arity = (if List.is_empty env then None else Some (List.length params))
     ; static_env
     ; locations = Var.Hashtbl.create 64
     ; slots = Var.Hashtbl.create 16
@@ -1166,13 +1188,30 @@ let translate_function
       let block = Addr.Map.find pc blocks in
       let traps = Addr.Hashtbl.find ctx.traps pc in
       Printf.bprintf ctx.buf " L%d:;\n" pc;
+      (* An application whose result is returned, outside any handler *)
+      let tail_call =
+        let rec strip_events l =
+          match l with
+          | Event _ :: r -> strip_events r
+          | _ -> l
+        in
+        match strip_events (List.rev block.body), block.branch, traps with
+        | Let (x, Apply { f; args; exact }) :: rem, Return y, [] when Var.equal x y ->
+            Some (List.rev rem, x, f, args, exact)
+        | _ -> None
+      in
+      match tail_call with
+      | Some (body, x, f, args, exact) ->
+          List.iter body ~f:(fun i -> translate_instr ctx traps i);
+          translate_tail_call ctx x ~f ~args ~exact
+      | None -> (
       List.iter block.body ~f:(fun i -> translate_instr ctx traps i);
       translate_last ctx traps block.branch;
       match block.branch with
       | Pushtrap (_, _, handler) ->
           Printf.bprintf ctx.buf " H%d:;\n" (Addr.Hashtbl.find ctx.handler_ids pc);
           line ctx "%s" (branch ctx handler)
-      | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ());
+      | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ()));
   let param_set = Var.Set.of_list params in
   let decls =
     List.filter_map (List.rev !locals) ~f:(fun x ->
@@ -1410,7 +1449,7 @@ let f (p : program) ~global_flow_info closures =
         b
         "static inline value camlc_apply%d(value f, %s) {\n\
         \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
-        \    return ((%s)Field(f, 0))(%s, f);\n\
+        \    CAMLC_MUSTTAIL return ((%s)Field(f, 0))(%s, f);\n\
         \  value args[%d] = { %s };\n\
         \  return camlc_applyv(f, %d, args);\n\
          }\n\n"

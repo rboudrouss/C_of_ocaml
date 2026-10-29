@@ -26,7 +26,7 @@ SYSROOT=${SYSROOT:-$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32}
 C_OF_OCAML=${C_OF_OCAML:-$ROOT/_build/default/compiler/bin-c_of_ocaml/c_of_ocaml.exe}
 JOBS=${JOBS:-$(nproc)}
 RT=$ROOT/runtime/c
-CFLAGS="-O1 -fno-strict-aliasing -fwrapv -fno-strict-overflow \
+CFLAGS="-O1 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
   -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
 export SYSROOT C_OF_OCAML RT CFLAGS
 

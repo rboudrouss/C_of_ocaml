@@ -17,7 +17,7 @@ ocamlfind ocamlc -package unix -linkpkg main.ml -o main.bc
 c_of_ocaml main.bc -o main.c          # --opt 2 or 3 for more optimizations
 
 SYSROOT=$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32   # built by ocaml-emcc
-CFLAGS="-O2 -fno-strict-aliasing -fwrapv -fno-strict-overflow \
+CFLAGS="-O2 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
   -sSUPPORT_LONGJMP=wasm -fwasm-exceptions \
   -I runtime/c -I $SYSROOT/lib/ocaml"
 emcc $CFLAGS -c runtime/c/camlc_runtime.c
@@ -46,7 +46,10 @@ See `runtime/c/camlc.h` for the conventions of the generated code.
   function pointers as code pointers, so that `compare`, `hash` and `Obj`
   work. Calls to statically known functions are direct C calls; other
   exact calls go through the code pointer, and the others through
-  `camlc_applyN`, which handles partial and over-applications.
+  `camlc_applyN`, which handles partial and over-applications. With the
+  tail call extension of WebAssembly (`-mtail-call`), an application whose
+  result is returned is a tail call (`musttail`) when the callee takes as
+  many arguments as the caller.
 - **GC roots**: the variables live across a point where the GC may run (an
   allocation or a call), unless they hold integers or static data, are kept
   in the frame of the function on a shadow stack, scanned by the GC through
@@ -99,5 +102,7 @@ Not supported yet:
 - deep recursion: the C stack of the wasm engine (about 1 MB in V8)
   limits the depth of non-tail calls to some tens of thousands, and its
   exhaustion is a `RangeError` rather than `Stack_overflow`; the
-  bytecode interpreter has its own, much larger, stack;
+  bytecode interpreter has its own, much larger, stack (under node,
+  ocaml-emcc runs compiled programs in a worker thread with a large
+  stack);
 - signals and finalisers only run when the runtime polls by itself.
