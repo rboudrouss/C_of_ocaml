@@ -28,7 +28,10 @@ JOBS=${JOBS:-$(nproc)}
 RT=$ROOT/runtime/c
 CFLAGS="-O1 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
   -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
-export SYSROOT C_OF_OCAML RT CFLAGS
+# The C part of the unix library (libunix.a before OCaml 5)
+UNIX_LIB=$SYSROOT/lib/libunixbyt.a
+[ -f "$UNIX_LIB" ] || UNIX_LIB=$SYSROOT/lib/libunix.a
+export SYSROOT C_OF_OCAML RT CFLAGS UNIX_LIB
 
 run_test() {
   local ml=$1
@@ -66,7 +69,7 @@ run_test() {
     || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
   emcc $CFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
     || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
-  emcc $CFLAGS "$name.o" "$WORKDIR/camlc_runtime.o" "$SYSROOT/lib/libunixbyt.a" \
+  emcc $CFLAGS "$name.o" "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" \
     "$SYSROOT/lib/libcamlrun.a" -lm \
     -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -o "$name.js" > ld.log 2>&1 \
     || { res FAIL "ld: $(grep -m1 error ld.log | head -c 150)"; return; }
