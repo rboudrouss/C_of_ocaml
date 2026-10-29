@@ -39,7 +39,10 @@ See `runtime/c/camlc.h` for the conventions of the generated code.
 
 - **Values** have the representation of the bytecode runtime, with 31-bit
   integers (wasm32). Constants are static data, with headers that the GC
-  never marks.
+  never marks, in a single structure (registered as static data in the
+  page table of OCaml 4.14).
+- **Runtimes**: OCaml 4.14 and 5.x (`camlc_runtime.c` follows the startup
+  and callbacks of each).
 - **Functions**: each function of the program is a C function taking its
   arguments then its closure. Closures have the layout of the bytecode
   runtime (with `Infix_tag` blocks for mutually recursive functions), with C
@@ -95,7 +98,6 @@ Not supported yet:
 
 - effect handlers (`--effects=disabled` only) and domains;
 - wasm64 (63-bit integers): `Targetint` has at most 32 bits;
-- OCaml 4.x runtimes (the runtime support follows OCaml 5.x);
 - backtraces, `Printexc.record_backtrace`;
 - marshaling closures (`Marshal.Closures`);
 - separate compilation: whole programs only;

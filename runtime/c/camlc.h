@@ -42,6 +42,8 @@
 #define CAMLC_H
 
 #define CAML_INTERNALS
+/* No compatibility macros (OCaml 4: [local_roots], [external_raise]...) */
+#define CAML_NAME_SPACE
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
@@ -49,6 +51,7 @@
    <setjmp.h> does */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmacro-redefined"
+#include <caml/version.h>
 #include <caml/mlvalues.h>
 #include <caml/alloc.h>
 #include <caml/memory.h>
@@ -234,7 +237,16 @@ value camlc_get_cached_method(value obj, value tag, value cache_id);
 static inline value camlc_alloc_small(mlsize_t wosize, tag_t tag)
 {
   value v;
+#if OCAML_VERSION_MAJOR >= 5
   Alloc_small(v, wosize, tag, Alloc_small_enter_GC);
+#else
+  /* Nothing to do around a GC in bytecode */
+#define Setup_for_gc
+#define Restore_after_gc
+  Alloc_small(v, wosize, tag);
+#undef Setup_for_gc
+#undef Restore_after_gc
+#endif
   return v;
 }
 
