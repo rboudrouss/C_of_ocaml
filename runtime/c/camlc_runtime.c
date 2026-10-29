@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include "camlc.h"
 #include <caml/printexc.h>
+#include <caml/backtrace.h>
 #include <caml/roots.h>
 #include <caml/signals.h>
 #include <caml/startup_aux.h>
@@ -39,7 +40,6 @@
 #else
 #include <caml/address_class.h>
 #include <caml/stacks.h>
-#include <caml/backtrace.h>
 #include <caml/eventlog.h>
 #endif
 
@@ -572,6 +572,9 @@ int main(int argc, char **argv)
     Field(caml_global_data, i) = Val_unit;
 #endif
   caml_sys_init(exe_name, argv);
+  /* No debug information, as a program compiled without -g: uncaught
+     exceptions are printed without a backtrace, as by ocamlrun */
+  caml_init_debug_info();
   res = camlc_ccall0(camlc_run_program);
   if (Is_exception_result(res))
     caml_fatal_uncaught_exception(Extract_exception(res));
