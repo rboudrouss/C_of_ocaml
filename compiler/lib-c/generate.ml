@@ -1324,6 +1324,22 @@ let f (p : program) ~global_flow_info closures =
            else String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "value")))
       else Printf.bprintf b "extern value %s(value *, int);\n" name)
     out.primitives;
+  (* Never called: a direct call makes wasm-ld report the C functions
+     whose definition does not have the signature of the call, which would
+     trap when called through a function pointer *)
+  Buffer.add_string b "\nvoid camlc_signature_check(void) {\n";
+  String.Hashtbl.iter
+    (fun name n ->
+      if n <= 5
+      then
+        Printf.bprintf
+          b
+          "  %s(%s);\n"
+          name
+          (String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "0")))
+      else Printf.bprintf b "  %s((value *)0, 0);\n" name)
+    out.primitives;
+  Buffer.add_string b "}\n";
   Buffer.add_char b '\n';
   List.iter functions ~f:(fun (f, params, _) ->
       Printf.bprintf
