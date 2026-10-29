@@ -560,9 +560,17 @@ int main(int argc, char **argv)
                       camlc_static_data_end);
 #endif
   camlc_init_stack();
+#if OCAML_VERSION_MAJOR >= 5
   caml_register_generational_global_root(&caml_global_data);
   caml_modify_generational_global_root(
       &caml_global_data, caml_alloc(camlc_global_data_size, 0));
+#else
+  /* A root of the major GC only (roots_byt.c): it must be in the major
+     heap, as the interpreter makes sure */
+  caml_global_data = caml_alloc_shr(camlc_global_data_size, 0);
+  for (int i = 0; i < camlc_global_data_size; i++)
+    Field(caml_global_data, i) = Val_unit;
+#endif
   caml_sys_init(exe_name, argv);
   res = camlc_ccall0(camlc_run_program);
   if (Is_exception_result(res))
