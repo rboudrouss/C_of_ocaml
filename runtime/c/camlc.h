@@ -44,6 +44,7 @@
 #define CAML_INTERNALS
 #include <stddef.h>
 #include <string.h>
+#include <math.h>
 /* <caml/fail.h> redefines sigsetjmp and siglongjmp as emscripten's
    <setjmp.h> does */
 #pragma clang diagnostic push
@@ -142,6 +143,23 @@ static inline value camlc_int_mod(value a, value b)
 {
   if (CAMLC_UNLIKELY(b == Val_long(0))) return camlc_raise_zero_divide();
   return Camlc_int_mod_unsafe(a, b);
+}
+
+/* Floats */
+
+static inline value camlc_float_compare(value a, value b)
+{
+  double x = Double_val(a), y = Double_val(b);
+  /* As caml_float_compare: nan is equal to itself and less than any
+     other float */
+  return Val_int((x > y) - (x < y) + (x == x) - (y == y));
+}
+
+/* Write barrier: no work for a block of the minor heap */
+static inline void camlc_modify(volatile value *fp, value v)
+{
+  if (Is_young((value)fp)) *fp = v;
+  else caml_modify(fp, v);
 }
 
 /* Arrays and strings */

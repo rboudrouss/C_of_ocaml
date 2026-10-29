@@ -233,10 +233,54 @@ let noraise_primitives =
     ; "caml_floatarray_unsafe_set"
     ]
 
+let float_binops =
+  [ "caml_add_float", "+"; "caml_sub_float", "-"; "caml_mul_float", "*"; "caml_div_float", "/" ]
+
+let float_comparisons =
+  [ "caml_eq_float", "=="
+  ; "caml_neq_float", "!="
+  ; "caml_lt_float", "<"
+  ; "caml_le_float", "<="
+  ; "caml_gt_float", ">"
+  ; "caml_ge_float", ">="
+  ]
+
+let float_functions =
+  [ "caml_sqrt_float", "sqrt"
+  ; "caml_exp_float", "exp"
+  ; "caml_log_float", "log"
+  ; "caml_sin_float", "sin"
+  ; "caml_cos_float", "cos"
+  ; "caml_tan_float", "tan"
+  ; "caml_asin_float", "asin"
+  ; "caml_acos_float", "acos"
+  ; "caml_atan_float", "atan"
+  ; "caml_floor_float", "floor"
+  ; "caml_ceil_float", "ceil"
+  ; "caml_abs_float", "fabs"
+  ; "caml_trunc_float", "trunc"
+  ]
+
 let primitive out name args =
   let n = List.length args in
   let arg i = List.nth args i in
+  let lookup l =
+    List.find_map l ~f:(fun (n, op) -> if String.equal n name then Some op else None)
+  in
+  match lookup float_binops, lookup float_comparisons, lookup float_functions, n with
+  | Some op, _, _, 2 ->
+      Plain
+        (Printf.sprintf "camlc_box_double(Double_val(%s) %s Double_val(%s))" (arg 0) op (arg 1))
+  | _, Some op, _, 2 ->
+      Plain (Printf.sprintf "Val_bool(Double_val(%s) %s Double_val(%s))" (arg 0) op (arg 1))
+  | _, _, Some f, 1 -> Plain (Printf.sprintf "camlc_box_double(%s(Double_val(%s)))" f (arg 0))
+  | _ -> (
   match name, n with
+  | "caml_neg_float", 1 -> Plain (Printf.sprintf "camlc_box_double(-Double_val(%s))" (arg 0))
+  | "caml_float_of_int", 1 ->
+      Plain (Printf.sprintf "camlc_box_double((double)Long_val(%s))" (arg 0))
+  | "caml_int_of_float", 1 -> Plain (Printf.sprintf "Val_long((intnat)Double_val(%s))" (arg 0))
+  | "caml_float_compare", 2 -> Plain (c_call "camlc_float_compare" args)
   | "%identity", 1 -> Plain (arg 0)
   | ("caml_bytes_of_string" | "caml_string_of_bytes"), 1 -> Plain (arg 0)
   | "%int_add", 2 -> Plain (c_call "Camlc_int_add" args)
@@ -278,7 +322,7 @@ let primitive out name args =
   | "caml_array_unsafe_set_addr", 3 ->
       Plain
         (Printf.sprintf
-           "(caml_modify(&Field(%s, Long_val(%s)), %s), Val_unit)"
+           "(camlc_modify(&Field(%s, Long_val(%s)), %s), Val_unit)"
            (arg 0)
            (arg 1)
            (arg 2))
@@ -308,7 +352,7 @@ let primitive out name args =
       else if n <= 5
       then Checked (c_call (Printf.sprintf "camlc_ccall%d" n) (name :: args))
       else (* Handled by the caller: the arguments go on the shadow stack *)
-        Checked ""
+        Checked "")
 
 (* Primitives which never trigger a garbage collection *)
 let nogc_primitives =
@@ -346,6 +390,14 @@ let nogc_primitives =
     ; "caml_get_global_data"
     ; "caml_oo_cache_id"
     ; "caml_get_cached_method"
+    ; "caml_eq_float"
+    ; "caml_neq_float"
+    ; "caml_lt_float"
+    ; "caml_le_float"
+    ; "caml_gt_float"
+    ; "caml_ge_float"
+    ; "caml_int_of_float"
+    ; "caml_float_compare"
     ]
 
 (* Primitives whose result is an integer *)
@@ -806,7 +858,7 @@ let translate_instr ctx traps i =
               assert false))
   | Assign (x, y) -> line ctx "%s = %s;" (slot ctx x) (var ctx y)
   | Set_field (x, i, (Non_float | Immediate), y) ->
-      line ctx "caml_modify(&Field(%s, %d), %s);" (var ctx x) i (var ctx y)
+      line ctx "camlc_modify(&Field(%s, %d), %s);" (var ctx x) i (var ctx y)
   | Set_field (x, i, Float, y) ->
       line ctx "Store_double_flat_field(%s, %d, Double_val(%s));" (var ctx x) i (var ctx y)
   | Offset_ref (x, n) ->
@@ -817,7 +869,7 @@ let translate_instr ctx traps i =
         (var ctx x)
         (2 * n)
   | Array_set (x, i, y) ->
-      line ctx "caml_modify(&Field(%s, Long_val(%s)), %s);" (var ctx x) (var ctx i) (var ctx y)
+      line ctx "camlc_modify(&Field(%s, Long_val(%s)), %s);" (var ctx x) (var ctx i) (var ctx y)
   | Event _ -> ()
 
 let translate_last ctx traps last =
