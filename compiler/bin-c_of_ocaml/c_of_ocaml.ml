@@ -21,7 +21,16 @@ open C_of_ocaml_compiler
 
 let times = Debug.find "times"
 
-let usage = "Usage: c_of_ocaml [options] program.bc -o program.c"
+let usage =
+  "Usage: c_of_ocaml [options] program.bc -o program.c\n\
+  \       c_of_ocaml --runtime-files DIR"
+
+(* Write the runtime support (camlc.h, camlc_runtime.c) to [dir] *)
+let write_runtime_files dir =
+  List.iter Runtime_files.files ~f:(fun (name, contents) ->
+      let oc = open_out_bin (Filename.concat dir name) in
+      output_string oc contents;
+      close_out oc)
 
 (* The primitives without side effects which cannot raise. We do not use
    the purity declared by the JavaScript runtime: some of its primitives
@@ -191,6 +200,7 @@ let compile ~profile ~input_file ~output_file =
 
 let () =
   let input_file = ref None in
+  let runtime_dir = ref None in
   let output_file = ref None in
   let profile = ref Profile.O1 in
   let spec =
@@ -202,14 +212,18 @@ let () =
             | Some p -> profile := p
             | None -> raise (Arg.Bad "--opt: expected 1, 2 or 3"))
       , "N Optimization profile (1, 2 or 3)" )
+    ; ( "--runtime-files"
+      , Arg.String (fun s -> runtime_dir := Some s)
+      , "DIR Write the C runtime support of the generated code to DIR" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
     ; "--enable", Arg.String Config.Flag.enable, "OPT Enable the option OPT"
     ; "--disable", Arg.String Config.Flag.disable, "OPT Disable the option OPT"
     ]
   in
   Arg.parse spec (fun s -> input_file := Some s) usage;
-  match !input_file, !output_file with
-  | Some input_file, Some output_file -> (
+  match !input_file, !output_file, !runtime_dir with
+  | None, None, Some dir -> write_runtime_files dir
+  | Some input_file, Some output_file, None -> (
       Config.set_target `C;
       Config.set_effects_backend `Disabled;
       register_primitives ();

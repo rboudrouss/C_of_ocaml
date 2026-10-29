@@ -9,3 +9,14 @@
   (best exe))
  (flags
   (:standard -safe-string -open Js_of_ocaml_compiler)))
+
+(rule
+ (target runtime_files.ml)
+ (deps
+  gen/gen.exe
+  ../../runtime/c/camlc.h
+  ../../runtime/c/camlc_runtime.c)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{deps}))))

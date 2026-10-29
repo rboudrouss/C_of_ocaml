@@ -28,7 +28,10 @@ node main.js
 ```
 
 `libcamlrun.a` is linked without its interpreter: `camlc_runtime.c` defines
-`main` and replaces the runtime's `callback.c`.
+`main` and replaces the runtime's `callback.c`. `c_of_ocaml --runtime-files
+DIR` writes `camlc.h` and `camlc_runtime.c` to `DIR`.
+
+With ocaml-emcc, `ocaml-emcc build main.js --compiled` does all this.
 
 ## Design
 
