@@ -11,27 +11,36 @@
 # infrastructure).
 #
 # Environment:
-#   SYSROOT     wasm32 sysroot of ocaml-emcc
-#               (default: $OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32)
+#   WORD_SIZE   32 (wasm32, the default) or 64 (wasm64)
+#   SYSROOT     sysroot of ocaml-emcc for the target
+#               (default: $OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32 or wasm64)
 #   C_OF_OCAML  the compiler (default: the one built by dune in this tree)
 #   JOBS        number of tests run in parallel (default: nproc)
 #   WORKDIR     where the tests are built (default: a temporary directory)
 #
-# emcc, node and ocamlfind must be in PATH.
+# emcc, node and ocamlfind must be in PATH (node >= 24 for wasm64).
 
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SYSROOT=${SYSROOT:-$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32}
+WORD_SIZE=${WORD_SIZE:-32}
+SYSROOT=${SYSROOT:-$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm$WORD_SIZE}
 C_OF_OCAML=${C_OF_OCAML:-$ROOT/_build/default/compiler/bin-c_of_ocaml/c_of_ocaml.exe}
 JOBS=${JOBS:-$(nproc)}
 RT=$ROOT/runtime/c
 CFLAGS="-O1 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
   -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
+COOC_FLAGS=
+LDFLAGS=
+if [ "$WORD_SIZE" = 64 ]; then
+  CFLAGS="$CFLAGS -m64"
+  COOC_FLAGS="--word-size 64"
+  LDFLAGS="-sMAXIMUM_MEMORY=16GB"
+fi
 # The C part of the unix library (libunix.a before OCaml 5)
 UNIX_LIB=$SYSROOT/lib/libunixbyt.a
 [ -f "$UNIX_LIB" ] || UNIX_LIB=$SYSROOT/lib/libunix.a
-export SYSROOT C_OF_OCAML RT CFLAGS UNIX_LIB
+export SYSROOT C_OF_OCAML RT CFLAGS UNIX_LIB COOC_FLAGS LDFLAGS
 
 run_test() {
   local ml=$1
@@ -65,13 +74,13 @@ run_test() {
   files=$(ocamlfind ocamldep -sort $deps "$name.ml")
   ocamlfind ocamlc -package unix -linkpkg -w -a $(ls ./*.mli 2>/dev/null) $files \
     -o "$name.bc" > build.log 2>&1 || { res SKIP ocamlc; return; }
-  "$C_OF_OCAML" "$name.bc" -o "$name.c" > cooc.log 2>&1 \
+  "$C_OF_OCAML" $COOC_FLAGS "$name.bc" -o "$name.c" > cooc.log 2>&1 \
     || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
   emcc $CFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
     || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
   emcc $CFLAGS "$name.o" "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" \
     "$SYSROOT/lib/libcamlrun.a" -lm \
-    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -o "$name.js" > ld.log 2>&1 \
+    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o "$name.js" > ld.log 2>&1 \
     || { res FAIL "ld: $(grep -m1 error ld.log | head -c 150)"; return; }
   timeout 60 node "$name.js" > out.txt 2>&1
   rc=$?
