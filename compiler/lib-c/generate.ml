@@ -49,7 +49,8 @@ let tagged_int i =
 
 (* The output, and what the generated code refers to *)
 type output =
-  { data : Buffer.t  (** Static data *)
+  { data : Buffer.t  (** Initializers of the static data *)
+  ; data_fields : Buffer.t  (** Fields of the structure holding the static data *)
   ; functions : Buffer.t  (** Function definitions *)
   ; mutable data_count : int
   ; constants : (constant * string) list Int.Hashtbl.t
@@ -114,15 +115,18 @@ let int64_words i =
 
 let int32_word i = Printf.sprintf "(value)0x%lxu" i
 
-let emit_block out ~tag fields =
+(* The static data is a single structure, so that the runtime can tell
+   where it is (OCaml 4 needs it in its page table). [static_block out
+   words] adds a block (header and fields) to it, and returns its C name. *)
+let static_block out words =
   let n = out.data_count in
   out.data_count <- n + 1;
-  let name = Printf.sprintf "camlc_d%d" n in
-  Printf.bprintf
-    out.data
-    "static value %s[] = { %s };\n"
-    name
-    (String.concat ~sep:", " (header ~wosize:(List.length fields) ~tag :: fields));
+  Printf.bprintf out.data_fields "  value d%d[%d];\n" n (List.length words);
+  Printf.bprintf out.data "  .d%d = { %s },\n" n (String.concat ~sep:", " words);
+  Printf.sprintf "camlc_data.d%d" n
+
+let emit_block out ~tag fields =
+  let name = static_block out (header ~wosize:(List.length fields) ~tag :: fields) in
   Printf.sprintf "((value)&%s[1])" name
 
 let rec constant out c =
@@ -729,16 +733,11 @@ let translate_closure ctx f =
       if List.is_empty info.free_variables
       then (
         (* A closed closure is static data *)
-        let n = ctx.out.data_count in
-        ctx.out.data_count <- n + 1;
-        let name = Printf.sprintf "camlc_d%d" n in
-        Printf.bprintf
-          ctx.out.data
-          "static value %s[] = { %s };\n"
-          name
-          (String.concat
-             ~sep:", "
-             (header ~wosize:(List.length prefix) ~tag:Obj.closure_tag :: prefix));
+        let name =
+          static_block
+            ctx.out
+            (header ~wosize:(List.length prefix) ~tag:Obj.closure_tag :: prefix)
+        in
         List.iter2 functions positions ~f:(fun (g, _) pos ->
             line ctx "%s = (value)&%s[%d];" (slot ctx g) name (pos + 1)))
       else (
@@ -1291,6 +1290,7 @@ let f (p : program) ~global_flow_info closures =
   let facts = compute_facts p closures in
   let out =
     { data = Buffer.create 65536
+    ; data_fields = Buffer.create 65536
     ; functions = Buffer.create 65536
     ; data_count = 0
     ; constants = Int.Hashtbl.create 1024
@@ -1399,8 +1399,14 @@ let f (p : program) ~global_flow_info closures =
        ~sep:""
        (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
             Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
+  Buffer.add_string b "static struct camlc_data {\n  value unused;\n";
+  Buffer.add_buffer b out.data_fields;
+  Buffer.add_string b "} camlc_data = {\n  .unused = 0,\n";
   Buffer.add_buffer b out.data;
-  Buffer.add_char b '\n';
+  Buffer.add_string b
+    "};\n\n\
+     value *const camlc_static_data_begin = (value *)&camlc_data;\n\
+     value *const camlc_static_data_end = (value *)(&camlc_data + 1);\n\n";
   (* Partial applications: the closure holds the function and the
      arguments already given *)
   for m = 1 to out.max_arity - 1 do
