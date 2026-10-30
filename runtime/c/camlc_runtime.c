@@ -36,6 +36,7 @@
 #include <caml/codefrag.h>
 #include <caml/runtime_events.h>
 #include <caml/platform.h>
+#include <caml/domain.h>
 #else
 #include <caml/address_class.h>
 #include <caml/stacks.h>
@@ -1143,6 +1144,13 @@ int main(int argc, char **argv)
 
 #if OCAML_VERSION_MAJOR >= 5
   caml_parse_ocamlrunparam();
+#if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 3
+  /* Without threads, a single domain: the runtime reserves a minor heap
+     for each possible domain, which emscripten's mmap allocates and
+     clears */
+  if (caml_params->max_domains == Max_domains_def)
+    ((struct caml_params *)caml_params)->max_domains = 1;
+#endif
   if (!caml_startup_aux(0)) return 0;
   caml_init_codefrag();
   caml_init_locale();
