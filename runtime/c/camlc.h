@@ -227,10 +227,12 @@ static inline value camlc_store_double_flat(value a, value i, double d)
   return Val_unit;
 }
 
-/* Write barrier: no work for a block of the minor heap */
+/* Write barrier: no work for an integer replacing an integer (the major
+   GC only cares about the pointers overwritten or written), nor for a
+   block of the minor heap */
 static inline void camlc_modify(volatile value *fp, value v)
 {
-  if (Is_young((value)fp)) *fp = v;
+  if ((Is_long(v) && Is_long(*fp)) || Is_young((value)fp)) *fp = v;
   else caml_modify(fp, v);
 }
 
