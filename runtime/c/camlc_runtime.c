@@ -254,6 +254,28 @@ value camlc_string_concat(value a, value b)
   CAMLreturn(r);
 }
 
+extern value caml_format_int(value fmt, value arg);
+
+/* [caml_format_int], with a fast path for the format of [string_of_int]
+   (the C one goes through snprintf) */
+value camlc_format_int(value fmt, value arg)
+{
+  if (caml_string_length(fmt) == 2 && Byte(fmt, 0) == '%'
+      && Byte(fmt, 1) == 'd') {
+    char buf[24];
+    char *p = buf + sizeof(buf);
+    intnat n = Long_val(arg);
+    uintnat u = n < 0 ? -(uintnat)n : (uintnat)n;
+    do {
+      *--p = '0' + u % 10;
+      u /= 10;
+    } while (u != 0);
+    if (n < 0) *--p = '-';
+    return caml_alloc_initialized_string(buf + sizeof(buf) - p, p);
+  }
+  return camlc_ccall2(caml_format_int, fmt, arg);
+}
+
 /****************************************************************/
 /* Method caches (GETPUBMET in the bytecode interpreter) */
 

@@ -290,6 +290,7 @@ static inline value camlc_bytes_set(value s, value i, value c)
 }
 
 value camlc_string_concat(value a, value b);
+value camlc_format_int(value fmt, value arg);
 
 /* Backtraces: the locations of raises and calls */
 struct camlc_location {

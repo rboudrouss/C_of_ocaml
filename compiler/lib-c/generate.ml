@@ -683,6 +683,7 @@ let primitive out name (args : parg list) =
                        (arg 1)
                        (arg 2))
               | "caml_string_concat", 2 -> plain (c_call "camlc_string_concat" args)
+              | "caml_format_int", 2 -> Checked (c_call "camlc_format_int" args)
               | ("caml_register_global" | "caml_register_global_predef"), _ ->
                   plain "Val_unit"
               | "caml_register_global_by_index", 2 ->
