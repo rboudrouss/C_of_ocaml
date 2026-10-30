@@ -349,6 +349,17 @@ let noraise_primitives =
     ; "caml_create_bytes"
     ; "caml_obj_dup"
     ; "caml_array_unsafe_set"
+    ; "caml_hash"
+    ; "caml_obj_tag"
+    ; "caml_lxm_next"
+    ; "caml_fresh_oo_id"
+    ; "caml_atomic_load"
+    ; "caml_atomic_exchange"
+    ; "caml_atomic_cas"
+    ; "caml_atomic_fetch_add"
+    ; "caml_atomic_cas_field"
+    ; "caml_atomic_exchange_field"
+    ; "caml_atomic_fetch_add_field"
     ]
 
 let float_binops =
