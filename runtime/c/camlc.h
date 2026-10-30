@@ -86,6 +86,10 @@ extern value caml_global_data;
 extern value *camlc_sp;
 extern value *camlc_stack_limit;
 
+/* Toplevel values stored in globals (roots of the GC) */
+extern value camlc_globals[];
+extern const int camlc_globals_count;
+
 /* Returns the Stack_overflow exception, as an exception result */
 value camlc_stack_overflow(void);
 /* The overflow of the shadow stack in a function which cannot raise */

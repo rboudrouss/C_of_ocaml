@@ -83,6 +83,10 @@ static void camlc_scan_roots(scanning_action action,
     value v = *p;
     if (Is_block(v)) action(fdata, v, p);
   }
+  for (int i = 0; i < camlc_globals_count; i++) {
+    value v = camlc_globals[i];
+    if (Is_block(v)) action(fdata, v, &camlc_globals[i]);
+  }
   if (Is_block(camlc_fiber)) action(fdata, camlc_fiber, &camlc_fiber);
   if (Is_block(camlc_bounce_f)) action(fdata, camlc_bounce_f, &camlc_bounce_f);
   for (int i = 0; i < camlc_bounce_n; i++) {
@@ -108,6 +112,10 @@ static void camlc_scan_roots(scanning_action action)
   for (value *p = camlc_sp; p < camlc_stack_top; p++) {
     value v = *p;
     if (Is_block(v)) action(v, p);
+  }
+  for (int i = 0; i < camlc_globals_count; i++) {
+    value v = camlc_globals[i];
+    if (Is_block(v)) action(v, &camlc_globals[i]);
   }
   if (camlc_prev_scan_roots_hook != NULL) camlc_prev_scan_roots_hook(action);
 }

@@ -1,0 +1,197 @@
+(* C_of_ocaml compiler
+ * http://www.ocsigen.org/js_of_ocaml/
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, with linking exception;
+ * either version 2.1 of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ *)
+
+(*
+
+Store some toplevel values into globals (copied from wasm_of_ocaml).
+Any variable which is used a number of instructions after being defined,
+or by a closure, is stored into a global instead of a local. The goals are the following:
+- Turn a large number of closures into constant closures, which has a
+  significant impact on performance
+- Reduce the frame of the toplevel function on the shadow stack.
+*)
+
+open Stdlib
+
+type st =
+  { pos : int
+  ; visited_variables : int Code.Var.Map.t
+  ; globals : Code.Var.Set.t
+  ; closures : Closure_conversion.closure Code.Var.Map.t
+  ; constants : Code.Var.Set.t
+  ; in_loop : bool
+  ; pairs : Code.Var.t Code.Var.Map.t
+        (* Double translation: the variable bound to the shared closure of a
+           function with two versions maps to the direct-style version
+           (see [Closure_conversion.cps_pair]) *)
+  }
+
+let threshold = 1000
+
+let rec globalize st x =
+  if Code.Var.Set.mem x st.globals
+  then st
+  else
+    let st = { st with globals = Code.Var.Set.add x st.globals } in
+    globalize_closure st x
+
+and globalize_closure st x =
+  (* If a function is stored in a global variable, its free variables
+     are also stored in a global variable, since they are retained
+     anyway. *)
+  match Code.Var.Map.find x st.closures with
+  | { free_variables; _ } ->
+      List.fold_left
+        ~f:(fun st x ->
+          if Code.Var.Map.mem x st.visited_variables then globalize st x else st)
+        ~init:st
+        free_variables
+  | exception Not_found -> (
+      match Code.Var.Map.find_opt x st.pairs with
+      | Some d -> globalize_closure st d
+      | None -> st)
+
+let use x st =
+  match Code.Var.Map.find x st.visited_variables with
+  | pos -> if st.pos > pos + threshold then globalize st x else st
+  | exception Not_found -> st
+
+let declare x st =
+  (* Variables defined in a loop are not globalized, since they can
+     take several values. We still look at the uses in loops. *)
+  if st.in_loop
+  then st
+  else { st with visited_variables = Code.Var.Map.add x st.pos st.visited_variables }
+
+let traverse_expression x e st =
+  match e with
+  | Code.Apply { f; args; _ } ->
+      st |> use f |> fun st -> List.fold_left ~f:(fun st x -> use x st) ~init:st args
+  | Block (_, a, _, _, _) -> Array.fold_right ~f:use a ~init:st
+  | Field (x, _, _) -> st |> use x
+  | Closure _ ->
+      (* Unlike wasm_of_ocaml, all the free variables of the toplevel
+         closures are stored in globals (reading a global is cheaper than
+         reading the closure) *)
+      List.fold_left
+        ~f:(fun st x ->
+          if Code.Var.Map.mem x st.visited_variables then globalize st x else st)
+        ~init:st
+        (Code.Var.Map.find x st.closures).Closure_conversion.free_variables
+  | Constant _ ->
+      if st.in_loop then st else { st with constants = Code.Var.Set.add x st.constants }
+  | Special _ -> st
+  | Prim (Extern ("caml_cps_closure", _), [ Pv d; Pv c ]) ->
+      { st with pairs = Code.Var.Map.add x d st.pairs } |> use d |> use c
+  | Prim (_, args) ->
+      List.fold_left
+        ~f:(fun st a ->
+          match a with
+          | Code.Pv x -> st |> use x
+          | Pc _ -> st)
+        ~init:st
+        args
+
+let traverse_instruction st i =
+  let st = { st with pos = st.pos + 1 } in
+  match i with
+  | Code.Let (x, e) -> st |> declare x |> traverse_expression x e
+  | Assign (_, x) | Offset_ref (x, _) -> st |> use x
+  | Set_field (x, _, _, y) -> st |> use x |> use y
+  | Array_set (x, y, z) -> st |> use x |> use y |> use z
+  | Event _ -> st
+
+let traverse_cont st (_, args) = List.fold_left ~f:(fun st x -> use x st) ~init:st args
+
+let traverse_branch st (b : Code.last) =
+  match b with
+  | Return x | Raise (x, _) -> use x st
+  | Stop -> st
+  | Branch cont | Poptrap cont -> traverse_cont st cont
+  | Cond (x, cont1, cont2) ->
+      st |> use x |> fun st -> traverse_cont (traverse_cont st cont1) cont2
+  | Switch (x, a) -> Array.fold_left ~f:traverse_cont ~init:(use x st) a
+  | Pushtrap (cont, x, cont') -> traverse_cont (traverse_cont (declare x st) cont) cont'
+
+let traverse_block p in_loop st pc =
+  let b = Code.Addr.Map.find pc p.Code.blocks in
+  let st = { st with in_loop = Code.Addr.Map.mem pc in_loop } in
+  let st = List.fold_left ~f:(fun st x -> declare x st) ~init:st b.Code.params in
+  let st =
+    List.fold_left ~f:(fun st i -> traverse_instruction st i) ~init:st b.Code.body
+  in
+  traverse_branch st b.Code.branch
+
+let available x st = Code.Var.Set.mem x st.globals || Code.Var.Set.mem x st.constants
+
+let propagate_instruction st i =
+  match i with
+  | Code.Let (x, Block (_, a, _, _, _)) when not (Code.Var.Set.mem x st.globals) ->
+      (* Globalize a block when most of its fields are available
+         (global or constant). Available fields go into the global's
+         initializer; the rest are patched via [array.set] in the
+         function body. The [+1] keeps 2-field cons cells eligible
+         (one non-available field is allowed), which matters for
+         cascading: globalizing an inner block makes its variable
+         available for outer blocks. *)
+      let non_available =
+        Array.fold_right ~f:(fun v n -> if available v st then n else n + 1) a ~init:0
+      in
+      if 3 * non_available <= Array.length a + 1 then globalize st x else st
+  | Code.Let (x, Closure _) when not (Code.Var.Set.mem x st.globals) -> (
+      match Code.Var.Map.find x st.closures with
+      | { free_variables; _ } ->
+          if List.for_all ~f:(fun v -> available v st) free_variables
+          then globalize st x
+          else st
+      | exception Not_found -> st)
+  | Code.Let (x, Prim (Extern ("caml_cps_closure", _), [ Pv d; _ ]))
+    when (not (Code.Var.Set.mem x st.globals)) && available d st ->
+      (* Alias of the closure [d] *)
+      globalize st x
+  | _ -> st
+
+let propagate_block p st pc =
+  let b = Code.Addr.Map.find pc p.Code.blocks in
+  List.fold_left ~f:(fun st i -> propagate_instruction st i) ~init:st b.Code.body
+
+let f p g closures =
+  let l = Structure.blocks_in_reverse_post_order g in
+  let in_loop = Freevars.find_loops_in_closure p p.Code.start in
+  let st =
+    List.fold_left
+      ~f:(fun st pc -> traverse_block p in_loop st pc)
+      ~init:
+        { pos = 0
+        ; visited_variables = Code.Var.Map.empty
+        ; globals = Code.Var.Set.empty
+        ; closures
+        ; constants = Code.Var.Set.empty
+        ; in_loop = false
+        ; pairs = Code.Var.Map.empty
+        }
+      l
+  in
+  let st =
+    List.fold_left
+      ~f:(fun st pc ->
+        if Code.Addr.Map.mem pc in_loop then st else propagate_block p st pc)
+      ~init:st
+      l
+  in
+  st.globals

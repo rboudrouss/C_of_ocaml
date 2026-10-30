@@ -141,6 +141,10 @@ type output =
   ; mutable cps_apply_arities : IntSet.t
         (** Arities (with the continuation) of the [camlc_apply_cpsN] and
             [camlc_call_cpsN] functions used *)
+  ; globals : int Var.Hashtbl.t  (** The index of each global *)
+  ; statics : string Var.Hashtbl.t
+        (** The closed closures and the constants, which are not free
+            variables *)
   ; mutable raising : Var.Set.t  (** The functions which may raise *)
   ; mutable collecting : Var.Set.t
         (** The functions which may trigger a garbage collection and return *)
@@ -1007,6 +1011,8 @@ type location =
   | Local  (** A variable of the function *)
   | Env of int  (** A field of the closure *)
   | Sibling of int  (** A function of the same closure, at this offset in words *)
+  | Global of int  (** A toplevel value stored in [camlc_globals] *)
+  | Static of string  (** A closed closure or a constant: static data *)
 
 type trap =
   { exn_var : Var.t
@@ -1052,6 +1058,17 @@ let backtrace_stmt ctx kind e =
             (if reraise then 1 else 0))
   | Some _ | None -> ""
 
+let location ctx x =
+  match Var.Hashtbl.find_opt ctx.locations x with
+  | Some _ as l -> l
+  | None -> (
+      match Var.Hashtbl.find_opt ctx.out.globals x with
+      | Some i -> Some (Global i)
+      | None -> (
+          match Var.Hashtbl.find_opt ctx.out.statics x with
+          | Some e -> Some (Static e)
+          | None -> None))
+
 let local_name ctx x =
   if Var.equal x ctx.env_var then "env" else Printf.sprintf "v%d" (Var.idx x)
 
@@ -1061,8 +1078,10 @@ let local ctx x =
   | None -> local_name ctx x
 
 let var ctx x =
-  match Var.Hashtbl.find_opt ctx.locations x with
+  match location ctx x with
   | Some Local -> local ctx x
+  | Some (Global i) -> Printf.sprintf "camlc_globals[%d]" i
+  | Some (Static e) -> e
   | Some (Env i) -> Printf.sprintf "Field(%s, %d)" (local ctx ctx.env_var) i
   | Some (Sibling 0) -> local ctx ctx.env_var
   | Some (Sibling d) ->
@@ -1070,18 +1089,19 @@ let var ctx x =
   | None -> failwith (Format.asprintf "c_of_ocaml: unbound variable %a" Var.print x)
 
 let slot ctx x =
-  match Var.Hashtbl.find_opt ctx.locations x with
+  match location ctx x with
   | Some Local -> local ctx x
-  | Some (Env _ | Sibling _) | None ->
+  | Some (Global i) -> Printf.sprintf "camlc_globals[%d]" i
+  | Some (Env _ | Sibling _ | Static _) | None ->
       failwith (Format.asprintf "c_of_ocaml: variable %a is not local" Var.print x)
 
 let var_repr ctx x =
   if Var.equal x ctx.env_var
   then Value
   else
-    match Var.Hashtbl.find_opt ctx.locations x with
+    match location ctx x with
     | Some Local -> repr_of_type (Typing.var_type ctx.out.types x)
-    | Some (Env _ | Sibling _) | None -> Value
+    | Some (Env _ | Sibling _ | Global _ | Static _) | None -> Value
 
 (* The variable [x] in representation [r]: boxed values are unboxed, while
    the typing ensures that unboxed numbers are never needed boxed (they are
@@ -1222,6 +1242,42 @@ let closure_layout functions =
   in
   layout 0 functions
 
+(* The code pointers and headers of a closure, before its free variables *)
+let closure_prefix out functions =
+  let startenv, positions = closure_layout functions in
+  List.concat
+    (List.map2 functions positions ~f:(fun (g, arity) pos ->
+         let code =
+           [ Printf.sprintf "(value)&%s" (fun_name out g)
+           ; Printf.sprintf "Make_closinfo(%d, %d)" arity (startenv - pos)
+           ]
+         in
+         let code =
+           if double_translation ()
+           then
+             code
+             @ [ (match Var.Map.find_opt g out.cps_pairs with
+                 | Some c -> Printf.sprintf "(value)&%s" (fun_name out c)
+                 | None -> "0")
+               ]
+           else if List.length functions > 1 && arity >= 2
+           then code @ [ "Val_unit" ]
+           else code
+         in
+         if pos = 0
+         then code
+         else Printf.sprintf "Make_header(%d, Infix_tag, 0)" pos :: code))
+
+(* A closed closure is static data: the address of each function *)
+let static_closure out functions =
+  let prefix = closure_prefix out functions in
+  let name =
+    static_block out (header ~wosize:(List.length prefix) ~tag:Obj.closure_tag :: prefix)
+  in
+  let _, positions = closure_layout functions in
+  List.map2 functions positions ~f:(fun (g, _) pos ->
+      g, Printf.sprintf "(value)&%s[%d]" name (pos + 1))
+
 let translate_closure ctx f =
   let info = Var.Map.find f ctx.closures in
   match info.functions with
@@ -1232,50 +1288,20 @@ let translate_closure ctx f =
       (* Allocated with the first function of the closure *)
       ()
   | functions ->
-      let startenv, positions = closure_layout functions in
-      let prefix =
-        List.concat
-          (List.map2 functions positions ~f:(fun (g, arity) pos ->
-               let code =
-                 [ Printf.sprintf "(value)&%s" (fun_name ctx.out g)
-                 ; Printf.sprintf "Make_closinfo(%d, %d)" arity (startenv - pos)
-                 ]
-               in
-               let code =
-                 if double_translation ()
-                 then
-                   code
-                   @ [ (match Var.Map.find_opt g ctx.out.cps_pairs with
-                       | Some c -> Printf.sprintf "(value)&%s" (fun_name ctx.out c)
-                       | None -> "0")
-                     ]
-                 else if List.length functions > 1 && arity >= 2
-                 then code @ [ "Val_unit" ]
-                 else code
-               in
-               if pos = 0
-               then code
-               else Printf.sprintf "Make_header(%d, Infix_tag, 0)" pos :: code))
-      in
       if List.is_empty info.free_variables
       then
-        (* A closed closure is static data *)
-        let name =
-          static_block
-            ctx.out
-            (header ~wosize:(List.length prefix) ~tag:Obj.closure_tag :: prefix)
-        in
-        List.iter2 functions positions ~f:(fun (g, _) pos ->
-            line ctx "%s = (value)&%s[%d];" (slot ctx g) name (pos + 1))
-      else (
+        List.iter functions ~f:(fun (g, _) ->
+            line ctx "%s = %s;" (slot ctx g) (Var.Hashtbl.find ctx.out.statics g))
+      else
+        let _, positions = closure_layout functions in
         alloc_block
           ctx
           ~dst:(slot ctx f)
           ~tag:Obj.closure_tag
-          ~prefix
+          ~prefix:(closure_prefix ctx.out functions)
           (List.map info.free_variables ~f:(fun x -> as_value ctx x));
         List.iter2 functions positions ~f:(fun (g, _) pos ->
-            if pos > 0 then line ctx "%s = (value)((value *)b + %d);" (slot ctx g) pos))
+            if pos > 0 then line ctx "%s = (value)((value *)b + %d);" (slot ctx g) pos)
 
 let apply_arity out n = out.apply_arities <- IntSet.add n out.apply_arities
 
@@ -1689,10 +1715,10 @@ let function_blocks ctx pc =
 (* The local variables used by an expression, the variables of the
    enclosing functions standing for the closure *)
 let use ctx x acc =
-  match Var.Hashtbl.find_opt ctx.locations x with
+  match location ctx x with
   | Some Local -> Var.Set.add x acc
   | Some (Env _ | Sibling _) -> Var.Set.add ctx.env_var acc
-  | None -> acc
+  | Some (Global _ | Static _) | None -> acc
 
 let use_list ctx l acc = List.fold_left l ~init:acc ~f:(fun acc x -> use ctx x acc)
 
@@ -2191,7 +2217,7 @@ let translate_function
   let ctx = if List.is_empty env then ctx else { ctx with arity = Some param_reprs } in
   let locals = ref [] in
   let add_local x =
-    if not (Var.Hashtbl.mem ctx.locations x)
+    if not (Var.Hashtbl.mem ctx.locations x || Var.Hashtbl.mem out.globals x)
     then (
       Var.Hashtbl.add ctx.locations x Local;
       locals := x :: !locals)
@@ -2348,6 +2374,54 @@ let f
     ~trampolined_calls
     closures =
   let global_flow_state, global_flow_info = global_flow_data in
+  (* Toplevel values in globals: they are no longer free variables of the
+     closures *)
+  let globals = Var.Hashtbl.create 1024 in
+  let global_list =
+    Var.Set.elements (Globalize.f p (Structure.build_graph p.blocks p.start) closures)
+  in
+  List.iteri global_list ~f:(fun i x -> Var.Hashtbl.add globals x i);
+  (* Nor are the constants and the closed closures, static data (and the
+     variables bound to the closure of a function with two versions, see
+     [caml_cps_closure]), which may close other closures *)
+  let constants = Var.Hashtbl.create 1024 in
+  let assigned = Var.Hashtbl.create 16 in
+  Addr.Map.iter
+    (fun _ block ->
+      List.iter block.body ~f:(fun i ->
+          match i with
+          | Let (x, Constant c) -> Var.Hashtbl.replace constants x c
+          | Assign (x, _) -> Var.Hashtbl.replace assigned x ()
+          | _ -> ()))
+    p.blocks;
+  Var.Hashtbl.iter (fun x () -> Var.Hashtbl.remove constants x) assigned;
+  let closed = Var.Hashtbl.create 1024 in
+  Var.Hashtbl.iter (fun x _ -> Var.Hashtbl.replace closed x ()) constants;
+  let rec close_closures closures =
+    Var.Map.iter
+      (fun _ (info : Closure_conversion.closure) ->
+        if List.is_empty info.free_variables
+        then List.iter info.functions ~f:(fun (g, _) -> Var.Hashtbl.replace closed g ()))
+      closures;
+    Var.Hashtbl.iter
+      (fun x (d, _) -> if Var.Hashtbl.mem closed d then Var.Hashtbl.replace closed x ())
+      global_flow_info.Global_flow.info_cps_closures;
+    let changed = ref false in
+    let closures =
+      Var.Map.map
+        (fun (info : Closure_conversion.closure) ->
+          let free_variables =
+            List.filter info.free_variables ~f:(fun x ->
+                not (Var.Hashtbl.mem globals x || Var.Hashtbl.mem closed x))
+          in
+          if List.length free_variables <> List.length info.free_variables
+          then changed := true;
+          { info with free_variables })
+        closures
+    in
+    if !changed then close_closures closures else closures
+  in
+  let closures = close_closures closures in
   let facts = compute_facts p closures in
   let cps_pairs, cps_sides, public_name =
     Var.Hashtbl.fold
@@ -2369,7 +2443,7 @@ let f
       Var.Map.fold
         (fun _ (info : Closure_conversion.closure) acc -> info.free_variables @ acc)
         closures
-        []
+        global_list
     in
     let boxed =
       List.fold_left functions ~init:boxed ~f:(fun acc (f, params, _) ->
@@ -2398,6 +2472,8 @@ let f
     ; cps_pairs
     ; cps_sides
     ; cps_apply_arities = IntSet.empty
+    ; globals
+    ; statics = Var.Hashtbl.create 1024
     ; raising = Var.Set.empty
     ; collecting = Var.Set.empty
     ; collecting_on_raise = Var.Set.empty
@@ -2410,6 +2486,27 @@ let f
         f
         (List.map params ~f:(fun x -> repr_of_type (Typing.var_type types x)));
       ignore (fun_name out f));
+  (* The static data of the constants and the closed closures *)
+  Var.Hashtbl.iter
+    (fun x c -> Var.Hashtbl.replace out.statics x (code_constant out c))
+    constants;
+  Var.Map.iter
+    (fun f (info : Closure_conversion.closure) ->
+      match info.functions with
+      | (f0, _) :: _
+        when Var.equal f f0
+             && List.is_empty info.free_variables
+             && not (Var.Set.mem f cps_sides) ->
+          List.iter (static_closure out info.functions) ~f:(fun (g, e) ->
+              Var.Hashtbl.replace out.statics g e)
+      | _ -> ())
+    closures;
+  Var.Hashtbl.iter
+    (fun x (d, _) ->
+      match Var.Hashtbl.find_opt out.statics d with
+      | Some e -> Var.Hashtbl.replace out.statics x e
+      | None -> ())
+    global_flow_info.Global_flow.info_cps_closures;
   analyze_functions out facts global_flow_info closures p.blocks functions;
   List.iter functions ~f:(fun (f, params, cont) ->
       let info = Var.Map.find f closures in
@@ -2515,6 +2612,14 @@ let f
   done;
   Buffer.add_char b '\n';
   Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
+  let n = Var.Hashtbl.length globals in
+  Printf.bprintf
+    b
+    "value camlc_globals[%d] = { [0 ... %d] = Val_unit };\n\
+     const int camlc_globals_count = %d;\n"
+    (max n 1)
+    (max n 1 - 1)
+    n;
   Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
   Printf.bprintf
     b
