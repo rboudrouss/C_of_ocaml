@@ -143,7 +143,10 @@ type output =
             [camlc_call_cpsN] functions used *)
   ; mutable raising : Var.Set.t  (** The functions which may raise *)
   ; mutable collecting : Var.Set.t
-        (** The functions which may trigger a garbage collection *)
+        (** The functions which may trigger a garbage collection and return *)
+  ; mutable collecting_on_raise : Var.Set.t
+        (** The functions which may trigger a garbage collection only when
+            they raise *)
   }
 
 (* A static description of a source location, for backtraces *)
@@ -1714,8 +1717,22 @@ let expr_uses ctx x e acc =
   | Prim (Extern ("caml_cps_closure", _), [ Pv d; _ ]) -> use ctx d acc
   | Prim (_, args) -> use_prim_args ctx args acc
 
+(* The primitives which may trigger a garbage collection only when they
+   raise (to allocate the exception) *)
+let gc_on_raise_primitives =
+  StringSet.of_list
+    [ "caml_string_get"
+    ; "caml_bytes_get"
+    ; "caml_string_set"
+    ; "caml_bytes_set"
+    ; "caml_check_bound"
+    ; "caml_check_bound_float"
+    ; "caml_check_bound_gen"
+    ]
+
 (* How an instruction may trigger a garbage collection: [`Call] if its
-   operands are read before, [`Alloc] if they are read after *)
+   operands are read before, [`Alloc] if they are read after, [`Raise] if
+   only when it raises *)
 let gc_point ctx i =
   match i with
   | Let (x, Apply { f; args; exact }) -> (
@@ -1723,7 +1740,12 @@ let gc_point ctx i =
       then `Alloc
       else
         match callee ctx x ~f ~exact with
-        | Known g when not (Var.Set.mem g ctx.out.collecting || is_cps_call ctx x) -> `No
+        | Known g when not (is_cps_call ctx x) ->
+            if Var.Set.mem g ctx.out.collecting
+            then `Call
+            else if Var.Set.mem g ctx.out.collecting_on_raise
+            then `Raise
+            else `No
         | Known _ | Known_direct _ | Unknown -> `Call)
   | Let (_, Block (_, [||], _, _, _)) -> `No
   | Let (_, Block _) -> `Alloc
@@ -1748,7 +1770,12 @@ let gc_point ctx i =
           if gc || ((not (repr_equal r Value)) && repr_equal (var_repr ctx x) Value)
           then `Call
           else `No
-      | Checked _ -> if StringSet.mem name nogc_primitives then `No else `Call
+      | Checked _ ->
+          if StringSet.mem name nogc_primitives
+          then `No
+          else if StringSet.mem name gc_on_raise_primitives
+          then `Raise
+          else `Call
       | Ccallv -> `Call)
   | Let (_, Prim ((Vectlength Generic | Array_get Float), _)) -> `No
   | Let (_, (Field _ | Constant _ | Special _ | Prim _)) -> `No
@@ -1776,7 +1803,7 @@ let cont_uses ctx live_in (pc, args) acc =
     args
     (Var.Set.union acc (List.fold_left params ~init:l ~f:(fun l x -> Var.Set.remove x l)))
 
-let live_out ctx live_in pc =
+let rec live_out ctx live_in pc =
   let block = Addr.Map.find pc ctx.blocks in
   let acc =
     match block.branch with
@@ -1795,8 +1822,13 @@ let live_out ctx live_in pc =
   in
   (* The handler of the innermost trap may be reached from any point of
      the block *)
+  Var.Set.union acc (handler_live ctx live_in pc)
+
+(* The variables live at the start of the handler of the innermost trap
+   of a block *)
+and handler_live ctx live_in pc =
   match Addr.Hashtbl.find ctx.traps pc with
-  | [] -> acc
+  | [] -> Var.Set.empty
   | { exn_var; id } :: _ ->
       let handler =
         Addr.Hashtbl.fold
@@ -1815,7 +1847,7 @@ let live_out ctx live_in pc =
         | Some h -> h
         | None -> assert false
       in
-      Var.Set.remove exn_var (cont_uses ctx live_in h acc)
+      Var.Set.remove exn_var (cont_uses ctx live_in h Var.Set.empty)
 
 (* The variables which must be kept in the frame *)
 let rooted_variables ctx pcs ~params =
@@ -1855,6 +1887,7 @@ let rooted_variables ctx pcs ~params =
              in
              (match gc_point ctx i with
              | `No -> ()
+             | `Raise -> rooted := Var.Set.union !rooted (handler_live ctx live_in pc)
              | `Call -> rooted := Var.Set.union !rooted live_after
              | `Alloc ->
                  let l = instr_uses ctx i live_after in
@@ -1892,7 +1925,18 @@ let rooted_variables ctx pcs ~params =
    the shadow stack in a function which cannot raise is fatal.
 
    Similarly, the functions which may trigger a garbage collection: the
-   calls of the other ones are not GC points. *)
+   calls of the other ones are not GC points. A call of a function which
+   may trigger one only when it raises, outside any handler, only roots the
+   variables live in the handler of the caller. *)
+type summary =
+  { fn : Var.t
+  ; raises : bool  (** Raises by itself *)
+  ; outer : Var.t list  (** The functions called outside any handler *)
+  ; gcs : bool  (** May trigger a GC by itself and return *)
+  ; any_gcs : bool  (** May trigger a GC by itself *)
+  ; inner : Var.t list  (** The functions called inside a handler *)
+  }
+
 let analyze_functions out facts global_flow_info closures blocks functions =
   let ctx =
     { out
@@ -1919,14 +1963,21 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     | Pc c -> { a_typ = Typing.constant_type c; get = (fun _ -> "_") }
   in
   (* Whether a function raises by itself, the functions it calls outside
-     any handler, whether it triggers a GC by itself and the functions it
-     calls *)
+     any handler, whether it triggers a GC by itself (and then returns, or
+     in any case), and the functions it calls inside handlers *)
   let summary pc =
     let visited = Addr.Hashtbl.create 16 in
     let raises = ref false in
-    let raise_callees = ref [] in
+    let outer = ref [] in
     let gcs = ref false in
-    let callees = ref [] in
+    let any_gcs = ref false in
+    let inner = ref [] in
+    let gc_point depth i =
+      match gc_point ctx i with
+      | `No -> ()
+      | `Raise -> if depth = 0 then any_gcs := true else gcs := true
+      | `Call | `Alloc -> gcs := true
+    in
     let rec visit pc depth =
       if not (Addr.Hashtbl.mem visited pc)
       then (
@@ -1942,8 +1993,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
                 else
                   match resolve_callee global_flow_info closures x ~f ~exact with
                   | Known g ->
-                      if depth = 0 then raise_callees := g :: !raise_callees;
-                      callees := g :: !callees;
+                      if depth = 0 then outer := g :: !outer else inner := g :: !inner;
                       if List.exists (boxed_arguments ctx x ~f ~args ~exact) ~f:Fun.id
                       then gcs := true
                   | Known_direct _ | Unknown ->
@@ -1954,13 +2004,9 @@ let analyze_functions out facts global_flow_info closures blocks functions =
                 (match primitive out name (List.map args ~f:typed) with
                 | Plain _ -> ()
                 | Checked _ | Ccallv -> if depth = 0 then raises := true);
-                match gc_point ctx i with
-                | `No -> ()
-                | `Call | `Alloc -> gcs := true)
-            | Let _ | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ -> (
-                match gc_point ctx i with
-                | `No -> ()
-                | `Call | `Alloc -> gcs := true));
+                gc_point depth i)
+            | Let _ | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ ->
+                gc_point depth i);
         match block.branch with
         | Raise _ -> if depth = 0 then raises := true
         | Return _ | Stop -> ()
@@ -1975,7 +2021,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
             visit pc2 depth)
     in
     visit pc 0;
-    !raises, !raise_callees, !gcs, !callees
+    !raises, !outer, !gcs, !gcs || !any_gcs, !inner
   in
   (* The functions with the property, and the callers of each function *)
   let propagate roots callers =
@@ -1989,19 +2035,34 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     List.iter roots ~f:mark;
     Var.Hashtbl.fold (fun f () acc -> Var.Set.add f acc) set Var.Set.empty
   in
-  let raise_callers = Var.Hashtbl.create 1024 in
-  let gc_callers = Var.Hashtbl.create 1024 in
-  let raise_roots = ref [] in
-  let gc_roots = ref [] in
-  List.iter functions ~f:(fun (f, _, (pc, _)) ->
-      let raises, raise_callees, gcs, callees = summary pc in
-      List.iter raise_callees ~f:(fun g -> Var.Hashtbl.add raise_callers g f);
-      List.iter callees ~f:(fun g -> Var.Hashtbl.add gc_callers g f);
-      let side = Var.Set.mem f out.cps_sides in
-      if raises || side then raise_roots := f :: !raise_roots;
-      if gcs || side then gc_roots := f :: !gc_roots);
-  out.raising <- propagate !raise_roots raise_callers;
-  out.collecting <- propagate !gc_roots gc_callers
+  let summaries =
+    List.map functions ~f:(fun (f, _, (pc, _)) ->
+        let raises, outer, gcs, any_gcs, inner = summary pc in
+        let side = Var.Set.mem f out.cps_sides in
+        { fn = f
+        ; raises = raises || side
+        ; outer
+        ; gcs = gcs || side
+        ; any_gcs = any_gcs || side
+        ; inner
+        })
+  in
+  let callers l =
+    let h = Var.Hashtbl.create 1024 in
+    List.iter summaries ~f:(fun s -> List.iter (l s) ~f:(fun g -> Var.Hashtbl.add h g s.fn));
+    h
+  in
+  let roots p = List.filter_map summaries ~f:(fun s -> if p s then Some s.fn else None) in
+  out.raising <- propagate (roots (fun s -> s.raises)) (callers (fun s -> s.outer));
+  (* The functions which may trigger a GC in any way, then those which may
+     return after one: a call inside a handler is in the second case if
+     the function called may trigger a GC in any way *)
+  let any = propagate (roots (fun s -> s.any_gcs)) (callers (fun s -> s.outer @ s.inner)) in
+  out.collecting <-
+    propagate
+      (roots (fun s -> s.gcs || List.exists s.inner ~f:(fun g -> Var.Set.mem g any)))
+      (callers (fun s -> s.outer));
+  out.collecting_on_raise <- Var.Set.diff any out.collecting
 
 let translate_function
     out
@@ -2240,6 +2301,7 @@ let f
     ; cps_apply_arities = IntSet.empty
     ; raising = Var.Set.empty
     ; collecting = Var.Set.empty
+    ; collecting_on_raise = Var.Set.empty
     }
   in
   List.iter functions ~f:(fun (f, params, _) ->
