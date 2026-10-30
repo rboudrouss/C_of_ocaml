@@ -88,6 +88,8 @@ extern value *camlc_stack_limit;
 
 /* Returns the Stack_overflow exception, as an exception result */
 value camlc_stack_overflow(void);
+/* The overflow of the shadow stack in a function which cannot raise */
+CAMLnoreturn_start void camlc_fatal_stack_overflow(void) CAMLnoreturn_end;
 
 /* Generic application: apply [f] to the [n] arguments [args] */
 value camlc_applyv(value f, int n, value *args);

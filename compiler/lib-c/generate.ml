@@ -141,6 +141,9 @@ type output =
   ; mutable cps_apply_arities : IntSet.t
         (** Arities (with the continuation) of the [camlc_apply_cpsN] and
             [camlc_call_cpsN] functions used *)
+  ; mutable raising : Var.Set.t  (** The functions which may raise *)
+  ; mutable collecting : Var.Set.t
+        (** The functions which may trigger a garbage collection *)
   }
 
 (* A static description of a source location, for backtraces *)
@@ -1023,6 +1026,7 @@ type fctx =
   ; buf : Buffer.t
   ; mutable position : Parse_info.t option  (** The last debug event *)
   ; source_name : string option  (** The name of the function in the source *)
+  ; raises : bool  (** The function may raise *)
   }
 
 (* Record a backtrace slot, if debug information is enabled: [`Call] when
@@ -1141,6 +1145,12 @@ let raise_stmt ?bt ctx traps r =
         Printf.sprintf "{ %s = Extract_exception(%s); goto H%d; }" (slot ctx exn_var) r id
   in
   if String.equal pre "" then stmt else Printf.sprintf "{ %s%s }" pre stmt
+
+(* An overflow of the shadow stack *)
+let overflow_stmt ctx traps =
+  if List.is_empty traps && not ctx.raises
+  then "camlc_fatal_stack_overflow();"
+  else raise_stmt ctx traps "camlc_stack_overflow()"
 
 let branch ctx (pc, args) =
   let params = (Addr.Map.find pc ctx.blocks).params in
@@ -1281,14 +1291,16 @@ type callee =
           direct style, and its result passed to the continuation *)
   | Unknown
 
-let callee ctx x ~f ~exact =
+let resolve_callee global_flow_info closures x ~f ~exact =
   if exact
   then
-    match Global_flow.get_unique_closure ctx.global_flow_info ~call:x f with
-    | Some (g, _, cont) when Var.Map.mem g ctx.closures ->
+    match Global_flow.get_unique_closure global_flow_info ~call:x f with
+    | Some (g, _, cont) when Var.Map.mem g closures ->
         if cont then Known_direct g else Known g
     | Some _ | None -> Unknown
   else Unknown
+
+let callee ctx x ~f ~exact = resolve_callee ctx.global_flow_info ctx.closures x ~f ~exact
 
 (* The representation of the parameters of the function called *)
 let callee_reprs ctx x ~f ~args ~exact =
@@ -1357,7 +1369,7 @@ let boxing_prelude ctx traps x ~f ~args ~exact =
     line
       ctx
       "if (CAMLC_UNLIKELY(bx < camlc_stack_limit)) %s"
-      (raise_stmt ctx traps "camlc_stack_overflow()");
+      (overflow_stmt ctx traps);
     line ctx "camlc_sp = bx;";
     List.iteri boxed ~f:(fun i _ -> line ctx "bx[%d] = Val_unit;" i);
     List.iteri boxed ~f:(fun i a ->
@@ -1468,8 +1480,21 @@ let translate_instr ctx traps i =
       | Apply { f; args; exact } ->
           if is_cps_call ctx x then failwith "c_of_ocaml: a CPS call is not a tail call";
           let k = boxing_prelude ctx traps x ~f ~args ~exact in
+          let raises =
+            match callee ctx x ~f ~exact with
+            | Known g -> Var.Set.mem g ctx.out.raising
+            | Known_direct _ | Unknown -> true
+          in
           let callee, args, _ = apply ctx x ~f ~args ~exact in
-          if k = 0
+          if not raises
+          then (
+            if k = 0
+            then define ctx x Value (c_call callee args)
+            else (
+              line ctx "r = %s;" (c_call callee args);
+              line ctx "camlc_sp = bx + %d;" k;
+              define ctx x Value "r"))
+          else if k = 0
           then checked ~bt:`Call (c_call callee args)
           else (
             line ctx "r = %s;" (c_call callee args);
@@ -1693,10 +1718,13 @@ let expr_uses ctx x e acc =
    operands are read before, [`Alloc] if they are read after *)
 let gc_point ctx i =
   match i with
-  | Let (x, Apply { f; args; exact }) ->
+  | Let (x, Apply { f; args; exact }) -> (
       if List.exists (boxed_arguments ctx x ~f ~args ~exact) ~f:Fun.id
       then `Alloc
-      else `Call
+      else
+        match callee ctx x ~f ~exact with
+        | Known g when not (Var.Set.mem g ctx.out.collecting || is_cps_call ctx x) -> `No
+        | Known _ | Known_direct _ | Unknown -> `Call)
   | Let (_, Block (_, [||], _, _, _)) -> `No
   | Let (_, Block _) -> `Alloc
   | Let (x, Closure _) -> (
@@ -1854,6 +1882,127 @@ let rooted_variables ctx pcs ~params =
 
 (****)
 
+(****)
+
+(* The functions which may raise an exception, that is return an
+   exception result: the calls of the other ones are not followed by a
+   check. A function may raise if, outside any handler, it raises, calls a
+   primitive which may raise, an unknown function or a function which may
+   raise. CPS versions and CPS calls are assumed to raise. An overflow of
+   the shadow stack in a function which cannot raise is fatal.
+
+   Similarly, the functions which may trigger a garbage collection: the
+   calls of the other ones are not GC points. *)
+let analyze_functions out facts global_flow_info closures blocks functions =
+  let ctx =
+    { out
+    ; facts
+    ; global_flow_info
+    ; blocks
+    ; closures
+    ; env_var = Var.fresh ()
+    ; arity = None
+    ; static_env = true
+    ; locations = Var.Hashtbl.create 1
+    ; slots = Var.Hashtbl.create 1
+    ; traps = Addr.Hashtbl.create 1
+    ; handler_ids = Addr.Hashtbl.create 1
+    ; buf = Buffer.create 1
+    ; position = None
+    ; source_name = None
+    ; raises = true
+    }
+  in
+  let typed a =
+    match a with
+    | Pv x -> { a_typ = Typing.var_type out.types x; get = (fun _ -> "_") }
+    | Pc c -> { a_typ = Typing.constant_type c; get = (fun _ -> "_") }
+  in
+  (* Whether a function raises by itself, the functions it calls outside
+     any handler, whether it triggers a GC by itself and the functions it
+     calls *)
+  let summary pc =
+    let visited = Addr.Hashtbl.create 16 in
+    let raises = ref false in
+    let raise_callees = ref [] in
+    let gcs = ref false in
+    let callees = ref [] in
+    let rec visit pc depth =
+      if not (Addr.Hashtbl.mem visited pc)
+      then (
+        Addr.Hashtbl.add visited pc ();
+        let block = Addr.Map.find pc blocks in
+        List.iter block.body ~f:(fun i ->
+            match i with
+            | Let (x, Apply { f; args; exact }) -> (
+                if double_translation () && Var.Set.mem x out.in_cps
+                then (
+                  raises := true;
+                  gcs := true)
+                else
+                  match resolve_callee global_flow_info closures x ~f ~exact with
+                  | Known g ->
+                      if depth = 0 then raise_callees := g :: !raise_callees;
+                      callees := g :: !callees;
+                      if List.exists (boxed_arguments ctx x ~f ~args ~exact) ~f:Fun.id
+                      then gcs := true
+                  | Known_direct _ | Unknown ->
+                      if depth = 0 then raises := true;
+                      gcs := true)
+            | Let (_, Prim (Extern ("caml_cps_closure", _), _)) -> ()
+            | Let (_, Prim (Extern (name, _), args)) -> (
+                (match primitive out name (List.map args ~f:typed) with
+                | Plain _ -> ()
+                | Checked _ | Ccallv -> if depth = 0 then raises := true);
+                match gc_point ctx i with
+                | `No -> ()
+                | `Call | `Alloc -> gcs := true)
+            | Let _ | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ -> (
+                match gc_point ctx i with
+                | `No -> ()
+                | `Call | `Alloc -> gcs := true));
+        match block.branch with
+        | Raise _ -> if depth = 0 then raises := true
+        | Return _ | Stop -> ()
+        | Branch (pc', _) -> visit pc' depth
+        | Poptrap (pc', _) -> visit pc' (depth - 1)
+        | Cond (_, (pc1, _), (pc2, _)) ->
+            visit pc1 depth;
+            visit pc2 depth
+        | Switch (_, conts) -> Array.iter conts ~f:(fun (pc', _) -> visit pc' depth)
+        | Pushtrap ((pc1, _), _, (pc2, _)) ->
+            visit pc1 (depth + 1);
+            visit pc2 depth)
+    in
+    visit pc 0;
+    !raises, !raise_callees, !gcs, !callees
+  in
+  (* The functions with the property, and the callers of each function *)
+  let propagate roots callers =
+    let set = Var.Hashtbl.create 1024 in
+    let rec mark f =
+      if not (Var.Hashtbl.mem set f)
+      then (
+        Var.Hashtbl.add set f ();
+        List.iter (Var.Hashtbl.find_all callers f) ~f:mark)
+    in
+    List.iter roots ~f:mark;
+    Var.Hashtbl.fold (fun f () acc -> Var.Set.add f acc) set Var.Set.empty
+  in
+  let raise_callers = Var.Hashtbl.create 1024 in
+  let gc_callers = Var.Hashtbl.create 1024 in
+  let raise_roots = ref [] in
+  let gc_roots = ref [] in
+  List.iter functions ~f:(fun (f, _, (pc, _)) ->
+      let raises, raise_callees, gcs, callees = summary pc in
+      List.iter raise_callees ~f:(fun g -> Var.Hashtbl.add raise_callers g f);
+      List.iter callees ~f:(fun g -> Var.Hashtbl.add gc_callers g f);
+      let side = Var.Set.mem f out.cps_sides in
+      if raises || side then raise_roots := f :: !raise_roots;
+      if gcs || side then gc_roots := f :: !gc_roots);
+  out.raising <- propagate !raise_roots raise_callers;
+  out.collecting <- propagate !gc_roots gc_callers
+
 let translate_function
     out
     facts
@@ -1866,6 +2015,7 @@ let translate_function
     ~env
     ~static_env
     ~source_name
+    ~raises
     (pc, args) =
   let ctx =
     { out
@@ -1883,6 +2033,7 @@ let translate_function
     ; buf = Buffer.create 4096
     ; position = None
     ; source_name
+    ; raises
     }
   in
   List.iter env ~f:(fun (x, loc) -> Var.Hashtbl.replace ctx.locations x loc);
@@ -1991,10 +2142,13 @@ let translate_function
       out.functions
       "#define FRAME_SIZE %d\n\
       \  value *fp = camlc_sp - FRAME_SIZE;\n\
-      \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();\n\
+      \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) %s\n\
       \  camlc_sp = fp;\n\
       \  for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;\n"
-      frame_size;
+      frame_size
+      (if ctx.raises
+       then "return camlc_stack_overflow();"
+       else "camlc_fatal_stack_overflow();");
   Buffer.add_buffer out.functions ctx.buf;
   Buffer.add_string out.functions "}\n";
   if frame_size > 0 then Buffer.add_string out.functions "#undef FRAME_SIZE\n";
@@ -2084,6 +2238,8 @@ let f
     ; cps_pairs
     ; cps_sides
     ; cps_apply_arities = IntSet.empty
+    ; raising = Var.Set.empty
+    ; collecting = Var.Set.empty
     }
   in
   List.iter functions ~f:(fun (f, params, _) ->
@@ -2093,6 +2249,7 @@ let f
         f
         (List.map params ~f:(fun x -> repr_of_type (Typing.var_type types x)));
       ignore (fun_name out f));
+  analyze_functions out facts global_flow_info closures p.blocks functions;
   List.iter functions ~f:(fun (f, params, cont) ->
       let info = Var.Map.find f closures in
       let startenv, positions = closure_layout info.Closure_conversion.functions in
@@ -2128,6 +2285,7 @@ let f
         ~env
         ~static_env:(List.is_empty info.free_variables)
         ~source_name:(Var.get_name f)
+        ~raises:(Var.Set.mem f out.raising)
         cont);
   translate_function
     out
@@ -2141,6 +2299,7 @@ let f
     ~env:[]
     ~static_env:true
     ~source_name:None
+    ~raises:true
     (p.start, []);
   (* Assemble the output *)
   let b = Buffer.create (Buffer.length out.data + Buffer.length out.functions + 65536) in

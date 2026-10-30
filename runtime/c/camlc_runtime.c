@@ -54,8 +54,13 @@ extern value *const camlc_static_data_begin, *const camlc_static_data_end;
 #define CAMLC_STACK_WORDS (4 * 1024 * 1024)
 #endif
 
+/* Words below [camlc_stack_limit], used to report an overflow in a
+   function which cannot raise it */
+#define CAMLC_STACK_RESERVE (64 * 1024)
+
 value *camlc_sp;
 value *camlc_stack_limit;
+static value *camlc_stack_base;
 static value *camlc_stack_top;
 
 #if OCAML_VERSION_MAJOR >= 5
@@ -118,7 +123,8 @@ static void camlc_init_stack(void)
 {
   value *base = malloc(CAMLC_STACK_WORDS * sizeof(value));
   if (base == NULL) caml_fatal_error("c_of_ocaml: cannot allocate the stack");
-  camlc_stack_limit = base;
+  camlc_stack_base = base;
+  camlc_stack_limit = base + CAMLC_STACK_RESERVE;
   camlc_stack_top = base + CAMLC_STACK_WORDS;
   camlc_sp = camlc_stack_top;
   camlc_install_scan_roots_hook();
@@ -200,6 +206,14 @@ value camlc_ccallv(camlc_primv f, value *argv, int argc)
 value camlc_stack_overflow(void)
 {
   return Make_exception_result(Field(caml_global_data, STACK_OVERFLOW_EXN));
+}
+
+void camlc_fatal_stack_overflow(void)
+{
+  /* The program is ended as by an uncaught exception, with the reserve
+     for the [at_exit] functions */
+  camlc_stack_limit = camlc_stack_base;
+  caml_fatal_uncaught_exception(Field(caml_global_data, STACK_OVERFLOW_EXN));
 }
 
 value camlc_raise_zero_divide(void)
