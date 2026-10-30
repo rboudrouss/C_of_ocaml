@@ -1370,10 +1370,7 @@ let boxing_prelude ctx traps x ~f ~args ~exact =
   if k > 0
   then (
     line ctx "bx = camlc_sp - %d;" k;
-    line
-      ctx
-      "if (CAMLC_UNLIKELY(bx < camlc_stack_limit)) %s"
-      (overflow_stmt ctx traps);
+    line ctx "if (CAMLC_UNLIKELY(bx < camlc_stack_limit)) %s" (overflow_stmt ctx traps);
     line ctx "camlc_sp = bx;";
     List.iteri boxed ~f:(fun i _ -> line ctx "bx[%d] = Val_unit;" i);
     List.iteri boxed ~f:(fun i a ->
@@ -1491,13 +1488,13 @@ let translate_instr ctx traps i =
           in
           let callee, args, _ = apply ctx x ~f ~args ~exact in
           if not raises
-          then (
+          then
             if k = 0
             then define ctx x Value (c_call callee args)
             else (
               line ctx "r = %s;" (c_call callee args);
               line ctx "camlc_sp = bx + %d;" k;
-              define ctx x Value "r"))
+              define ctx x Value "r")
           else if k = 0
           then checked ~bt:`Call (c_call callee args)
           else (
@@ -1900,19 +1897,108 @@ let rooted_variables ctx pcs ~params =
                      | None -> l));
              instr_uses ctx i live_after)));
   ignore params;
-  Var.Set.filter
-    (fun x ->
-      if Var.equal x ctx.env_var
-      then not ctx.static_env
-      else
-        repr_equal (var_repr ctx x) Value
-        && (match Typing.var_type ctx.out.types x with
-          | Int _ -> false
-          | _ -> true)
-        && not
-             (BitSet.mem ctx.facts.is_int (Var.idx x)
-             || BitSet.mem ctx.facts.is_static (Var.idx x)))
-    !rooted
+  ( Var.Set.filter
+      (fun x ->
+        if Var.equal x ctx.env_var
+        then not ctx.static_env
+        else
+          repr_equal (var_repr ctx x) Value
+          && (match Typing.var_type ctx.out.types x with
+            | Int _ -> false
+            | _ -> true)
+          && not
+               (BitSet.mem ctx.facts.is_int (Var.idx x)
+               || BitSet.mem ctx.facts.is_static (Var.idx x)))
+      !rooted
+  , live_in )
+
+(* The slots of the rooted variables: two variables live at the same time
+   have different slots. A variable interferes with the variables live
+   after its definition, and the parameters of the function with each other
+   and the variables live at its start. A slot may still hold a dead value,
+   which remains valid as it was a root. *)
+let assign_slots ctx pcs ~params ~entry rooted live_in =
+  let edges = Var.Hashtbl.create 64 in
+  let add x y =
+    if not (Var.equal x y)
+    then (
+      Var.Hashtbl.replace
+        edges
+        x
+        (Var.Set.add
+           y
+           (Var.Hashtbl.find_opt edges x |> Option.value ~default:Var.Set.empty));
+      Var.Hashtbl.replace
+        edges
+        y
+        (Var.Set.add
+           x
+           (Var.Hashtbl.find_opt edges y |> Option.value ~default:Var.Set.empty)))
+  in
+  let define x live =
+    if Var.Set.mem x rooted
+    then Var.Set.iter (fun y -> add x y) (Var.Set.inter live rooted)
+  in
+  let live_at pc =
+    Addr.Hashtbl.find_opt live_in pc |> Option.value ~default:Var.Set.empty
+  in
+  let start =
+    List.fold_left
+      (ctx.env_var :: params)
+      ~init:(Var.Set.union (live_at (fst entry)) (use_list ctx (snd entry) Var.Set.empty))
+      ~f:(fun acc x -> if Var.Set.mem x rooted then Var.Set.add x acc else acc)
+  in
+  List.iter (ctx.env_var :: params) ~f:(fun x -> define x start);
+  List.iter pcs ~f:(fun pc ->
+      let block = Addr.Map.find pc ctx.blocks in
+      let l = live_at pc in
+      List.iter block.params ~f:(fun x -> define x l);
+      (match Addr.Hashtbl.find ctx.traps pc with
+      | { exn_var; _ } :: _ -> define exn_var (handler_live ctx live_in pc)
+      | [] -> ());
+      ignore
+        (List.fold_right block.body ~init:(live_out ctx live_in pc) ~f:(fun i live ->
+             (* The functions of a closure are all defined with the first
+                one *)
+             (match i with
+             | Let (x, Closure _) -> (
+                 match Var.Map.find_opt x ctx.closures with
+                 | Some { functions = (f0, _) :: _ as functions; _ } when Var.equal x f0
+                   ->
+                     let live =
+                       List.fold_left functions ~init:live ~f:(fun live (g, _) ->
+                           if Var.Set.mem g rooted then Var.Set.add g live else live)
+                     in
+                     List.iter functions ~f:(fun (g, _) -> define g live)
+                 | Some _ | None -> ())
+             | _ -> ());
+             let live_after =
+               match instr_defs i with
+               | Some x ->
+                   define x live;
+                   Var.Set.remove x live
+               | None -> live
+             in
+             instr_uses ctx i live_after)));
+  (* Greedy coloring, the parameters first *)
+  let order =
+    List.filter (ctx.env_var :: params) ~f:(fun x -> Var.Set.mem x rooted)
+    @ Var.Set.elements
+        (List.fold_left (ctx.env_var :: params) ~init:rooted ~f:(fun s x ->
+             Var.Set.remove x s))
+  in
+  List.iter order ~f:(fun x ->
+      let used =
+        Var.Set.fold
+          (fun y acc ->
+            match Var.Hashtbl.find_opt ctx.slots y with
+            | Some i -> IntSet.add i acc
+            | None -> acc)
+          (Var.Hashtbl.find_opt edges x |> Option.value ~default:Var.Set.empty)
+          IntSet.empty
+      in
+      let rec first i = if IntSet.mem i used then first (i + 1) else i in
+      Var.Hashtbl.add ctx.slots x (first 0))
 
 (****)
 
@@ -2001,11 +2087,11 @@ let analyze_functions out facts global_flow_info closures blocks functions =
                       if depth = 0 then raises := true;
                       gcs := true)
             | Let (_, Prim (Extern ("caml_cps_closure", _), _)) -> ()
-            | Let (_, Prim (Extern (name, _), args)) -> (
+            | Let (_, Prim (Extern (name, _), args)) ->
                 (match primitive out name (List.map args ~f:typed) with
                 | Plain _ -> ()
                 | Checked _ | Ccallv -> if depth = 0 then raises := true);
-                gc_point depth i)
+                gc_point depth i
             | Let _ | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ ->
                 gc_point depth i);
         match block.branch with
@@ -2050,7 +2136,8 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   in
   let callers l =
     let h = Var.Hashtbl.create 1024 in
-    List.iter summaries ~f:(fun s -> List.iter (l s) ~f:(fun g -> Var.Hashtbl.add h g s.fn));
+    List.iter summaries ~f:(fun s ->
+        List.iter (l s) ~f:(fun g -> Var.Hashtbl.add h g s.fn));
     h
   in
   let roots p = List.filter_map summaries ~f:(fun s -> if p s then Some s.fn else None) in
@@ -2058,7 +2145,9 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   (* The functions which may trigger a GC in any way, then those which may
      return after one: a call inside a handler is in the second case if
      the function called may trigger a GC in any way *)
-  let any = propagate (roots (fun s -> s.any_gcs)) (callers (fun s -> s.outer @ s.inner)) in
+  let any =
+    propagate (roots (fun s -> s.any_gcs)) (callers (fun s -> s.outer @ s.inner))
+  in
   out.collecting <-
     propagate
       (roots (fun s -> s.gcs || List.exists s.inner ~f:(fun g -> Var.Set.mem g any)))
@@ -2119,11 +2208,19 @@ let translate_function
       match block.branch with
       | Pushtrap (_, x, _) -> add_local x
       | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ());
-  let rooted = rooted_variables ctx pcs ~params in
-  Var.Set.iter
-    (fun x -> Var.Hashtbl.add ctx.slots x (Var.Hashtbl.length ctx.slots))
-    rooted;
-  let frame_size = Var.Hashtbl.length ctx.slots in
+  let rooted, live_in = rooted_variables ctx pcs ~params in
+  assign_slots ctx pcs ~params ~entry:(pc, args) rooted live_in;
+  let frame_size = Var.Hashtbl.fold (fun _ i n -> max n (i + 1)) ctx.slots 0 in
+  (* The first slots, written at the start of the function: those of the
+     parameters, allocated first *)
+  let initialized =
+    let param_slots =
+      List.filter_map (ctx.env_var :: params) ~f:(fun x ->
+          Var.Hashtbl.find_opt ctx.slots x)
+    in
+    let rec count i = if List.mem ~eq:Int.equal i param_slots then count (i + 1) else i in
+    count 0
+  in
   (* Body *)
   List.iteri params ~f:(fun i x ->
       if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (local ctx x) i);
@@ -2206,11 +2303,12 @@ let translate_function
       \  value *fp = camlc_sp - FRAME_SIZE;\n\
       \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) %s\n\
       \  camlc_sp = fp;\n\
-      \  for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;\n"
+      \  for (int i = %d; i < FRAME_SIZE; i++) fp[i] = Val_unit;\n"
       frame_size
       (if ctx.raises
        then "return camlc_stack_overflow();"
-       else "camlc_fatal_stack_overflow();");
+       else "camlc_fatal_stack_overflow();")
+      initialized;
   Buffer.add_buffer out.functions ctx.buf;
   Buffer.add_string out.functions "}\n";
   if frame_size > 0 then Buffer.add_string out.functions "#undef FRAME_SIZE\n";
