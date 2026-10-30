@@ -1037,6 +1037,10 @@ type fctx =
   ; mutable position : Parse_info.t option  (** The last debug event *)
   ; source_name : string option  (** The name of the function in the source *)
   ; raises : bool  (** The function may raise *)
+  ; mutable framed : bool  (** The frame is allocated in the current block *)
+  ; mutable framed_blocks : Addr.Set.t option
+        (** The blocks where the frame is allocated, if not all *)
+  ; mutable frame_push : string  (** Allocates the frame *)
   }
 
 (* Record a backtrace slot, if debug information is enabled: [`Call] when
@@ -1150,7 +1154,7 @@ let define ctx x r e =
   line ctx "%s = %s;" (slot ctx x) e
 
 let return_stmt ctx e =
-  if Var.Hashtbl.length ctx.slots = 0
+  if not ctx.framed
   then Printf.sprintf "return %s;" e
   else Printf.sprintf "{ value res = %s; camlc_sp = fp + FRAME_SIZE; return res; }" e
 
@@ -1182,11 +1186,19 @@ let branch ctx (pc, args) =
     List.filter_map (List.combine params args) ~f:(fun (p, a) ->
         if Var.equal p a then None else Some (p, a))
   in
+  (* Entering the blocks where the frame is allocated *)
+  let push =
+    match ctx.framed_blocks with
+    | Some s when (not ctx.framed) && Addr.Set.mem pc s -> ctx.frame_push
+    | Some _ | None -> ""
+  in
   match moves with
-  | [] -> Printf.sprintf "goto L%d;" pc
+  | [] when String.equal push "" -> Printf.sprintf "goto L%d;" pc
+  | [] -> Printf.sprintf "{ %s goto L%d; }" push pc
   | [ (p, a) ] ->
       Printf.sprintf
-        "{ %s = %s; goto L%d; }"
+        "{ %s%s = %s; goto L%d; }"
+        push
         (slot ctx p)
         (as_repr ctx (var_repr ctx p) a)
         pc
@@ -1200,7 +1212,8 @@ let branch ctx (pc, args) =
         List.mapi moves ~f:(fun i (p, _) -> Printf.sprintf "%s = t%d;" (slot ctx p) i)
       in
       Printf.sprintf
-        "{ %s %s goto L%d; }"
+        "{ %s%s %s goto L%d; }"
+        push
         (String.concat ~sep:" " temps)
         (String.concat ~sep:" " assigns)
         pc
@@ -1461,7 +1474,7 @@ let translate_tail_call ctx x ~f ~args ~exact =
     else ""
   in
   let pop =
-    if Var.Hashtbl.length ctx.slots = 0
+    if not ctx.framed
     then if k > 0 then Printf.sprintf " camlc_sp = bx + %d;" k else ""
     else " camlc_sp = fp + FRAME_SIZE;"
   in
@@ -2068,6 +2081,9 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     ; position = None
     ; source_name = None
     ; raises = true
+    ; framed = false
+    ; framed_blocks = None
+    ; frame_push = ""
     }
   in
   let typed a =
@@ -2211,6 +2227,9 @@ let translate_function
     ; position = None
     ; source_name
     ; raises
+    ; framed = false
+    ; framed_blocks = None
+    ; frame_push = ""
     }
   in
   List.iter env ~f:(fun (x, loc) -> Var.Hashtbl.replace ctx.locations x loc);
@@ -2247,6 +2266,82 @@ let translate_function
     let rec count i = if List.mem ~eq:Int.equal i param_slots then count (i + 1) else i in
     count 0
   in
+  (* Shrink-wrapping: the frame is allocated when entering the blocks which
+     use it, and those reachable from them, if the start of the function
+     does not need it. Not with exception handlers, reached from several
+     blocks. *)
+  let slot_var x = Var.Hashtbl.mem ctx.slots x in
+  let uses_slots s = Var.Set.exists slot_var s in
+  let cont_needs (pc', args) =
+    uses_slots (use_list ctx args Var.Set.empty)
+    || List.exists (Addr.Map.find pc' blocks).params ~f:slot_var
+  in
+  let needs pc =
+    let block = Addr.Map.find pc blocks in
+    List.exists block.params ~f:slot_var
+    || List.exists block.body ~f:(fun i ->
+        (match instr_defs i with
+          | Some x -> slot_var x
+          | None -> false)
+        || uses_slots (instr_uses ctx i Var.Set.empty)
+        ||
+        match i with
+        | Let (x, Closure _) -> (
+            match Var.Map.find_opt x closures with
+            | Some { functions; _ } -> List.exists functions ~f:(fun (g, _) -> slot_var g)
+            | None -> false)
+        | _ -> false)
+    ||
+    match block.branch with
+    | Return x | Raise (x, _) -> uses_slots (use ctx x Var.Set.empty)
+    | Stop -> false
+    | Branch c | Poptrap c -> cont_needs c
+    | Cond (x, c1, c2) ->
+        uses_slots (use ctx x Var.Set.empty) || cont_needs c1 || cont_needs c2
+    | Switch (x, conts) ->
+        uses_slots (use ctx x Var.Set.empty) || Array.exists conts ~f:cont_needs
+    | Pushtrap _ -> true
+  in
+  if
+    frame_size > 0
+    && initialized = 0
+    && (not (cont_needs (pc, args)))
+    && not
+         (List.exists pcs ~f:(fun pc ->
+              match (Addr.Map.find pc blocks).branch with
+              | Pushtrap _ -> true
+              | _ -> false))
+  then (
+    let framed = ref Addr.Set.empty in
+    let rec mark pc =
+      if not (Addr.Set.mem pc !framed)
+      then (
+        framed := Addr.Set.add pc !framed;
+        match (Addr.Map.find pc blocks).branch with
+        | Return _ | Raise _ | Stop -> ()
+        | Branch (pc', _) | Poptrap (pc', _) -> mark pc'
+        | Cond (_, (pc1, _), (pc2, _)) ->
+            mark pc1;
+            mark pc2
+        | Switch (_, conts) -> Array.iter conts ~f:(fun (pc', _) -> mark pc')
+        | Pushtrap _ -> assert false)
+    in
+    List.iter pcs ~f:(fun pc -> if needs pc then mark pc);
+    if not (Addr.Set.mem pc !framed)
+    then (
+      ctx.framed_blocks <- Some !framed;
+      ctx.frame_push <-
+        String.concat
+          ~sep:" "
+          [ "fp = camlc_sp - FRAME_SIZE;"
+          ; "if (CAMLC_UNLIKELY(fp < camlc_stack_limit))"
+          ; (if ctx.raises
+             then "return camlc_stack_overflow();"
+             else "camlc_fatal_stack_overflow();")
+          ; "camlc_sp = fp;"
+          ; "for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;"
+          ]));
+  ctx.framed <- frame_size > 0 && Option.is_none ctx.framed_blocks;
   (* Body *)
   List.iteri params ~f:(fun i x ->
       if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (local ctx x) i);
@@ -2256,6 +2351,9 @@ let translate_function
   List.iter pcs ~f:(fun pc ->
       let block = Addr.Map.find pc blocks in
       let traps = Addr.Hashtbl.find ctx.traps pc in
+      (match ctx.framed_blocks with
+      | Some s -> ctx.framed <- Addr.Set.mem pc s
+      | None -> ());
       Printf.bprintf ctx.buf " L%d:;\n" pc;
       (* An application whose result is returned, outside any handler *)
       let tail_call =
@@ -2321,7 +2419,9 @@ let translate_function
   Buffer.add_string
     out.functions
     "  value r, b, *argv, *bx;\n  (void)r; (void)b; (void)argv; (void)bx;\n";
-  if frame_size > 0
+  if frame_size > 0 && Option.is_some ctx.framed_blocks
+  then Printf.bprintf out.functions "#define FRAME_SIZE %d\n  value *fp;\n" frame_size
+  else if frame_size > 0
   then
     Printf.bprintf
       out.functions
