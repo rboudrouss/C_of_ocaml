@@ -263,9 +263,13 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
     (match effects with
     | Some e -> e
     | None ->
+        (* Effect handlers in dead code only, the module Effect linked with
+           -linkall for instance, do not need the double translation, which
+           doubles the size of the code *)
         if
           Ocaml_version.compare Ocaml_version.current [ 5; 0 ] >= 0
           && uses_effects one.code
+          && uses_effects (fst (Deadcode.f (Pure_fun.f one.code) one.code))
         then `Double_translation
         else `Disabled);
   let optimized, global_flow_data =
