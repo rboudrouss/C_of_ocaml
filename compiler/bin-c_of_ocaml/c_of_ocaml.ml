@@ -23,7 +23,43 @@ let times = Debug.find "times"
 
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
+  \       c_of_ocaml [options] program.bc --split DIR\n\
   \       c_of_ocaml --runtime-files DIR"
+
+(* The C files of a split program, see [write_parts] *)
+let part_file dir i = Filename.concat dir (Printf.sprintf "part%d.c" i)
+
+let part_index name =
+  let n = String.length name in
+  if
+    n > 6
+    && String.equal (String.sub name ~pos:0 ~len:4) "part"
+    && Filename.check_suffix name ".c"
+  then int_of_string_opt (String.sub name ~pos:4 ~len:(n - 6))
+  else None
+
+let read_file name =
+  let ic = open_in_bin name in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  s
+
+(* DIR/part0.c, DIR/part1.c, ...: the files left unchanged are not
+   rewritten, and those of a previous, larger output are removed *)
+let write_parts dir parts =
+  if not (Sys.file_exists dir) then Sys.mkdir dir 0o755;
+  let n = List.length parts in
+  Array.iter (Sys.readdir dir) ~f:(fun name ->
+      match part_index name with
+      | Some i when i >= n -> Sys.remove (Filename.concat dir name)
+      | Some _ | None -> ());
+  List.iteri parts ~f:(fun i contents ->
+      let name = part_file dir i in
+      if not (Sys.file_exists name && String.equal (read_file name) contents)
+      then (
+        let oc = open_out_bin name in
+        output_string oc contents;
+        close_out oc))
 
 (* Write the runtime support (camlc.h, camlc_runtime.c) to [dir] *)
 let write_runtime_files dir =
@@ -196,7 +232,7 @@ let uses_effects (p : Code.program) =
     p.blocks
     false
 
-let compile ~profile ~effects ~debug_info ~input_file ~output_file =
+let compile ~profile ~effects ~debug_info ~input_file ~output =
   let ic = open_in_bin input_file in
   (match Parse_bytecode.from_channel ic with
   | `Exe -> ()
@@ -245,23 +281,45 @@ let compile ~profile ~effects ~debug_info ~input_file ~output_file =
       ~debug_info
       ~in_cps:optimized.in_cps
       ~trampolined_calls:optimized.trampolined_calls
+      ?part_size:
+        (match output with
+        | `File _ -> None
+        | `Split (_, size) -> Some size)
       closures
   in
   if times () then Format.eprintf "  code generation: %a@." Timer.print t;
-  let oc = open_out_bin output_file in
-  output_string oc c;
-  close_out oc
+  match output, c with
+  | `File name, [ c ] ->
+      let oc = open_out_bin name in
+      output_string oc c;
+      close_out oc
+  | `Split (dir, _), parts -> write_parts dir parts
+  | `File _, _ -> assert false
 
 let () =
   let input_file = ref None in
   let runtime_dir = ref None in
   let output_file = ref None in
+  let split_dir = ref None in
+  let part_size = ref 2048 in
   let profile = ref Profile.O1 in
   let debug_info = ref false in
   let effects = ref None in
   let word_size = ref 32 in
   let spec =
     [ "-o", Arg.String (fun s -> output_file := Some s), "FILE Write the C code to FILE"
+    ; ( "--split"
+      , Arg.String (fun s -> split_dir := Some s)
+      , "DIR Write the C code to several files, which can be compiled separately: \
+         DIR/part0.c (the static data and the tables), DIR/part1.c, ... (the functions). \
+         The files left unchanged are not rewritten" )
+    ; ( "--part-size"
+      , Arg.Int
+          (fun n ->
+            if n <= 0 then raise (Arg.Bad "--part-size: expected a positive size");
+            part_size := n)
+      , "KB With --split, the size of the C code of the functions of each file, in \
+         kilobytes (default 2048)" )
     ; ( "--opt"
       , Arg.Int
           (fun n ->
@@ -296,9 +354,16 @@ let () =
     ]
   in
   Arg.parse spec (fun s -> input_file := Some s) usage;
-  match !input_file, !output_file, !runtime_dir with
-  | None, None, Some dir -> write_runtime_files dir
-  | Some input_file, Some output_file, None -> (
+  let output =
+    match !output_file, !split_dir with
+    | Some f, None -> Some (`File f)
+    | None, Some d -> Some (`Split (d, !part_size * 1024))
+    | _ -> None
+  in
+  match !input_file, output, !runtime_dir with
+  | None, None, Some dir when Option.is_none !output_file && Option.is_none !split_dir ->
+      write_runtime_files dir
+  | Some input_file, Some output, None -> (
       Config.set_target `C;
       if !word_size = 64 then Targetint.set_num_bits 63;
       register_primitives ();
@@ -309,7 +374,7 @@ let () =
           ~effects:!effects
           ~debug_info:!debug_info
           ~input_file
-          ~output_file
+          ~output
       with Failure msg ->
         prerr_endline msg;
         exit 1)

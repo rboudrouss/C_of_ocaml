@@ -23,11 +23,15 @@ val f :
   -> debug_info:bool
   -> in_cps:Effects.in_cps
   -> trampolined_calls:Effects.trampolined_calls
+  -> ?part_size:int
   -> Closure_conversion.closure Code.Var.Map.t
-  -> string
+  -> string list
 (** [f p ~global_flow_data ~deadcode_sentinel ~debug_info ~in_cps
      ~trampolined_calls closures] is the C translation of the whole program [p],
-    whose closures are [closures] (see {!Closure_conversion.f}). With
+    whose closures are [closures] (see {!Closure_conversion.f}): a single C
+    file, or with [part_size], several, which can be compiled separately: the
+    static data and the tables of the runtime, then the functions, in parts
+    of about [part_size] bytes. With
     [debug_info], it records backtraces at the locations of the debug events of
     [p]. With effect handlers (double translation), [in_cps] are the CPS calls
     and [trampolined_calls] those which may bounce (see {!Effects.f}). *)

@@ -116,9 +116,9 @@ let repr_equal (r : repr) r' = Poly.equal r r'
 (* The output, and what the generated code refers to *)
 type output =
   { data : Buffer.t  (** Initializers of the static data *)
-  ; data_fields : Buffer.t  (** Fields of the structure holding the static data *)
-  ; functions : Buffer.t  (** Function definitions *)
-  ; mutable data_count : int
+  ; mutable data_size : int  (** Number of words of the static data *)
+  ; mutable definitions : definition list  (** Function definitions, in reverse order *)
+  ; mutable refs : Var.Set.t  (** The functions referred to by the current code *)
   ; constants : (constant * string) list Int.Hashtbl.t
         (** Static data already emitted for each constant *)
   ; primitives : int String.Hashtbl.t  (** C primitives called, with their arity *)
@@ -130,7 +130,7 @@ type output =
   ; fun_reprs : repr list Var.Hashtbl.t
         (** The representation of the parameters of each function *)
   ; debug_info : bool  (** Record backtraces *)
-  ; locations : string String.Hashtbl.t  (** The C names of the locations *)
+  ; locations : int String.Hashtbl.t  (** The index of each location *)
   ; location_defs : Buffer.t
   ; in_cps : Var.Set.t  (** The CPS calls *)
   ; trampolined : Var.Set.t  (** The CPS calls which may bounce *)
@@ -153,7 +153,16 @@ type output =
             they raise *)
   }
 
-(* A static description of a source location, for backtraces *)
+(* The C definition of a function, and the functions it refers to *)
+and definition =
+  { def_fn : Var.t option  (** [None] for the toplevel code *)
+  ; def_text : string  (** The definition, without storage class *)
+  ; def_size : int
+  ; def_refs : Var.Set.t
+  }
+
+(* A static description of a source location, for backtraces, in the array
+   [camlc_locs] *)
 let location out (pi : Parse_info.t) ~fun_name ~is_raise =
   let file =
     match pi.name, pi.src with
@@ -170,22 +179,24 @@ let location out (pi : Parse_info.t) ~fun_name ~is_raise =
     | None -> m
   in
   let key = Printf.sprintf "%s:%d:%d:%s:%b" file pi.line pi.col defname is_raise in
-  match String.Hashtbl.find_opt out.locations key with
-  | Some n -> "&" ^ n
-  | None ->
-      let n = Printf.sprintf "camlc_l%d" (String.Hashtbl.length out.locations) in
-      String.Hashtbl.add out.locations key n;
-      Printf.bprintf
-        out.location_defs
-        "static const struct camlc_location %s = { %s, %s, %d, %d, %d, %d };\n"
+  let n =
+    match String.Hashtbl.find_opt out.locations key with
+    | Some n -> n
+    | None ->
+        let n = String.Hashtbl.length out.locations in
+        String.Hashtbl.add out.locations key n;
+        Printf.bprintf
+          out.location_defs
+          "  { %s, %s, %d, %d, %d, %d },\n"
+          (c_string file)
+          (c_string defname)
+          pi.line
+          pi.col
+          pi.col
+          (if is_raise then 1 else 0);
         n
-        (c_string file)
-        (c_string defname)
-        pi.line
-        pi.col
-        pi.col
-        (if is_raise then 1 else 0);
-      "&" ^ n
+  in
+  Printf.sprintf "&camlc_locs[%d]" n
 
 let fun_name out f =
   match Var.Hashtbl.find_opt out.fun_names f with
@@ -198,6 +209,11 @@ let fun_name out f =
       in
       Var.Hashtbl.add out.fun_names f n;
       n
+
+(* The name of a function the current code refers to *)
+let fun_ref out f =
+  out.refs <- Var.Set.add f out.refs;
+  fun_name out f
 
 let fun_type arity =
   Printf.sprintf
@@ -246,19 +262,19 @@ let int64_words i =
 
 let int32_word i = Printf.sprintf "(value)0x%lxu" i
 
-(* The static data is a single structure, so that the runtime can tell
-   where it is (OCaml 4 needs it in its page table). [static_block out
-   words] adds a block (header and fields) to it, and returns its C name. *)
+(* The static data is a single array, [camlc_data], so that the runtime
+   can tell where it is (OCaml 4 needs it in its page table). [static_block
+   out words] adds a block (header and fields) to it, and returns the index
+   of its header. *)
 let static_block out words =
-  let n = out.data_count in
-  out.data_count <- n + 1;
-  Printf.bprintf out.data_fields "  value d%d[%d];\n" n (List.length words);
-  Printf.bprintf out.data "  .d%d = { %s },\n" n (String.concat ~sep:", " words);
-  Printf.sprintf "camlc_data.d%d" n
+  let n = out.data_size in
+  out.data_size <- n + List.length words;
+  Printf.bprintf out.data "  %s,\n" (String.concat ~sep:", " words);
+  n
 
 let emit_block out ~tag fields =
-  let name = static_block out (header ~wosize:(List.length fields) ~tag :: fields) in
-  Printf.sprintf "((value)&%s[1])" name
+  let n = static_block out (header ~wosize:(List.length fields) ~tag :: fields) in
+  Printf.sprintf "((value)&camlc_data[%d])" (n + 1)
 
 let rec constant out c =
   match c with
@@ -1272,7 +1288,7 @@ let closure_prefix out functions =
   List.concat
     (List.map2 functions positions ~f:(fun (g, arity) pos ->
          let code =
-           [ Printf.sprintf "(value)&%s" (fun_name out g)
+           [ Printf.sprintf "(value)&%s" (fun_ref out g)
            ; Printf.sprintf "Make_closinfo(%d, %d)" arity (startenv - pos)
            ]
          in
@@ -1281,7 +1297,7 @@ let closure_prefix out functions =
            then
              code
              @ [ (match Var.Map.find_opt g out.cps_pairs with
-                 | Some c -> Printf.sprintf "(value)&%s" (fun_name out c)
+                 | Some c -> Printf.sprintf "(value)&%s" (fun_ref out c)
                  | None -> "0")
                ]
            else if List.length functions > 1 && arity >= 2
@@ -1295,12 +1311,12 @@ let closure_prefix out functions =
 (* A closed closure is static data: the address of each function *)
 let static_closure out functions =
   let prefix = closure_prefix out functions in
-  let name =
+  let n =
     static_block out (header ~wosize:(List.length prefix) ~tag:Obj.closure_tag :: prefix)
   in
   let _, positions = closure_layout functions in
   List.map2 functions positions ~f:(fun (g, _) pos ->
-      g, Printf.sprintf "(value)&%s[%d]" name (pos + 1))
+      g, Printf.sprintf "(value)&camlc_data[%d]" (n + pos + 1))
 
 let translate_closure ctx f =
   let info = Var.Map.find f ctx.closures in
@@ -1390,10 +1406,10 @@ let apply ctx x ~f ~args ~exact =
   in
   let fe = as_value ctx f in
   match callee ctx x ~f ~exact with
-  | Known g -> fun_name ctx.out g, args @ [ fe ], reprs
+  | Known g -> fun_ref ctx.out g, args @ [ fe ], reprs
   | Known_direct g ->
       let args, k = List.take (n - 1) args in
-      fun_name ctx.out g, args @ [ fe ] @ k, reprs
+      fun_ref ctx.out g, args @ [ fe ] @ k, reprs
   | Unknown ->
       if is_cps_call ctx x
       then (
@@ -2213,6 +2229,7 @@ let translate_function
     global_flow_info
     blocks
     closures
+    ~fn
     ~name
     ~params
     ~param_reprs
@@ -2221,6 +2238,7 @@ let translate_function
     ~source_name
     ~raises
     (pc, args) =
+  out.refs <- Var.Set.empty;
   let ctx =
     { out
     ; facts
@@ -2406,8 +2424,9 @@ let translate_function
            else Printf.sprintf "%s %s" (c_type (var_repr ctx x)) (local_name ctx x))
       @ if List.is_empty env then [] else [ "value env" ])
   in
+  let fb = Buffer.create (Buffer.length ctx.buf + 1024) in
   Printf.bprintf
-    out.functions
+    fb
     "%s(%s) {\n"
     name
     (if String.equal params_c "" then "void" else params_c);
@@ -2419,23 +2438,19 @@ let translate_function
       in
       List.iteri l ~f:(fun i d ->
           if i mod 16 = 0
-          then
-            Printf.bprintf
-              out.functions
-              (if i = 0 then "  %s " else ";\n  %s ")
-              (c_type r);
-          if i mod 16 <> 0 then Buffer.add_string out.functions ", ";
-          Buffer.add_string out.functions d);
-      if not (List.is_empty l) then Buffer.add_string out.functions ";\n");
+          then Printf.bprintf fb (if i = 0 then "  %s " else ";\n  %s ") (c_type r);
+          if i mod 16 <> 0 then Buffer.add_string fb ", ";
+          Buffer.add_string fb d);
+      if not (List.is_empty l) then Buffer.add_string fb ";\n");
   Buffer.add_string
-    out.functions
+    fb
     "  value r, b, *argv, *bx;\n  (void)r; (void)b; (void)argv; (void)bx;\n";
   if frame_size > 0 && Option.is_some ctx.framed_blocks
-  then Printf.bprintf out.functions "#define FRAME_SIZE %d\n  value *fp;\n" frame_size
+  then Printf.bprintf fb "#define FRAME_SIZE %d\n  value *fp;\n" frame_size
   else if frame_size > 0
   then
     Printf.bprintf
-      out.functions
+      fb
       "#define FRAME_SIZE %d\n\
       \  value *fp = camlc_sp - FRAME_SIZE;\n\
       \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) %s\n\
@@ -2446,10 +2461,17 @@ let translate_function
        then "return camlc_stack_overflow();"
        else "camlc_fatal_stack_overflow();")
       initialized;
-  Buffer.add_buffer out.functions ctx.buf;
-  Buffer.add_string out.functions "}\n";
-  if frame_size > 0 then Buffer.add_string out.functions "#undef FRAME_SIZE\n";
-  Buffer.add_char out.functions '\n'
+  Buffer.add_buffer fb ctx.buf;
+  Buffer.add_string fb "}\n";
+  if frame_size > 0 then Buffer.add_string fb "#undef FRAME_SIZE\n";
+  Buffer.add_char fb '\n';
+  out.definitions <-
+    { def_fn = fn
+    ; def_text = Buffer.contents fb
+    ; def_size = Buffer.length fb
+    ; def_refs = out.refs
+    }
+    :: out.definitions
 
 (****)
 
@@ -2483,6 +2505,7 @@ let f
     ~debug_info
     ~in_cps
     ~trampolined_calls
+    ?part_size
     closures =
   let global_flow_state, global_flow_info = global_flow_data in
   (* Toplevel values in globals: they are no longer free variables of the
@@ -2564,9 +2587,9 @@ let f
   in
   let out =
     { data = Buffer.create 65536
-    ; data_fields = Buffer.create 65536
-    ; functions = Buffer.create 65536
-    ; data_count = 0
+    ; data_size = 1
+    ; definitions = []
+    ; refs = Var.Set.empty
     ; constants = Int.Hashtbl.create 1024
     ; primitives = String.Hashtbl.create 128
     ; apply_arities = IntSet.empty
@@ -2618,6 +2641,7 @@ let f
       | Some e -> Var.Hashtbl.replace out.statics x e
       | None -> ())
     global_flow_info.Global_flow.info_cps_closures;
+  let data_refs = out.refs in
   analyze_functions out facts global_flow_info closures p.blocks functions;
   List.iter functions ~f:(fun (f, params, cont) ->
       let info = Var.Map.find f closures in
@@ -2648,7 +2672,8 @@ let f
         global_flow_info
         p.blocks
         closures
-        ~name:(Printf.sprintf "static value %s" (fun_name out f))
+        ~fn:(Some f)
+        ~name:(Printf.sprintf "value %s" (fun_name out f))
         ~params
         ~param_reprs:(Var.Hashtbl.find out.fun_reprs f)
         ~env
@@ -2662,6 +2687,7 @@ let f
     global_flow_info
     p.blocks
     closures
+    ~fn:None
     ~name:"value camlc_program"
     ~params:[]
     ~param_reprs:[]
@@ -2670,255 +2696,353 @@ let f
     ~source_name:None
     ~raises:true
     (p.start, []);
-  (* Assemble the output *)
-  let b = Buffer.create (Buffer.length out.data + Buffer.length out.functions + 65536) in
-  Buffer.add_string b "/* Generated by c_of_ocaml */\n#include \"camlc.h\"\n\n";
-  Printf.bprintf
-    b
-    "_Static_assert(sizeof(value) == %d, \"c_of_ocaml: wrong word size\");\n\n"
-    (word_size ());
-  String.Hashtbl.iter
-    (fun name n ->
-      if n <= 5
-      then
-        Printf.bprintf
-          b
-          "extern value %s(%s);\n"
-          name
-          (if n = 0
-           then "void"
-           else String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "value")))
-      else Printf.bprintf b "extern value %s(value *, int);\n" name)
-    out.primitives;
-  (* Never called: a direct call makes wasm-ld report the C functions
-     whose definition does not have the signature of the call, which would
-     trap when called through a function pointer *)
-  Buffer.add_string b "\nvoid camlc_signature_check(void) {\n";
-  String.Hashtbl.iter
-    (fun name n ->
-      if n <= 5
-      then
-        Printf.bprintf
-          b
-          "  %s(%s);\n"
-          name
-          (String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "0")))
-      else Printf.bprintf b "  %s((value *)0, 0);\n" name)
-    out.primitives;
-  Buffer.add_string b "}\n";
-  Buffer.add_char b '\n';
-  List.iter functions ~f:(fun (f, _, _) ->
-      Printf.bprintf
-        b
-        "static value %s(%s);\n"
-        (fun_name out f)
-        (String.concat
-           ~sep:", "
-           (List.map (Var.Hashtbl.find out.fun_reprs f @ [ Value ]) ~f:c_type)));
+  (* Assemble the output. Split, the functions are grouped in order into
+     parts of about [part_size] bytes each, after a part with the static
+     data and the tables. A function is static unless another part, or the
+     static data, refers to it. *)
+  let definitions = List.rev out.definitions in
+  let parts =
+    match part_size with
+    | None -> [ definitions ]
+    | Some size ->
+        let rec group parts part n l =
+          match l with
+          | [] -> List.rev (if List.is_empty part then parts else List.rev part :: parts)
+          | d :: r ->
+              if n > 0 && n + d.def_size > size
+              then group (List.rev part :: parts) [ d ] d.def_size r
+              else group parts (d :: part) (n + d.def_size) r
+        in
+        group [] [] 0 definitions
+  in
+  let split = Option.is_some part_size in
+  let shared = Var.Hashtbl.create 1024 in
+  if split
+  then (
+    let part_of = Var.Hashtbl.create 1024 in
+    List.iteri parts ~f:(fun i l ->
+        List.iter l ~f:(fun d ->
+            Option.iter d.def_fn ~f:(fun f -> Var.Hashtbl.replace part_of f i)));
+    Var.Set.iter (fun f -> Var.Hashtbl.replace shared f ()) data_refs;
+    List.iteri parts ~f:(fun i l ->
+        List.iter l ~f:(fun d ->
+            Var.Set.iter
+              (fun g ->
+                match Var.Hashtbl.find_opt part_of g with
+                | Some j when j = i -> ()
+                | _ -> Var.Hashtbl.replace shared g ())
+              d.def_refs)));
+  let storage f = if Var.Hashtbl.mem shared f then "" else "static " in
   let dt = double_translation () in
-  for m = 1 to out.max_arity - 1 do
-    Printf.bprintf b "static value camlc_pap%d(%s);\n" m (fun_params m);
-    if dt
-    then Printf.bprintf b "static value camlc_pap_cps%d(%s);\n" m (fun_params (m + 1))
-  done;
-  Buffer.add_char b '\n';
-  Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
-  let n = Var.Hashtbl.length globals in
-  Printf.bprintf
-    b
-    "value camlc_globals[%d] = { [0 ... %d] = Val_unit };\n\
-     const int camlc_globals_count = %d;\n"
-    (max n 1)
-    (max n 1 - 1)
-    n;
-  Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
-  Printf.bprintf
-    b
-    "const value camlc_pap_code[] = { 0%s };\n"
-    (String.concat
-       ~sep:""
-       (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
-            Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
-  Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
-  Printf.bprintf
-    b
-    "const value camlc_pap_cps_code[] = { 0%s };\n\n"
-    (if dt
-     then
-       String.concat
-         ~sep:""
-         (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
-              Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
-     else "");
-  Buffer.add_string b "static struct camlc_data {\n  value unused;\n";
-  Buffer.add_buffer b out.data_fields;
-  Buffer.add_string b "} camlc_data = {\n  .unused = 0,\n";
-  Buffer.add_buffer b out.data;
-  Buffer.add_string
-    b
-    "};\n\n\
-     value *const camlc_static_data_begin = (value *)&camlc_data;\n\
-     value *const camlc_static_data_end = (value *)(&camlc_data + 1);\n\n";
-  Buffer.add_buffer b out.location_defs;
-  Buffer.add_char b '\n';
-  (* Partial applications: the closure holds the function and the
-     arguments already given (after the code pointer of the CPS version, with
-     effect handlers), see [camlc_make_pap] *)
-  let e = if dt then 3 else 2 in
-  for m = 1 to out.max_arity - 1 do
+  let has_locations = String.Hashtbl.length out.locations > 0 in
+  let preamble b =
+    Buffer.add_string b "/* Generated by c_of_ocaml */\n#include \"camlc.h\"\n\n";
     Printf.bprintf
       b
-      "static value camlc_pap%d(%s) {\n\
-      \  mlsize_t k = Wosize_val(env) - %d;\n\
-      \  value *argv = camlc_sp - (k + %d);\n\
-      \  value r;\n\
-      \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
-      \  camlc_sp = argv;\n\
-      \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, %d + i);\n\
-       %s  r = camlc_applyv(Field(env, %d), k + %d, argv);\n\
-      \  camlc_sp = argv + k + %d;\n\
-      \  return r;\n\
-       }\n\n"
-      m
-      (fun_params m)
-      (e + 1)
-      m
-      (e + 1)
+      "_Static_assert(sizeof(value) == %d, \"c_of_ocaml: wrong word size\");\n\n"
+      (word_size ());
+    String.Hashtbl.iter
+      (fun name n ->
+        if n <= 5
+        then
+          Printf.bprintf
+            b
+            "extern value %s(%s);\n"
+            name
+            (if n = 0
+             then "void"
+             else String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "value")))
+        else Printf.bprintf b "extern value %s(value *, int);\n" name)
+      out.primitives;
+    Buffer.add_char b '\n'
+  in
+  let prototypes b l =
+    List.iter l ~f:(fun f ->
+        Printf.bprintf
+          b
+          "%svalue %s(%s);\n"
+          (storage f)
+          (fun_name out f)
+          (String.concat
+             ~sep:", "
+             (List.map (Var.Hashtbl.find out.fun_reprs f @ [ Value ]) ~f:c_type)));
+    Buffer.add_char b '\n'
+  in
+  (* The static data and the tables of the runtime *)
+  let tables b =
+    (* Never called: a direct call makes wasm-ld report the C functions
+       whose definition does not have the signature of the call, which would
+       trap when called through a function pointer *)
+    Buffer.add_string b "void camlc_signature_check(void) {\n";
+    String.Hashtbl.iter
+      (fun name n ->
+        if n <= 5
+        then
+          Printf.bprintf
+            b
+            "  %s(%s);\n"
+            name
+            (String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "0")))
+        else Printf.bprintf b "  %s((value *)0, 0);\n" name)
+      out.primitives;
+    Buffer.add_string b "}\n\n";
+    for m = 1 to out.max_arity - 1 do
+      Printf.bprintf b "static value camlc_pap%d(%s);\n" m (fun_params m);
+      if dt
+      then Printf.bprintf b "static value camlc_pap_cps%d(%s);\n" m (fun_params (m + 1))
+    done;
+    Buffer.add_char b '\n';
+    Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
+    let n = Var.Hashtbl.length globals in
+    Printf.bprintf
+      b
+      "value camlc_globals[%d] = { [0 ... %d] = Val_unit };\n\
+       const int camlc_globals_count = %d;\n"
+      (max n 1)
+      (max n 1 - 1)
+      n;
+    Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
+    Printf.bprintf
+      b
+      "const value camlc_pap_code[] = { 0%s };\n"
       (String.concat
          ~sep:""
-         (List.init ~len:m ~f:(fun i -> Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
-      e
-      m
-      m;
-    if dt
-    then
-      (* CPS version: the last argument is the continuation *)
+         (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
+              Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
+    Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
+    Printf.bprintf
+      b
+      "const value camlc_pap_cps_code[] = { 0%s };\n\n"
+      (if dt
+       then
+         String.concat
+           ~sep:""
+           (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
+                Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
+       else "");
+    let static = if split then "" else "static " in
+    Printf.bprintf b "%svalue camlc_data[%d] = {\n  0,\n" static out.data_size;
+    Buffer.add_buffer b out.data;
+    Printf.bprintf
+      b
+      "};\n\n\
+       value *const camlc_static_data_begin = camlc_data;\n\
+       value *const camlc_static_data_end = camlc_data + %d;\n\n"
+      out.data_size;
+    if has_locations
+    then (
+      Printf.bprintf b "%sconst struct camlc_location camlc_locs[] = {\n" static;
+      Buffer.add_buffer b out.location_defs;
+      Buffer.add_string b "};\n\n");
+    (* Partial applications: the closure holds the function and the
+       arguments already given (after the code pointer of the CPS version,
+       with effect handlers), see [camlc_make_pap] *)
+    let e = if dt then 3 else 2 in
+    for m = 1 to out.max_arity - 1 do
       Printf.bprintf
         b
-        "static value camlc_pap_cps%d(%s) {\n\
-        \  mlsize_t k = Wosize_val(env) - 4;\n\
+        "static value camlc_pap%d(%s) {\n\
+        \  mlsize_t k = Wosize_val(env) - %d;\n\
         \  value *argv = camlc_sp - (k + %d);\n\
         \  value r;\n\
         \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
         \  camlc_sp = argv;\n\
-        \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, 4 + i);\n\
-         %s  r = camlc_applyv_cps(Field(env, 3), k + %d, argv);\n\
+        \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, %d + i);\n\
+         %s  r = camlc_applyv(Field(env, %d), k + %d, argv);\n\
         \  camlc_sp = argv + k + %d;\n\
         \  return r;\n\
          }\n\n"
         m
-        (fun_params (m + 1))
-        (m + 1)
+        (fun_params m)
+        (e + 1)
+        m
+        (e + 1)
         (String.concat
            ~sep:""
-           (List.init ~len:(m + 1) ~f:(fun i ->
-                Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
+           (List.init ~len:m ~f:(fun i -> Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
+        e
         m
-        (m + 1)
-  done;
-  (* Exact calls with the arguments in an array *)
-  Printf.bprintf
-    b
-    "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
-  for n = 1 to out.max_arity do
+        m;
+      if dt
+      then
+        (* CPS version: the last argument is the continuation *)
+        Printf.bprintf
+          b
+          "static value camlc_pap_cps%d(%s) {\n\
+          \  mlsize_t k = Wosize_val(env) - 4;\n\
+          \  value *argv = camlc_sp - (k + %d);\n\
+          \  value r;\n\
+          \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
+          \  camlc_sp = argv;\n\
+          \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, 4 + i);\n\
+           %s  r = camlc_applyv_cps(Field(env, 3), k + %d, argv);\n\
+          \  camlc_sp = argv + k + %d;\n\
+          \  return r;\n\
+           }\n\n"
+          m
+          (fun_params (m + 1))
+          (m + 1)
+          (String.concat
+             ~sep:""
+             (List.init ~len:(m + 1) ~f:(fun i ->
+                  Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
+          m
+          (m + 1)
+    done;
+    (* Exact calls with the arguments in an array *)
     Printf.bprintf
       b
-      "  case %d: return ((%s)Field(f, 0))(%s);\n"
-      n
-      (fun_type n)
-      (String.concat
-         ~sep:", "
-         (List.init ~len:n ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
-  done;
-  Printf.bprintf
-    b
-    "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
-  (* Same, for the CPS versions, the last argument being the continuation *)
-  Printf.bprintf
-    b
-    "value camlc_call_exact_cps(value f, int n, value *args) {\n  switch (n) {\n";
-  if dt
-  then
+      "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
     for n = 1 to out.max_arity do
       Printf.bprintf
         b
-        "  case %d: return ((%s)Field(f, 2))(%s);\n"
+        "  case %d: return ((%s)Field(f, 0))(%s);\n"
         n
-        (fun_type (n + 1))
+        (fun_type n)
         (String.concat
            ~sep:", "
-           (List.init ~len:(n + 1) ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
+           (List.init ~len:n ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
     done;
-  Printf.bprintf
-    b
-    "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
-  (* CPS calls of unknown functions, which may not have a CPS version *)
-  IntSet.iter
-    (fun m ->
-      let n = m - 1 in
-      let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
-      let params = String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)) in
-      Printf.bprintf
-        b
-        "static value camlc_direct_k%d(value f, %s, value k) {\n\
-        \  value *ks = camlc_sp - 1, r;\n\
-        \  if (CAMLC_UNLIKELY(ks < camlc_stack_limit)) return camlc_stack_overflow();\n\
-        \  *ks = k;\n\
-        \  camlc_sp = ks;\n\
-        \  r = ((%s)Field(f, 0))(%s, f);\n\
-        \  camlc_sp = ks + 1;\n\
-        \  if (CAMLC_UNLIKELY(Is_exception_result(r))) return r;\n\
-        \  return ((value (*)(value, value))Field(*ks, 0))(r, *ks);\n\
-         }\n\n\
-         static inline value camlc_call_cps%d(value f, %s, value k) {\n\
-        \  value c = Field(f, 2);\n\
-        \  if (c) CAMLC_MUSTTAIL return ((%s)c)(%s, k, f);\n\
-        \  CAMLC_MUSTTAIL return camlc_direct_k%d(f, %s, k);\n\
-         }\n\n\
-         static inline value camlc_apply_cps%d(value f, %s, value k) {\n\
-        \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
-        \    CAMLC_MUSTTAIL return camlc_call_cps%d(f, %s, k);\n\
-        \  value args[%d] = { %s, k };\n\
-        \  return camlc_applyv_cps(f, %d, args);\n\
-         }\n\n"
-        n
-        params
-        (fun_type n)
-        (String.concat ~sep:", " args)
-        m
-        params
-        (fun_type m)
-        (String.concat ~sep:", " args)
-        n
-        (String.concat ~sep:", " args)
-        m
-        params
-        n
-        m
-        (String.concat ~sep:", " args)
-        m
-        (String.concat ~sep:", " args)
-        n)
-    out.cps_apply_arities;
-  IntSet.iter
-    (fun n ->
-      let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
-      Printf.bprintf
-        b
-        "static inline value camlc_apply%d(value f, %s) {\n\
-        \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
-        \    CAMLC_MUSTTAIL return ((%s)Field(f, 0))(%s, f);\n\
-        \  value args[%d] = { %s };\n\
-        \  return camlc_applyv(f, %d, args);\n\
-         }\n\n"
-        n
-        (String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)))
-        n
-        (fun_type n)
-        (String.concat ~sep:", " args)
-        n
-        (String.concat ~sep:", " args)
-        n)
-    out.apply_arities;
-  Buffer.add_buffer b out.functions;
-  Buffer.contents b
+    Printf.bprintf
+      b
+      "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
+    (* Same, for the CPS versions, the last argument being the continuation *)
+    Printf.bprintf
+      b
+      "value camlc_call_exact_cps(value f, int n, value *args) {\n  switch (n) {\n";
+    if dt
+    then
+      for n = 1 to out.max_arity do
+        Printf.bprintf
+          b
+          "  case %d: return ((%s)Field(f, 2))(%s);\n"
+          n
+          (fun_type (n + 1))
+          (String.concat
+             ~sep:", "
+             (List.init ~len:(n + 1) ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
+      done;
+    Printf.bprintf
+      b
+      "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n"
+  in
+  (* The application functions, in each part which may use them *)
+  let helpers b =
+    (* CPS calls of unknown functions, which may not have a CPS version *)
+    IntSet.iter
+      (fun m ->
+        let n = m - 1 in
+        let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
+        let params = String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)) in
+        Printf.bprintf
+          b
+          "static value camlc_direct_k%d(value f, %s, value k) {\n\
+          \  value *ks = camlc_sp - 1, r;\n\
+          \  if (CAMLC_UNLIKELY(ks < camlc_stack_limit)) return camlc_stack_overflow();\n\
+          \  *ks = k;\n\
+          \  camlc_sp = ks;\n\
+          \  r = ((%s)Field(f, 0))(%s, f);\n\
+          \  camlc_sp = ks + 1;\n\
+          \  if (CAMLC_UNLIKELY(Is_exception_result(r))) return r;\n\
+          \  return ((value (*)(value, value))Field(*ks, 0))(r, *ks);\n\
+           }\n\n\
+           static inline value camlc_call_cps%d(value f, %s, value k) {\n\
+          \  value c = Field(f, 2);\n\
+          \  if (c) CAMLC_MUSTTAIL return ((%s)c)(%s, k, f);\n\
+          \  CAMLC_MUSTTAIL return camlc_direct_k%d(f, %s, k);\n\
+           }\n\n\
+           static inline value camlc_apply_cps%d(value f, %s, value k) {\n\
+          \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
+          \    CAMLC_MUSTTAIL return camlc_call_cps%d(f, %s, k);\n\
+          \  value args[%d] = { %s, k };\n\
+          \  return camlc_applyv_cps(f, %d, args);\n\
+           }\n\n"
+          n
+          params
+          (fun_type n)
+          (String.concat ~sep:", " args)
+          m
+          params
+          (fun_type m)
+          (String.concat ~sep:", " args)
+          n
+          (String.concat ~sep:", " args)
+          m
+          params
+          n
+          m
+          (String.concat ~sep:", " args)
+          m
+          (String.concat ~sep:", " args)
+          n)
+      out.cps_apply_arities;
+    IntSet.iter
+      (fun n ->
+        let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
+        Printf.bprintf
+          b
+          "static inline value camlc_apply%d(value f, %s) {\n\
+          \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
+          \    CAMLC_MUSTTAIL return ((%s)Field(f, 0))(%s, f);\n\
+          \  value args[%d] = { %s };\n\
+          \  return camlc_applyv(f, %d, args);\n\
+           }\n\n"
+          n
+          (String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)))
+          n
+          (fun_type n)
+          (String.concat ~sep:", " args)
+          n
+          (String.concat ~sep:", " args)
+          n)
+      out.apply_arities
+  in
+  let add_definitions b l =
+    List.iter l ~f:(fun d ->
+        (match d.def_fn with
+        | Some f -> Buffer.add_string b (storage f)
+        | None -> ());
+        Buffer.add_string b d.def_text)
+  in
+  if not split
+  then (
+    let b =
+      Buffer.create
+        (Buffer.length out.data
+        + 65536
+        + List.fold_left definitions ~init:0 ~f:(fun n d -> n + d.def_size))
+    in
+    preamble b;
+    prototypes b (List.map functions ~f:(fun (f, _, _) -> f));
+    tables b;
+    helpers b;
+    add_definitions b definitions;
+    [ Buffer.contents b ])
+  else
+    let main =
+      let b = Buffer.create (Buffer.length out.data + 65536) in
+      preamble b;
+      prototypes b (Var.Set.elements data_refs);
+      tables b;
+      Buffer.contents b
+    in
+    main
+    :: List.map parts ~f:(fun l ->
+        let b =
+          Buffer.create (List.fold_left l ~init:65536 ~f:(fun n d -> n + d.def_size))
+        in
+        preamble b;
+        Buffer.add_string b "extern value camlc_data[];\n";
+        if has_locations
+        then Buffer.add_string b "extern const struct camlc_location camlc_locs[];\n";
+        let used =
+          List.fold_left l ~init:Var.Set.empty ~f:(fun s d ->
+              let s = Var.Set.union s d.def_refs in
+              match d.def_fn with
+              | Some f -> Var.Set.add f s
+              | None -> s)
+        in
+        prototypes b (Var.Set.elements used);
+        helpers b;
+        add_definitions b l;
+        Buffer.contents b)

@@ -17,6 +17,8 @@
 #   C_OF_OCAML  the compiler (default: the one built by dune in this tree)
 #   JOBS        number of tests run in parallel (default: nproc)
 #   WORKDIR     where the tests are built (default: a temporary directory)
+#   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
+#               SPLIT kilobytes
 #
 # emcc, node and ocamlfind must be in PATH (node >= 24 for wasm64).
 
@@ -74,11 +76,23 @@ run_test() {
   files=$(ocamlfind ocamldep -sort $deps "$name.ml")
   ocamlfind ocamlc -package unix -linkpkg -w -a $(ls ./*.mli 2>/dev/null) $files \
     -o "$name.bc" > build.log 2>&1 || { res SKIP ocamlc; return; }
-  "$C_OF_OCAML" $COOC_FLAGS "$name.bc" -o "$name.c" > cooc.log 2>&1 \
-    || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
-  emcc $CFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
-    || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
-  emcc $CFLAGS "$name.o" "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" \
+  local objs=$name.o
+  if [ -n "${SPLIT:-}" ]; then
+    "$C_OF_OCAML" $COOC_FLAGS "$name.bc" --split parts --part-size "$SPLIT" > cooc.log 2>&1 \
+      || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
+    objs=
+    for c in parts/*.c; do
+      emcc $CFLAGS -Wno-everything -c "$c" -o "${c%.c}.o" >> cc.log 2>&1 \
+        || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
+      objs="$objs ${c%.c}.o"
+    done
+  else
+    "$C_OF_OCAML" $COOC_FLAGS "$name.bc" -o "$name.c" > cooc.log 2>&1 \
+      || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
+    emcc $CFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
+      || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
+  fi
+  emcc $CFLAGS $objs "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" \
     "$SYSROOT/lib/libcamlrun.a" -lm \
     -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o "$name.js" > ld.log 2>&1 \
     || { res FAIL "ld: $(grep -m1 error ld.log | head -c 150)"; return; }
