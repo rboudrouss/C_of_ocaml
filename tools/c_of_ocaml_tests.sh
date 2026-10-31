@@ -117,6 +117,7 @@ export -f run_test
 if [ -z "${WORKDIR:-}" ]; then
   WORKDIR=$(mktemp -d)
   trap 'rm -rf "$WORKDIR"' EXIT
+  trap 'exit 1' INT TERM
 fi
 mkdir -p "$WORKDIR"
 export WORKDIR
