@@ -115,8 +115,9 @@ let repr_equal (r : repr) r' = Poly.equal r r'
 
 (* The output, and what the generated code refers to *)
 type output =
-  { data : Buffer.t  (** Initializers of the static data *)
-  ; mutable data_size : int  (** Number of words of the static data *)
+  { data : Buffer.t  (** Definitions of the static data *)
+  ; static_names : string String.Hashtbl.t
+        (** The contents of each block of static data, by C name *)
   ; mutable definitions : definition list  (** Function definitions, in reverse order *)
   ; mutable refs : Var.Set.t  (** The functions referred to by the current code *)
   ; constants : (constant * string) list Int.Hashtbl.t
@@ -130,8 +131,7 @@ type output =
   ; fun_reprs : repr list Var.Hashtbl.t
         (** The representation of the parameters of each function *)
   ; debug_info : bool  (** Record backtraces *)
-  ; locations : int String.Hashtbl.t  (** The index of each location *)
-  ; location_defs : Buffer.t
+  ; locations : string String.Hashtbl.t  (** The initializer of each location, by name *)
   ; in_cps : Var.Set.t  (** The CPS calls *)
   ; trampolined : Var.Set.t  (** The CPS calls which may bounce *)
   ; cps_pairs : Var.t Var.Map.t
@@ -141,10 +141,11 @@ type output =
   ; mutable cps_apply_arities : IntSet.t
         (** Arities (with the continuation) of the [camlc_apply_cpsN] and
             [camlc_call_cpsN] functions used *)
-  ; globals : int Var.Hashtbl.t  (** The index of each global *)
+  ; globals : string Var.Hashtbl.t  (** The C name of each global *)
   ; statics : string Var.Hashtbl.t
         (** The closed closures and the constants, which are not free
             variables *)
+  ; split : bool  (** The code is split into several files *)
   ; mutable raising : Var.Set.t  (** The functions which may raise *)
   ; mutable collecting : Var.Set.t
         (** The functions which may trigger a garbage collection and return *)
@@ -161,8 +162,14 @@ and definition =
   ; def_refs : Var.Set.t
   }
 
-(* A static description of a source location, for backtraces, in the array
-   [camlc_locs] *)
+(* The C names of the static data, the locations and the globals do not
+   depend on the rest of the program either (see [name_functions]): they
+   are named after a digest of their contents, or of a stable key *)
+let digest_name prefix s =
+  prefix ^ String.sub (Digest.to_hex (Digest.string s)) ~pos:0 ~len:16
+
+(* A static description of a source location, for backtraces, defined in
+   each part which uses it *)
 let location out (pi : Parse_info.t) ~fun_name ~is_raise =
   let file =
     match pi.name, pi.src with
@@ -178,25 +185,19 @@ let location out (pi : Parse_info.t) ~fun_name ~is_raise =
     | Some f -> m ^ "." ^ f
     | None -> m
   in
-  let key = Printf.sprintf "%s:%d:%d:%s:%b" file pi.line pi.col defname is_raise in
-  let n =
-    match String.Hashtbl.find_opt out.locations key with
-    | Some n -> n
-    | None ->
-        let n = String.Hashtbl.length out.locations in
-        String.Hashtbl.add out.locations key n;
-        Printf.bprintf
-          out.location_defs
-          "  { %s, %s, %d, %d, %d, %d },\n"
-          (c_string file)
-          (c_string defname)
-          pi.line
-          pi.col
-          pi.col
-          (if is_raise then 1 else 0);
-        n
+  let init =
+    Printf.sprintf
+      "{ %s, %s, %d, %d, %d, %d }"
+      (c_string file)
+      (c_string defname)
+      pi.line
+      pi.col
+      pi.col
+      (if is_raise then 1 else 0)
   in
-  Printf.sprintf "&camlc_locs[%d]" n
+  let name = digest_name "camlc_l_" init in
+  String.Hashtbl.replace out.locations name init;
+  "&" ^ name
 
 let fun_name out f =
   match Var.Hashtbl.find_opt out.fun_names f with
@@ -262,19 +263,36 @@ let int64_words i =
 
 let int32_word i = Printf.sprintf "(value)0x%lxu" i
 
-(* The static data is a single array, [camlc_data], so that the runtime
-   can tell where it is (OCaml 4 needs it in its page table). [static_block
-   out words] adds a block (header and fields) to it, and returns the index
-   of its header. *)
+(* The static data is in its own section, so that the runtime can tell
+   where it is (OCaml 4 needs it in its page table). [static_block out
+   words] adds a block (header and fields) to it, and returns its C name. *)
 let static_block out words =
-  let n = out.data_size in
-  out.data_size <- n + List.length words;
-  Printf.bprintf out.data "  %s,\n" (String.concat ~sep:", " words);
-  n
+  let contents = String.concat ~sep:", " words in
+  let rec name rank =
+    let n =
+      digest_name
+        "camlc_k_"
+        (if rank = 0 then contents else Printf.sprintf "%d:%s" rank contents)
+    in
+    match String.Hashtbl.find_opt out.static_names n with
+    | Some c when String.equal c contents -> n
+    | Some _ -> name (rank + 1)
+    | None ->
+        String.Hashtbl.add out.static_names n contents;
+        Printf.bprintf
+          out.data
+          "%svalue %s[%d] CAMLC_STATIC = { %s };\n"
+          (if out.split then "" else "static ")
+          n
+          (List.length words)
+          contents;
+        n
+  in
+  name 0
 
 let emit_block out ~tag fields =
   let n = static_block out (header ~wosize:(List.length fields) ~tag :: fields) in
-  Printf.sprintf "((value)&camlc_data[%d])" (n + 1)
+  Printf.sprintf "((value)&%s[1])" n
 
 let rec constant out c =
   match c with
@@ -1038,7 +1056,7 @@ type location =
   | Local  (** A variable of the function *)
   | Env of int  (** A field of the closure *)
   | Sibling of int  (** A function of the same closure, at this offset in words *)
-  | Global of int  (** A toplevel value stored in [camlc_globals] *)
+  | Global of string  (** A toplevel value stored in a C global *)
   | Static of string  (** A closed closure or a constant: static data *)
 
 type trap =
@@ -1060,6 +1078,10 @@ type fctx =
   ; slots : int Var.Hashtbl.t  (** The variables in the frame *)
   ; traps : trap list Addr.Hashtbl.t  (** The handlers in scope in each block *)
   ; handler_ids : int Addr.Hashtbl.t  (** The handler of the [Pushtrap] ending a block *)
+  ; local_names : int Var.Hashtbl.t
+  ; labels : int Addr.Hashtbl.t
+        (** The variables and the blocks are numbered in each function, so that
+            the code of a function does not depend on the rest of the program *)
   ; buf : Buffer.t
   ; mutable position : Parse_info.t option  (** The last debug event *)
   ; source_name : string option  (** The name of the function in the source *)
@@ -1094,14 +1116,36 @@ let location ctx x =
   | Some _ as l -> l
   | None -> (
       match Var.Hashtbl.find_opt ctx.out.globals x with
-      | Some i -> Some (Global i)
+      | Some g -> Some (Global g)
       | None -> (
           match Var.Hashtbl.find_opt ctx.out.statics x with
           | Some e -> Some (Static e)
           | None -> None))
 
 let local_name ctx x =
-  if Var.equal x ctx.env_var then "env" else Printf.sprintf "v%d" (Var.idx x)
+  if Var.equal x ctx.env_var
+  then "env"
+  else
+    let n =
+      match Var.Hashtbl.find_opt ctx.local_names x with
+      | Some n -> n
+      | None ->
+          let n = Var.Hashtbl.length ctx.local_names in
+          Var.Hashtbl.add ctx.local_names x n;
+          n
+    in
+    Printf.sprintf "v%d" n
+
+let label ctx pc =
+  let n =
+    match Addr.Hashtbl.find_opt ctx.labels pc with
+    | Some n -> n
+    | None ->
+        let n = Addr.Hashtbl.length ctx.labels in
+        Addr.Hashtbl.add ctx.labels pc n;
+        n
+  in
+  Printf.sprintf "L%d" n
 
 let local ctx x =
   match Var.Hashtbl.find_opt ctx.slots x with
@@ -1111,7 +1155,7 @@ let local ctx x =
 let var ctx x =
   match location ctx x with
   | Some Local -> local ctx x
-  | Some (Global i) -> Printf.sprintf "camlc_globals[%d]" i
+  | Some (Global g) -> g
   | Some (Static e) -> e
   | Some (Env i) -> Printf.sprintf "Field(%s, %d)" (local ctx ctx.env_var) i
   | Some (Sibling 0) -> local ctx ctx.env_var
@@ -1122,7 +1166,7 @@ let var ctx x =
 let slot ctx x =
   match location ctx x with
   | Some Local -> local ctx x
-  | Some (Global i) -> Printf.sprintf "camlc_globals[%d]" i
+  | Some (Global g) -> g
   | Some (Env _ | Sibling _ | Static _) | None ->
       failwith (Format.asprintf "c_of_ocaml: variable %a is not local" Var.print x)
 
@@ -1220,15 +1264,15 @@ let branch ctx (pc, args) =
     | Some _ | None -> ""
   in
   match moves with
-  | [] when String.equal push "" -> Printf.sprintf "goto L%d;" pc
-  | [] -> Printf.sprintf "{ %s goto L%d; }" push pc
+  | [] when String.equal push "" -> Printf.sprintf "goto %s;" (label ctx pc)
+  | [] -> Printf.sprintf "{ %s goto %s; }" push (label ctx pc)
   | [ (p, a) ] ->
       Printf.sprintf
-        "{ %s%s = %s; goto L%d; }"
+        "{ %s%s = %s; goto %s; }"
         push
         (slot ctx p)
         (as_repr ctx (var_repr ctx p) a)
-        pc
+        (label ctx pc)
   | _ ->
       let temps =
         List.mapi moves ~f:(fun i (p, a) ->
@@ -1239,11 +1283,11 @@ let branch ctx (pc, args) =
         List.mapi moves ~f:(fun i (p, _) -> Printf.sprintf "%s = t%d;" (slot ctx p) i)
       in
       Printf.sprintf
-        "{ %s%s %s goto L%d; }"
+        "{ %s%s %s goto %s; }"
         push
         (String.concat ~sep:" " temps)
         (String.concat ~sep:" " assigns)
-        pc
+        (label ctx pc)
 
 (* Allocate a block whose fields are [fields] (C expressions, read after
    the allocation), and store it in [dst] *)
@@ -1316,7 +1360,7 @@ let static_closure out functions =
   in
   let _, positions = closure_layout functions in
   List.map2 functions positions ~f:(fun (g, _) pos ->
-      g, Printf.sprintf "(value)&camlc_data[%d]" (n + pos + 1))
+      g, Printf.sprintf "(value)&%s[%d]" n (pos + 1))
 
 let translate_closure ctx f =
   let info = Var.Map.find f ctx.closures in
@@ -2104,6 +2148,8 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     ; slots = Var.Hashtbl.create 1
     ; traps = Addr.Hashtbl.create 1
     ; handler_ids = Addr.Hashtbl.create 1
+    ; local_names = Var.Hashtbl.create 1
+    ; labels = Addr.Hashtbl.create 1
     ; buf = Buffer.create 1
     ; position = None
     ; source_name = None
@@ -2252,6 +2298,8 @@ let translate_function
     ; slots = Var.Hashtbl.create 16
     ; traps = Addr.Hashtbl.create 16
     ; handler_ids = Addr.Hashtbl.create 16
+    ; local_names = Var.Hashtbl.create 64
+    ; labels = Addr.Hashtbl.create 16
     ; buf = Buffer.create 4096
     ; position = None
     ; source_name
@@ -2383,7 +2431,7 @@ let translate_function
       (match ctx.framed_blocks with
       | Some s -> ctx.framed <- Addr.Set.mem pc s
       | None -> ());
-      Printf.bprintf ctx.buf " L%d:;\n" pc;
+      Printf.bprintf ctx.buf " %s:;\n" (label ctx pc);
       (* An application whose result is returned, outside any handler *)
       let tail_call =
         let rec strip_events l =
@@ -2489,14 +2537,127 @@ let global_data_size (p : program) =
     16
 
 let collect_functions p =
-  (* All the closures, with their parameters and entry point *)
+  (* All the closures, with their parameters, entry point and location *)
   fold_closures
     p
-    (fun name_opt params cont _ acc ->
+    (fun name_opt params cont loc acc ->
       match name_opt with
-      | Some f -> (f, params, cont) :: acc
+      | Some f -> (f, params, cont, loc) :: acc
       | None -> acc)
     []
+
+let source_file (pi : Parse_info.t) =
+  match pi.name, pi.src with
+  | Some n, _ | None, Some n -> n
+  | None, None -> ""
+
+(* The C name of each global, after the last debug event before its
+   definition in the program, its name and its rank among the globals with
+   the same event and name (see [name_functions]) *)
+let name_globals (p : program) global_list names =
+  let set = Var.Set.of_list global_list in
+  let ranks = String.Hashtbl.create 1024 in
+  let last = ref "" in
+  let name x =
+    if Var.Set.mem x set && not (Var.Hashtbl.mem names x)
+    then (
+      let base =
+        match Var.get_name x with
+        | Some s -> sanitize s
+        | None -> ""
+      in
+      let key = !last ^ ":" ^ base in
+      let rank =
+        match String.Hashtbl.find_opt ranks key with
+        | Some n -> n
+        | None -> 0
+      in
+      String.Hashtbl.replace ranks key (rank + 1);
+      Var.Hashtbl.add
+        names
+        x
+        (Printf.sprintf
+           "%s%s%s"
+           (digest_name "camlc_g_" key)
+           (if rank = 0 then "" else Printf.sprintf "_%d" rank)
+           (if String.equal base "" then "" else "_" ^ base)))
+  in
+  Addr.Map.iter
+    (fun _ (block : block) ->
+      List.iter block.params ~f:name;
+      List.iter block.body ~f:(fun i ->
+          match i with
+          | Event pi -> last := Printf.sprintf "%s:%d:%d" (source_file pi) pi.line pi.col
+          | Let (x, _) -> name x
+          | Assign _ | Set_field _ | Offset_ref _ | Array_set _ -> ()))
+    p.blocks;
+  (* Not defined in a block, which should not happen *)
+  List.iter global_list ~f:(fun x ->
+      if not (Var.Hashtbl.mem names x)
+      then Var.Hashtbl.add names x (Printf.sprintf "camlc_g_v%d" (Var.idx x)))
+
+(* The C names of the functions do not depend on the numbering of the
+   variables, which an edit anywhere in the program shifts: they are named
+   after their location in the source and their name (and their rank among
+   the functions with the same location and name, the copies made by
+   inlining for instance), so that the code of the rest of the program is
+   left unchanged *)
+let name_functions out blocks functions =
+  let ranks = String.Hashtbl.create 1024 in
+  (* Without a location, the first debug event of the body *)
+  let first_event (pc, _) =
+    let rec search visited todo =
+      match todo with
+      | [] -> None
+      | pc :: r when Addr.Set.mem pc visited || Addr.Set.cardinal visited > 32 ->
+          search visited r
+      | pc :: r -> (
+          let block = Addr.Map.find pc blocks in
+          match
+            List.find_map block.body ~f:(fun i ->
+                match i with
+                | Event pi -> Some pi
+                | _ -> None)
+          with
+          | Some _ as loc -> loc
+          | None ->
+              let next = ref [] in
+              Code.fold_children blocks pc (fun pc' () -> next := pc' :: !next) ();
+              search (Addr.Set.add pc visited) (r @ List.rev !next))
+    in
+    search Addr.Set.empty [ pc ]
+  in
+  List.iter functions ~f:(fun (f, _, cont, (loc : Parse_info.t option)) ->
+      let loc =
+        match loc with
+        | Some _ -> loc
+        | None -> first_event cont
+      in
+      let base =
+        match Var.get_name f with
+        | Some s -> sanitize s
+        | None -> ""
+      in
+      let key =
+        match loc with
+        | Some pi -> Printf.sprintf "%s:%d:%d:%s" (source_file pi) pi.line pi.col base
+        | None -> ":" ^ base
+      in
+      let rank =
+        match String.Hashtbl.find_opt ranks key with
+        | Some n -> n
+        | None -> 0
+      in
+      String.Hashtbl.replace ranks key (rank + 1);
+      let hash = String.sub (Digest.to_hex (Digest.string key)) ~pos:0 ~len:12 in
+      Var.Hashtbl.replace
+        out.fun_names
+        f
+        (Printf.sprintf
+           "camlc_f%s%s%s"
+           hash
+           (if rank = 0 then "" else Printf.sprintf "_%d" rank)
+           (if String.equal base "" then "" else "_" ^ base)))
 
 let f
     (p : program)
@@ -2514,7 +2675,7 @@ let f
   let global_list =
     Var.Set.elements (Globalize.f p (Structure.build_graph p.blocks p.start) closures)
   in
-  List.iteri global_list ~f:(fun i x -> Var.Hashtbl.add globals x i);
+  name_globals p global_list globals;
   (* Nor are the constants and the closed closures, static data (and the
      variables bound to the closure of a function with two versions, see
      [caml_cps_closure]), which may close other closures *)
@@ -2566,7 +2727,10 @@ let f
       global_flow_info.Global_flow.info_cps_closures
       (Var.Map.empty, Var.Set.empty, Var.Map.empty)
   in
-  let functions = collect_functions p in
+  let located_functions = collect_functions p in
+  let functions =
+    List.map located_functions ~f:(fun (f, params, cont, _) -> f, params, cont)
+  in
   (* Which numbers can be unboxed. Closures hold values, and so do the
      parameters of the CPS versions, which the runtime may call. *)
   Typing.reset ();
@@ -2587,7 +2751,7 @@ let f
   in
   let out =
     { data = Buffer.create 65536
-    ; data_size = 1
+    ; static_names = String.Hashtbl.create 1024
     ; definitions = []
     ; refs = Var.Set.empty
     ; constants = Int.Hashtbl.create 1024
@@ -2600,7 +2764,6 @@ let f
     ; fun_reprs = Var.Hashtbl.create 1024
     ; debug_info
     ; locations = String.Hashtbl.create 1024
-    ; location_defs = Buffer.create 4096
     ; in_cps
     ; trampolined = trampolined_calls
     ; cps_pairs
@@ -2608,11 +2771,13 @@ let f
     ; cps_apply_arities = IntSet.empty
     ; globals
     ; statics = Var.Hashtbl.create 1024
+    ; split = Option.is_some part_size
     ; raising = Var.Set.empty
     ; collecting = Var.Set.empty
     ; collecting_on_raise = Var.Set.empty
     }
   in
+  name_functions out p.blocks located_functions;
   List.iter functions ~f:(fun (f, params, _) ->
       out.max_arity <- max out.max_arity (List.length params);
       Var.Hashtbl.replace
@@ -2705,13 +2870,29 @@ let f
     match part_size with
     | None -> [ definitions ]
     | Some size ->
+        (* A part ends after a definition chosen by the hash of its name,
+           with a probability proportional to its size, once the part has
+           half the size: the parts after a definition which changes are
+           left unchanged *)
+        let ends_part d =
+          let name =
+            match d.def_fn with
+            | Some f -> fun_name out f
+            | None -> "camlc_program"
+          in
+          Hashtbl.hash name land 0xfffff < d.def_size * 0x100000 / max 1 (size / 2)
+        in
         let rec group parts part n l =
           match l with
           | [] -> List.rev (if List.is_empty part then parts else List.rev part :: parts)
           | d :: r ->
-              if n > 0 && n + d.def_size > size
-              then group (List.rev part :: parts) [ d ] d.def_size r
-              else group parts (d :: part) (n + d.def_size) r
+              if n > 0 && n + d.def_size > 2 * size
+              then group (List.rev part :: parts) [] 0 l
+              else
+                let n = n + d.def_size in
+                if n >= size / 2 && ends_part d
+                then group (List.rev (d :: part) :: parts) [] 0 r
+                else group parts (d :: part) n r
         in
         group [] [] 0 definitions
   in
@@ -2734,7 +2915,55 @@ let f
               d.def_refs)));
   let storage f = if Var.Hashtbl.mem shared f then "" else "static " in
   let dt = double_translation () in
-  let has_locations = String.Hashtbl.length out.locations > 0 in
+  (* The locations, constants and globals that some code refers to: the
+     identifiers of its text starting with [camlc_l_], [camlc_k_] and
+     [camlc_g_] *)
+  let symbols texts =
+    let is_ident c =
+      match c with
+      | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true
+      | _ -> false
+    in
+    let found = String.Hashtbl.create 64 in
+    List.iter texts ~f:(fun text ->
+        let n = String.length text in
+        let i = ref 0 in
+        while !i + 8 <= n do
+          if
+            Char.equal text.[!i] 'c'
+            && (!i = 0 || not (is_ident text.[!i - 1]))
+            && String.equal (String.sub text ~pos:!i ~len:6) "camlc_"
+            && Char.equal text.[!i + 7] '_'
+            &&
+            match text.[!i + 6] with
+            | 'l' | 'k' | 'g' -> true
+            | _ -> false
+          then (
+            let j = ref (!i + 8) in
+            while !j < n && is_ident text.[!j] do
+              incr j
+            done;
+            String.Hashtbl.replace found (String.sub text ~pos:!i ~len:(!j - !i)) ();
+            i := !j)
+          else incr i
+        done);
+    List.sort
+      ~cmp:String.compare
+      (String.Hashtbl.fold (fun name () acc -> name :: acc) found [])
+  in
+  let declare_symbols b names =
+    List.iter names ~f:(fun name ->
+        match name.[6] with
+        | 'l' ->
+            Printf.bprintf
+              b
+              "static const struct camlc_location %s = %s;\n"
+              name
+              (String.Hashtbl.find out.locations name)
+        | 'k' -> Printf.bprintf b "extern value %s[];\n" name
+        | _ -> Printf.bprintf b "extern value %s;\n" name);
+    Buffer.add_char b '\n'
+  in
   let preamble b =
     Buffer.add_string b "/* Generated by c_of_ocaml */\n#include \"camlc.h\"\n\n";
     Printf.bprintf
@@ -2793,14 +3022,13 @@ let f
     done;
     Buffer.add_char b '\n';
     Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
-    let n = Var.Hashtbl.length globals in
-    Printf.bprintf
-      b
-      "value camlc_globals[%d] = { [0 ... %d] = Val_unit };\n\
-       const int camlc_globals_count = %d;\n"
-      (max n 1)
-      (max n 1 - 1)
-      n;
+    (* Never static: the GC updates them, which the C compiler must not
+       ignore *)
+    List.iter global_list ~f:(fun x ->
+        Printf.bprintf
+          b
+          "value %s CAMLC_GLOBAL = Val_unit;\n"
+          (Var.Hashtbl.find globals x));
     Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
     Printf.bprintf
       b
@@ -2820,20 +3048,8 @@ let f
            (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
                 Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
        else "");
-    let static = if split then "" else "static " in
-    Printf.bprintf b "%svalue camlc_data[%d] = {\n  0,\n" static out.data_size;
     Buffer.add_buffer b out.data;
-    Printf.bprintf
-      b
-      "};\n\n\
-       value *const camlc_static_data_begin = camlc_data;\n\
-       value *const camlc_static_data_end = camlc_data + %d;\n\n"
-      out.data_size;
-    if has_locations
-    then (
-      Printf.bprintf b "%sconst struct camlc_location camlc_locs[] = {\n" static;
-      Buffer.add_buffer b out.location_defs;
-      Buffer.add_string b "};\n\n");
+    Buffer.add_char b '\n';
     (* Partial applications: the closure holds the function and the
        arguments already given (after the code pointer of the CPS version,
        with effect handlers), see [camlc_make_pap] *)
@@ -3015,6 +3231,9 @@ let f
     preamble b;
     prototypes b (List.map functions ~f:(fun (f, _, _) -> f));
     tables b;
+    String.Hashtbl.fold (fun name _ acc -> name :: acc) out.locations []
+    |> List.sort ~cmp:String.compare
+    |> declare_symbols b;
     helpers b;
     add_definitions b definitions;
     [ Buffer.contents b ])
@@ -3032,9 +3251,7 @@ let f
           Buffer.create (List.fold_left l ~init:65536 ~f:(fun n d -> n + d.def_size))
         in
         preamble b;
-        Buffer.add_string b "extern value camlc_data[];\n";
-        if has_locations
-        then Buffer.add_string b "extern const struct camlc_location camlc_locs[];\n";
+        declare_symbols b (symbols (List.map l ~f:(fun d -> d.def_text)));
         let used =
           List.fold_left l ~init:Var.Set.empty ~f:(fun s d ->
               let s = Var.Set.union s d.def_refs in

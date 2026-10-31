@@ -51,7 +51,13 @@
 /* Defined by the generated code */
 extern value camlc_program(void);
 extern const int camlc_global_data_size;
-extern value *const camlc_static_data_begin, *const camlc_static_data_end;
+
+/* The bounds of the globals and of the static data. The sections are never
+   empty: they contain these anchors */
+extern value __start_camlc_globals[], __stop_camlc_globals[];
+extern value __start_camlc_static[], __stop_camlc_static[];
+__attribute__((used)) value camlc_globals_anchor CAMLC_GLOBAL = Val_unit;
+__attribute__((used)) value camlc_static_anchor CAMLC_STATIC = Val_unit;
 
 /****************************************************************/
 /* Shadow stack */
@@ -88,9 +94,9 @@ static void camlc_scan_roots(scanning_action action,
     value v = *p;
     if (Is_block(v)) action(fdata, v, p);
   }
-  for (int i = 0; i < camlc_globals_count; i++) {
-    value v = camlc_globals[i];
-    if (Is_block(v)) action(fdata, v, &camlc_globals[i]);
+  for (value *p = __start_camlc_globals; p < __stop_camlc_globals; p++) {
+    value v = *p;
+    if (Is_block(v)) action(fdata, v, p);
   }
   if (Is_block(camlc_fiber)) action(fdata, camlc_fiber, &camlc_fiber);
   if (Is_block(camlc_bounce_f)) action(fdata, camlc_bounce_f, &camlc_bounce_f);
@@ -118,9 +124,9 @@ static void camlc_scan_roots(scanning_action action)
     value v = *p;
     if (Is_block(v)) action(v, p);
   }
-  for (int i = 0; i < camlc_globals_count; i++) {
-    value v = camlc_globals[i];
-    if (Is_block(v)) action(v, &camlc_globals[i]);
+  for (value *p = __start_camlc_globals; p < __stop_camlc_globals; p++) {
+    value v = *p;
+    if (Is_block(v)) action(v, p);
   }
   if (camlc_prev_scan_roots_hook != NULL) camlc_prev_scan_roots_hook(action);
 }
@@ -1392,8 +1398,8 @@ int main(int argc, char **argv)
   caml_init_backtrace();
   Caml_state->external_raise = NULL;
   /* Static data are values outside the heap */
-  caml_page_table_add(In_static_data, camlc_static_data_begin,
-                      camlc_static_data_end);
+  caml_page_table_add(In_static_data, __start_camlc_static,
+                      __stop_camlc_static);
 #endif
   camlc_init_stack();
 #if OCAML_VERSION_MAJOR >= 5
