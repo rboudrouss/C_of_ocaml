@@ -16,7 +16,8 @@
 #               (default: $OPAM_SWITCH_PREFIX/emcc-sysroot/wasm32 or wasm64)
 #   C_OF_OCAML  the compiler (default: the one built by dune in this tree)
 #   JOBS        number of tests run in parallel (default: nproc)
-#   WORKDIR     where the tests are built (default: a temporary directory)
+#   WORKDIR     where the tests are built (default: a temporary directory,
+#               removed at the end)
 #   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
 #               SPLIT kilobytes
 #
@@ -115,6 +116,7 @@ export -f run_test
 
 if [ -z "${WORKDIR:-}" ]; then
   WORKDIR=$(mktemp -d)
+  trap 'rm -rf "$WORKDIR"' EXIT
 fi
 mkdir -p "$WORKDIR"
 export WORKDIR
