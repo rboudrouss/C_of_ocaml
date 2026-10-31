@@ -157,7 +157,12 @@ let effects_and_exact_calls
     match Config.effects (), profile with
     | (`Cps | `Double_translation), _ -> false
     | _, (O2 | O3) -> false
-    | _, O1 -> true
+    | _, O1 -> (
+        (* The precise analysis removes more dead code, which saves more than
+           it costs when the C code is compiled next *)
+        match Config.target () with
+        | `C -> false
+        | `JavaScript | `Wasm -> true)
   in
   let specialize_exact_calls info p =
     Specialize.f
