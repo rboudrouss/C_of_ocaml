@@ -1319,12 +1319,25 @@ CAMLprim value caml_dynlink_get_current_libs(value unit)
   return Atom(0);
 }
 
+/* The information on the linking of the program (its sections, see
+   Parse_bytecode.emit_link_info), if it may read its sections */
+static value camlc_link_info = Val_unit;
+
+CAMLprim value caml_set_link_info(value info)
+{
+  if (camlc_link_info == Val_unit)
+    caml_register_generational_global_root(&camlc_link_info);
+  caml_modify_generational_global_root(&camlc_link_info, info);
+  return Val_unit;
+}
+
 #if OCAML_VERSION_MAJOR >= 5
 CAMLprim value caml_dynlink_get_bytecode_sections(value unit)
 {
   (void)unit;
-  camlc_unsupported("Dynlink.get_bytecode_sections");
-  return Val_unit;
+  if (camlc_link_info == Val_unit)
+    camlc_unsupported("Dynlink.get_bytecode_sections");
+  return Field(camlc_link_info, 0);
 }
 #endif
 

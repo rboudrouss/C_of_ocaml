@@ -169,6 +169,17 @@ let register_primitives () =
   List.iter ~f:(fun name -> Primitive.register name `Pure None None) pure_primitives;
   List.iter ~f:(fun name -> Primitive.register name `Mutable None None) mutable_primitives
 
+let uses_primitive (p : Code.program) prim =
+  Code.Addr.Map.fold
+    (fun _ (block : Code.block) acc ->
+      acc
+      || List.exists block.body ~f:(fun i ->
+          match i with
+          | Code.Let (_, Prim (Extern (name, _), _)) -> String.equal name prim
+          | _ -> false))
+    p.blocks
+    false
+
 (* Whether the program uses effect handlers *)
 let uses_effects (p : Code.program) =
   Code.Addr.Map.fold
@@ -191,14 +202,24 @@ let compile ~profile ~effects ~debug_info ~input_file ~output_file =
   | `Exe -> ()
   | `Cmo _ | `Cma _ -> failwith "c_of_ocaml: only bytecode executables are supported");
   let t = Timer.make () in
-  let one =
+  let parse ~link_info =
+    seek_in ic 0;
     Parse_bytecode.from_exe
       ~includes:[]
       ~include_cmis:false
-      ~link_info:false
+      ~link_info
       ~linkall:false
       ~debug:debug_info
       ic
+  in
+  let one = parse ~link_info:false in
+  (* The sections of the bytecode executable read by the toplevel
+     (Symtable.init_toplevel) are linked in as data, if the program reads
+     them *)
+  let one =
+    if uses_primitive one.code "caml_dynlink_get_bytecode_sections"
+    then parse ~link_info:true
+    else one
   in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
