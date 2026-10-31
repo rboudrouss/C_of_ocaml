@@ -24,7 +24,9 @@ node main.js
 
 For wasm64 (63-bit integers), pass `--word-size 64` to c_of_ocaml and `-m64` to emcc (and `-sMAXIMUM_MEMORY=16GB` when linking), with the wasm64 sysroot. node 24 or later runs it.
 
-`libcamlrun.a` is linked without its interpreter: `camlc_runtime.c` defines `main` and replaces the runtime's `callback.c`. `c_of_ocaml --runtime-files DIR` writes `camlc.h` and `camlc_runtime.c` to `DIR`.
+`libcamlrun.a` is linked without its interpreter: `camlc_runtime.c` defines `main` and replaces the runtime's `callback.c`, `backtrace_byt.c`, `meta.c` and `dynlink.c` (the loading of bytecode and of shared libraries is not supported). `c_of_ocaml --runtime-files DIR` writes `camlc.h` and `camlc_runtime.c` to `DIR`.
+
+The C code of a large program is better split, for the memory and the time clang needs: `c_of_ocaml main.bc --split DIR` writes `DIR/part0.c` (the static data and the tables), `DIR/part1.c`, ... (the functions, about 2 MB of C each, see `--part-size`), each compiled separately. The files left unchanged by a new compilation are not rewritten.
 
 With ocaml-emcc, `ocaml-emcc build main.js --compiled` does all this.
 
@@ -32,7 +34,7 @@ With ocaml-emcc, `ocaml-emcc build main.js --compiled` does all this.
 
 See `runtime/c/camlc.h` for the conventions of the generated code.
 
-- **Values** have the representation of the bytecode runtime, with 31-bit integers on wasm32 and 63-bit integers on wasm64. Constants are static data, with headers that the GC never marks, in a single structure (registered as static data in the page table of OCaml 4.14).
+- **Values** have the representation of the bytecode runtime, with 31-bit integers on wasm32 and 63-bit integers on wasm64. Constants are static data, with headers that the GC never marks, in a single array (registered as static data in the page table of OCaml 4.14).
 - **Runtimes**: OCaml 4.14 and 5.x (`camlc_runtime.c` follows the startup and callbacks of each).
 - **Functions**: each function of the program is a C function taking its arguments then its closure. Closures have the layout of the bytecode runtime (with `Infix_tag` blocks for mutually recursive functions), with C function pointers as code pointers, so that `compare`, `hash` and `Obj` work. Calls to statically known functions are direct C calls; other exact calls go through the code pointer, and the others through `camlc_applyN`, which handles partial and over-applications. With the tail call extension of WebAssembly (`-mtail-call`), an application whose result is returned is a tail call (`musttail`) when the callee takes as many arguments as the caller.
 - **GC roots**: the variables live across a point where the GC may run (an allocation or a call), unless they hold integers or static data, are kept in the frame of the function on a shadow stack, scanned by the GC through `caml_scan_roots_hook`. The other variables are C locals.
