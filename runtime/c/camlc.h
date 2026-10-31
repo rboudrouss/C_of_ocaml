@@ -179,10 +179,14 @@ value camlc_raise_unhandled_effect(void);
 #define Camlc_int_and(a, b) ((value)((a) & (b)))
 #define Camlc_int_or(a, b) ((value)((a) | (b)))
 #define Camlc_int_xor(a, b) ((value)(((a) ^ (b)) | 1))
+/* The shift count is taken modulo the word size, as by the interpreter on
+   wasm: a larger count is undefined behavior in C (Base computes [x lsr
+   32] on 31-bit integers, for instance) */
+#define Camlc_shift(b) (Long_val(b) & (8 * sizeof(value) - 1))
 #define Camlc_int_lsl(a, b) \
-  ((value)((((uintnat)(a) - 1) << Long_val(b)) + 1))
-#define Camlc_int_lsr(a, b) ((value)(((uintnat)(a) >> Long_val(b)) | 1))
-#define Camlc_int_asr(a, b) ((value)(((intnat)(a) >> Long_val(b)) | 1))
+  ((value)((((uintnat)(a) - 1) << Camlc_shift(b)) + 1))
+#define Camlc_int_lsr(a, b) ((value)(((uintnat)(a) >> Camlc_shift(b)) | 1))
+#define Camlc_int_asr(a, b) ((value)(((intnat)(a) >> Camlc_shift(b)) | 1))
 /* The quotient is representable: the arguments have one bit less than
    [intnat] */
 #define Camlc_int_div_unsafe(a, b) \
