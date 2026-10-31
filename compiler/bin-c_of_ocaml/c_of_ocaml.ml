@@ -21,6 +21,17 @@ open C_of_ocaml_compiler
 
 let times = Debug.find "times"
 
+(* With --debug times, the size of the heap after each phase *)
+let memory () =
+  if times ()
+  then
+    let st = Gc.quick_stat () in
+    let mb w = w * (Sys.word_size / 8) / 1048576 in
+    Format.eprintf
+      "    heap: %d MB (peak %d MB)@."
+      (mb st.heap_words)
+      (mb st.top_heap_words)
+
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
   \       c_of_ocaml [options] program.bc --split DIR\n\
@@ -259,6 +270,7 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
   in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
+  memory ();
   Config.set_effects_backend
     (match effects with
     | Some e -> e
@@ -275,6 +287,7 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
   let optimized, global_flow_data =
     Driver.optimize_for_wasm ~profile ~shapes:false one.code
   in
+  memory ();
   let t = Timer.make () in
   let p, closures = Closure_conversion.f optimized.program in
   let c =
@@ -292,6 +305,7 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
       closures
   in
   if times () then Format.eprintf "  code generation: %a@." Timer.print t;
+  memory ();
   match output, c with
   | `File name, [ c ] ->
       let oc = open_out_bin name in
