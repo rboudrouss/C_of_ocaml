@@ -49,6 +49,10 @@ val can_unbox_parameters : Call_graph_analysis.t -> Code.Var.t -> bool
 
 val bigarray_element_type : Optimization_hint.Bigarray.kind -> typ
 
+val specialized_bigarray : typ -> Optimization_hint.Bigarray.t option
+(** The bigarrays whose elements the C code accesses directly, with
+    unboxed numbers *)
+
 type t
 
 val var_type : t -> Code.Var.t -> typ

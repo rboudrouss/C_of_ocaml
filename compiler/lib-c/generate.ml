@@ -537,6 +537,30 @@ let nogc_primitives =
     ; "caml_float_compare"
     ]
 
+(* The elements of a bigarray of a given kind: their C type, their
+   representation, the expression of the element as this representation,
+   and the expression to store from a [parg] *)
+let bigarray_element (kind : Optimization_hint.Bigarray.kind) =
+  let int t =
+    ( t
+    , Value
+    , Printf.sprintf "Val_long(%s)"
+    , fun a -> Printf.sprintf "Long_val(%s)" (a.get Value) )
+  in
+  let number t r = t, r, Fun.id, fun a -> a.get r in
+  match kind with
+  | Float32 -> number "float" Double
+  | Float64 -> number "double" Double
+  | Int8_signed -> int "int8_t"
+  | Int8_unsigned -> int "uint8_t"
+  | Int16_signed -> int "int16_t"
+  | Int16_unsigned -> int "uint16_t"
+  | Int32 -> number "int32_t" Unboxed_int32
+  | Int64 -> number "int64_t" Unboxed_int64
+  | Int -> int "intnat"
+  | Nativeint -> number "intnat" Unboxed_nativeint
+  | Float16 | Float32_t | Complex32 | Complex64 -> assert false
+
 let primitive out name (args : parg list) =
   let n = List.length args in
   let arg r i = (List.nth args i).get r in
@@ -705,6 +729,42 @@ let primitive out name (args : parg list) =
               pure
                 ( Value
                 , c_call "camlc_store_double_flat" [ value 0; value 1; arg Double 2 ] )
+          | ( ( "caml_ba_get_1"
+              | "caml_ba_get_2"
+              | "caml_ba_get_3"
+              | "caml_ba_set_1"
+              | "caml_ba_set_2"
+              | "caml_ba_set_3" )
+            , _ )
+            when Option.is_some (Typing.specialized_bigarray (List.hd args).a_typ) ->
+              (* Direct access, the kind and layout of the bigarray being known *)
+              let { Optimization_hint.Bigarray.kind; layout; _ } =
+                Option.get (Typing.specialized_bigarray (List.hd args).a_typ)
+              in
+              let get = Char.equal name.[8] 'g' in
+              let dims = if get then n - 1 else n - 2 in
+              let location =
+                [ value 0
+                ; string_of_int dims
+                ; (match layout with
+                  | C -> "0"
+                  | Fortran -> "1")
+                ]
+                @ List.init ~len:3 ~f:(fun d ->
+                    if d < dims then value (d + 1) else "Val_unit")
+              in
+              let t, r, load, store = bigarray_element kind in
+              let elt = c_call "camlc_ba_elt" (t :: location) in
+              if get
+              then Guarded (c_call "camlc_ba_check_get" location, r, load elt)
+              else
+                Guarded
+                  ( c_call "camlc_ba_check_set" location
+                  , Value
+                  , Printf.sprintf
+                      "(%s = %s, Val_unit)"
+                      elt
+                      (store (List.nth args (n - 1))) )
           | ("caml_string_get32" | "caml_bytes_get32"), 2 ->
               Guarded
                 ( c_call "camlc_check_bytes_access" [ value 0; value 1; "4" ]
@@ -719,12 +779,14 @@ let primitive out name (args : parg list) =
               Guarded
                 ( c_call "camlc_check_bytes_access" [ value 0; value 1; "4" ]
                 , Value
-                , c_call "camlc_bytes_store32" [ value 0; value 1; arg Unboxed_int32 2 ] )
+                , c_call "camlc_bytes_store32" [ value 0; value 1; arg Unboxed_int32 2 ]
+                )
           | "caml_bytes_set64", 3 ->
               Guarded
                 ( c_call "camlc_check_bytes_access" [ value 0; value 1; "8" ]
                 , Value
-                , c_call "camlc_bytes_store64" [ value 0; value 1; arg Unboxed_int64 2 ] )
+                , c_call "camlc_bytes_store64" [ value 0; value 1; arg Unboxed_int64 2 ]
+                )
           | "%identity", 1 -> pure (Value, value 0)
           | ("caml_bytes_of_string" | "caml_string_of_bytes"), 1 -> pure (Value, value 0)
           | _ -> (
@@ -776,6 +838,20 @@ let primitive out name (args : parg list) =
                     ( c_call "camlc_check_bytes_access" [ arg 0; arg 1; "2" ]
                     , Value
                     , c_call "camlc_bytes_store16" args )
+              | ( ( "caml_ba_get_1"
+                  | "caml_ba_get_2"
+                  | "caml_ba_get_3"
+                  | "caml_ba_set_1"
+                  | "caml_ba_set_2"
+                  | "caml_ba_set_3"
+                  | "caml_ba_dim_1"
+                  | "caml_ba_dim_2"
+                  | "caml_ba_dim_3" )
+                , _ ) ->
+                  Checked
+                    (c_call
+                       ("camlc" ^ String.sub name ~pos:4 ~len:(String.length name - 4))
+                       args)
               | "caml_check_bound", 2 -> Checked (c_call "camlc_check_bound" args)
               | "caml_check_bound_float", 2 ->
                   Checked (c_call "camlc_check_bound_float" args)
@@ -969,6 +1045,9 @@ let int_primitives =
     ; "caml_string_get16"
     ; "caml_bytes_get16"
     ; "caml_bswap16"
+    ; "caml_ba_dim_1"
+    ; "caml_ba_dim_2"
+    ; "caml_ba_dim_3"
     ; "caml_int_of_string"
     ; "caml_int_of_float"
     ; "caml_string_compare"

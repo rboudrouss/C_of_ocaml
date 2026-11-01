@@ -61,6 +61,7 @@
 #include <caml/callback.h>
 #include <caml/custom.h>
 #include <caml/domain_state.h>
+#include <caml/bigarray.h>
 #pragma clang diagnostic pop
 
 /* Tail calls, with the tail call extension of WebAssembly (-mtail-call):
@@ -460,5 +461,178 @@ static inline value camlc_box_nativeint(intnat i)
   Nativeint_val(v) = i;
   return v;
 }
+
+/* Bigarray accesses ([caml_ba_get_1]...): the kinds of elements which
+   are numbers, in bounds; the other cases (complex numbers, float16,
+   errors) go through the primitives of the runtime */
+value caml_ba_get_1(value vb, value vind1);
+value caml_ba_get_2(value vb, value vind1, value vind2);
+value caml_ba_get_3(value vb, value vind1, value vind2, value vind3);
+value caml_ba_set_1(value vb, value vind1, value newval);
+value caml_ba_set_2(value vb, value vind1, value vind2, value newval);
+value caml_ba_set_3(value vb, value vind1, value vind2, value vind3,
+                    value newval);
+value caml_ba_dim_1(value vb);
+value caml_ba_dim_2(value vb);
+value caml_ba_dim_3(value vb);
+
+/* The offset of an element in a bigarray of [n] dimensions and the given
+   layout, or -1 if out of bounds or if it has another number of
+   dimensions */
+static inline intnat camlc_ba_offset_layout(struct caml_ba_array *b, int n,
+                                            int fortran, value i, value j,
+                                            value k)
+{
+  intnat idx[3] = { Long_val(i), Long_val(j), Long_val(k) };
+  intnat ofs = 0;
+  if (CAMLC_UNLIKELY(b->num_dims != n)) return -1;
+  if (!fortran) {
+    for (int d = 0; d < n; d++) {
+      if (CAMLC_UNLIKELY((uintnat)idx[d] >= (uintnat)b->dim[d])) return -1;
+      ofs = ofs * b->dim[d] + idx[d];
+    }
+  } else {
+    for (int d = n - 1; d >= 0; d--) {
+      if (CAMLC_UNLIKELY((uintnat)(idx[d] - 1) >= (uintnat)b->dim[d]))
+        return -1;
+      ofs = ofs * b->dim[d] + (idx[d] - 1);
+    }
+  }
+  return ofs;
+}
+
+static inline intnat camlc_ba_offset(struct caml_ba_array *b, int n,
+                                     value i, value j, value k)
+{
+  if ((b->flags & CAML_BA_LAYOUT_MASK) == CAML_BA_C_LAYOUT)
+    return camlc_ba_offset_layout(b, n, 0, i, j, k);
+  return camlc_ba_offset_layout(b, n, 1, i, j, k);
+}
+
+/* The element at offset [ofs], or 0 if its kind is not handled here */
+static inline value camlc_ba_load(struct caml_ba_array *b, intnat ofs)
+{
+  switch (b->flags & CAML_BA_KIND_MASK) {
+  case CAML_BA_FLOAT32: return camlc_box_double(((float *)b->data)[ofs]);
+  case CAML_BA_FLOAT64: return camlc_box_double(((double *)b->data)[ofs]);
+  case CAML_BA_SINT8: return Val_int(((int8_t *)b->data)[ofs]);
+  case CAML_BA_UINT8:
+  case CAML_BA_CHAR: return Val_int(((uint8_t *)b->data)[ofs]);
+  case CAML_BA_SINT16: return Val_int(((int16_t *)b->data)[ofs]);
+  case CAML_BA_UINT16: return Val_int(((uint16_t *)b->data)[ofs]);
+  case CAML_BA_INT32: return camlc_box_int32(((int32_t *)b->data)[ofs]);
+  case CAML_BA_INT64: return camlc_box_int64(((int64_t *)b->data)[ofs]);
+  case CAML_BA_CAML_INT: return Val_long(((intnat *)b->data)[ofs]);
+  case CAML_BA_NATIVE_INT:
+    return camlc_box_nativeint(((intnat *)b->data)[ofs]);
+  default: return 0;
+  }
+}
+
+/* Store [v] at offset [ofs]; returns 0 if its kind is not handled here */
+static inline int camlc_ba_store(struct caml_ba_array *b, intnat ofs, value v)
+{
+  switch (b->flags & CAML_BA_KIND_MASK) {
+  case CAML_BA_FLOAT32: ((float *)b->data)[ofs] = Double_val(v); return 1;
+  case CAML_BA_FLOAT64: ((double *)b->data)[ofs] = Double_val(v); return 1;
+  case CAML_BA_SINT8:
+  case CAML_BA_UINT8:
+  case CAML_BA_CHAR: ((uint8_t *)b->data)[ofs] = Long_val(v); return 1;
+  case CAML_BA_SINT16:
+  case CAML_BA_UINT16: ((uint16_t *)b->data)[ofs] = Long_val(v); return 1;
+  case CAML_BA_INT32: ((int32_t *)b->data)[ofs] = Int32_val(v); return 1;
+  case CAML_BA_INT64: ((int64_t *)b->data)[ofs] = Int64_val(v); return 1;
+  case CAML_BA_CAML_INT: ((intnat *)b->data)[ofs] = Long_val(v); return 1;
+  case CAML_BA_NATIVE_INT:
+    ((intnat *)b->data)[ofs] = Nativeint_val(v);
+    return 1;
+  default: return 0;
+  }
+}
+
+static inline value camlc_ba_get(value vb, int n, value i, value j, value k)
+{
+  struct caml_ba_array *b = Caml_ba_array_val(vb);
+  intnat ofs = camlc_ba_offset(b, n, i, j, k);
+  value r;
+  if (CAMLC_LIKELY(ofs >= 0) && CAMLC_LIKELY((r = camlc_ba_load(b, ofs)) != 0))
+    return r;
+  switch (n) {
+  case 1: return camlc_ccall2(caml_ba_get_1, vb, i);
+  case 2: return camlc_ccall3(caml_ba_get_2, vb, i, j);
+  default: return camlc_ccall4(caml_ba_get_3, vb, i, j, k);
+  }
+}
+
+static inline value camlc_ba_set(value vb, int n, value i, value j, value k,
+                                 value v)
+{
+  struct caml_ba_array *b = Caml_ba_array_val(vb);
+  intnat ofs = camlc_ba_offset(b, n, i, j, k);
+  if (CAMLC_LIKELY(ofs >= 0) && CAMLC_LIKELY(camlc_ba_store(b, ofs, v)))
+    return Val_unit;
+  switch (n) {
+  case 1: return camlc_ccall3(caml_ba_set_1, vb, i, v);
+  case 2: return camlc_ccall4(caml_ba_set_2, vb, i, j, v);
+  default: return camlc_ccall5(caml_ba_set_3, vb, i, j, k, v);
+  }
+}
+
+/* Accesses to a bigarray whose kind and layout are known statically: the
+   check returns [Val_unit], or the exception which the primitive of the
+   runtime raises; then [camlc_ba_elt] is the element, of C type [t] */
+static inline value camlc_ba_check_get(value vb, int n, int fortran, value i,
+                                       value j, value k)
+{
+  if (CAMLC_LIKELY(camlc_ba_offset_layout(Caml_ba_array_val(vb), n, fortran,
+                                          i, j, k) >= 0))
+    return Val_unit;
+  switch (n) {
+  case 1: return camlc_ccall2(caml_ba_get_1, vb, i);
+  case 2: return camlc_ccall3(caml_ba_get_2, vb, i, j);
+  default: return camlc_ccall4(caml_ba_get_3, vb, i, j, k);
+  }
+}
+
+/* The primitive raises before reading the new value */
+static inline value camlc_ba_check_set(value vb, int n, int fortran, value i,
+                                       value j, value k)
+{
+  if (CAMLC_LIKELY(camlc_ba_offset_layout(Caml_ba_array_val(vb), n, fortran,
+                                          i, j, k) >= 0))
+    return Val_unit;
+  switch (n) {
+  case 1: return camlc_ccall3(caml_ba_set_1, vb, i, Val_unit);
+  case 2: return camlc_ccall4(caml_ba_set_2, vb, i, j, Val_unit);
+  default: return camlc_ccall5(caml_ba_set_3, vb, i, j, k, Val_unit);
+  }
+}
+
+#define camlc_ba_elt(t, vb, n, fortran, i, j, k)                            \
+  (((t *)Caml_ba_data_val(vb))[camlc_ba_offset_layout(                      \
+    Caml_ba_array_val(vb), n, fortran, i, j, k)])
+
+#define camlc_ba_get_1(b, i) camlc_ba_get(b, 1, i, Val_unit, Val_unit)
+#define camlc_ba_get_2(b, i, j) camlc_ba_get(b, 2, i, j, Val_unit)
+#define camlc_ba_get_3(b, i, j, k) camlc_ba_get(b, 3, i, j, k)
+#define camlc_ba_set_1(b, i, v) camlc_ba_set(b, 1, i, Val_unit, Val_unit, v)
+#define camlc_ba_set_2(b, i, j, v) camlc_ba_set(b, 2, i, j, Val_unit, v)
+#define camlc_ba_set_3(b, i, j, k, v) camlc_ba_set(b, 3, i, j, k, v)
+
+/* [caml_ba_dim_1]...: the size of a dimension which exists */
+static inline value camlc_ba_dim(value vb, int d)
+{
+  struct caml_ba_array *b = Caml_ba_array_val(vb);
+  if (CAMLC_LIKELY(d < b->num_dims)) return Val_long(b->dim[d]);
+  switch (d) {
+  case 0: return camlc_ccall1(caml_ba_dim_1, vb);
+  case 1: return camlc_ccall1(caml_ba_dim_2, vb);
+  default: return camlc_ccall1(caml_ba_dim_3, vb);
+  }
+}
+
+#define camlc_ba_dim_1(b) camlc_ba_dim(b, 0)
+#define camlc_ba_dim_2(b) camlc_ba_dim(b, 1)
+#define camlc_ba_dim_3(b) camlc_ba_dim(b, 2)
 
 #endif

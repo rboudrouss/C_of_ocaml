@@ -551,6 +551,14 @@ let solver st =
   in
   Solver.f () g (propagate st)
 
+(* A bigarray whose elements the C code accesses directly: its kind and
+   layout are known, and its elements are numbers which C handles *)
+let specialized_bigarray (t : typ) =
+  match t with
+  | Bigarray { kind = Float16 | Float32_t | Complex32 | Complex64; _ } -> None
+  | Bigarray b -> Some b
+  | _ -> None
+
 let type_specialized_primitive types global_flow_state name args =
   match name with
   | "caml_greaterthan"
@@ -568,8 +576,18 @@ let type_specialized_primitive types global_flow_state name args =
       | [ Number (Float, _); Number (Float, _) ]
       | [ Number (Float32, _); Number (Float32, _) ] -> true
       | _ -> false)
+  | "caml_ba_get_1"
+  | "caml_ba_get_2"
+  | "caml_ba_get_3"
+  | "caml_ba_set_1"
+  | "caml_ba_set_2"
+  | "caml_ba_set_3" -> (
+      match args with
+      | Pv x :: _ -> Option.is_some (specialized_bigarray (Var.Tbl.get types x))
+      | Pc _ :: _ | [] -> false)
   | _ ->
-      (* The C code calls the bigarray primitives of the runtime, with values *)
+      (* The C code calls the other bigarray primitives of the runtime, with
+         values *)
       ignore global_flow_state;
       false
 
