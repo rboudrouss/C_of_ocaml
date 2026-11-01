@@ -312,6 +312,70 @@ static inline value camlc_bytes_set(value s, value i, value c)
   return Val_unit;
 }
 
+/* The 16, 32 and 64-bit accesses to strings and bytes
+   ([caml_string_get32], [caml_bytes_set64]...): the bound check returns
+   [Val_unit] or the exception, then the access cannot fail, on unboxed
+   integers */
+static inline value camlc_check_bytes_access(value s, value i, intnat width)
+{
+  if (CAMLC_UNLIKELY(Long_val(i) < 0
+                     || Long_val(i) > (intnat)caml_string_length(s) - width))
+    return camlc_raise_bound_error();
+  return Val_unit;
+}
+
+#ifdef ARCH_BIG_ENDIAN
+#define CAMLC_LE16(x) __builtin_bswap16(x)
+#define CAMLC_LE32(x) __builtin_bswap32(x)
+#define CAMLC_LE64(x) __builtin_bswap64(x)
+#else
+#define CAMLC_LE16(x) (x)
+#define CAMLC_LE32(x) (x)
+#define CAMLC_LE64(x) (x)
+#endif
+
+static inline value camlc_bytes_load16(value s, value i)
+{
+  uint16_t x;
+  memcpy(&x, &Byte_u(s, Long_val(i)), sizeof x);
+  return Val_int(CAMLC_LE16(x));
+}
+
+static inline int32_t camlc_bytes_load32(value s, value i)
+{
+  uint32_t x;
+  memcpy(&x, &Byte_u(s, Long_val(i)), sizeof x);
+  return (int32_t)CAMLC_LE32(x);
+}
+
+static inline int64_t camlc_bytes_load64(value s, value i)
+{
+  uint64_t x;
+  memcpy(&x, &Byte_u(s, Long_val(i)), sizeof x);
+  return (int64_t)CAMLC_LE64(x);
+}
+
+static inline value camlc_bytes_store16(value s, value i, value v)
+{
+  uint16_t x = CAMLC_LE16((uint16_t)Long_val(v));
+  memcpy(&Byte_u(s, Long_val(i)), &x, sizeof x);
+  return Val_unit;
+}
+
+static inline value camlc_bytes_store32(value s, value i, int32_t v)
+{
+  uint32_t x = CAMLC_LE32((uint32_t)v);
+  memcpy(&Byte_u(s, Long_val(i)), &x, sizeof x);
+  return Val_unit;
+}
+
+static inline value camlc_bytes_store64(value s, value i, int64_t v)
+{
+  uint64_t x = CAMLC_LE64((uint64_t)v);
+  memcpy(&Byte_u(s, Long_val(i)), &x, sizeof x);
+  return Val_unit;
+}
+
 value camlc_string_concat(value a, value b);
 value camlc_format_int(value fmt, value arg);
 

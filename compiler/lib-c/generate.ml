@@ -355,6 +355,10 @@ type prim =
   | Checked of string
       (** A single call whose arguments are the arguments of the primitive,
           returning a value or an exception result *)
+  | Guarded of string * repr * string
+      (** A check, returning [Val_unit] or an exception result, then a C
+          expression of this representation, which cannot raise nor trigger
+          a GC *)
   | Ccallv  (** A C primitive with more than 5 arguments *)
 
 (* An argument of a primitive: its type, and its C expression in a given
@@ -686,6 +690,26 @@ let primitive out name (args : parg list) =
               pure
                 ( Value
                 , c_call "camlc_store_double_flat" [ value 0; value 1; arg Double 2 ] )
+          | ("caml_string_get32" | "caml_bytes_get32"), 2 ->
+              Guarded
+                ( c_call "camlc_check_bytes_access" [ value 0; value 1; "4" ]
+                , Unboxed_int32
+                , c_call "camlc_bytes_load32" [ value 0; value 1 ] )
+          | ("caml_string_get64" | "caml_bytes_get64"), 2 ->
+              Guarded
+                ( c_call "camlc_check_bytes_access" [ value 0; value 1; "8" ]
+                , Unboxed_int64
+                , c_call "camlc_bytes_load64" [ value 0; value 1 ] )
+          | "caml_bytes_set32", 3 ->
+              Guarded
+                ( c_call "camlc_check_bytes_access" [ value 0; value 1; "4" ]
+                , Value
+                , c_call "camlc_bytes_store32" [ value 0; value 1; arg Unboxed_int32 2 ] )
+          | "caml_bytes_set64", 3 ->
+              Guarded
+                ( c_call "camlc_check_bytes_access" [ value 0; value 1; "8" ]
+                , Value
+                , c_call "camlc_bytes_store64" [ value 0; value 1; arg Unboxed_int64 2 ] )
           | "%identity", 1 -> pure (Value, value 0)
           | ("caml_bytes_of_string" | "caml_string_of_bytes"), 1 -> pure (Value, value 0)
           | _ -> (
@@ -727,6 +751,16 @@ let primitive out name (args : parg list) =
                   Checked (c_call "camlc_string_get" args)
               | ("caml_string_set" | "caml_bytes_set"), 3 ->
                   Checked (c_call "camlc_bytes_set" args)
+              | ("caml_string_get16" | "caml_bytes_get16"), 2 ->
+                  Guarded
+                    ( c_call "camlc_check_bytes_access" (args @ [ "2" ])
+                    , Value
+                    , c_call "camlc_bytes_load16" args )
+              | "caml_bytes_set16", 3 ->
+                  Guarded
+                    ( c_call "camlc_check_bytes_access" [ arg 0; arg 1; "2" ]
+                    , Value
+                    , c_call "camlc_bytes_store16" args )
               | "caml_check_bound", 2 -> Checked (c_call "camlc_check_bound" args)
               | "caml_check_bound_float", 2 ->
                   Checked (c_call "camlc_check_bound_float" args)
@@ -879,7 +913,16 @@ let register_typing_primitives () =
     "caml_int64_bits_of_float"
     ~unbox:true
     (Typing.Number (Int64, Unboxed));
-  Typing.register_prim "caml_int64_float_of_bits" ~unbox:true float
+  Typing.register_prim "caml_int64_float_of_bits" ~unbox:true float;
+  List.iter
+    [ "caml_string_get32", Typing.Int32
+    ; "caml_bytes_get32", Int32
+    ; "caml_string_get64", Int64
+    ; "caml_bytes_get64", Int64
+    ]
+    ~f:(fun (name, n) -> Typing.register_prim name ~unbox:false (Number (n, Unboxed)));
+  List.iter [ "caml_bytes_set32"; "caml_bytes_set64" ] ~f:(fun name ->
+      Typing.register_prim name ~unbox:true (Typing.Int Normalized))
 
 (* Primitives whose result is an integer *)
 let int_primitives =
@@ -907,6 +950,8 @@ let int_primitives =
     ; "caml_bytes_unsafe_get"
     ; "caml_string_get"
     ; "caml_bytes_get"
+    ; "caml_string_get16"
+    ; "caml_bytes_get16"
     ; "caml_int_of_string"
     ; "caml_int_of_float"
     ; "caml_string_compare"
@@ -1695,7 +1740,14 @@ let translate_instr ctx traps i =
                 "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
                 (raise_stmt ~bt:(`Raise false) ctx traps "r");
               define ctx x Value "r"
-          | Checked e -> checked e)
+          | Checked e -> checked e
+          | Guarded (check, r, e) ->
+              line ctx "r = %s;" check;
+              line
+                ctx
+                "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
+                (raise_stmt ~bt:(`Raise false) ctx traps "r");
+              define ctx x r e)
       | Prim (p, args) -> (
           let args = List.map args ~f:(fun a -> (prim_arg ctx a).get Value) in
           let plain e = define ctx x Value e in
@@ -1906,6 +1958,11 @@ let gc_point ctx i =
           else if StringSet.mem name gc_on_raise_primitives
           then `Raise
           else `Call
+      | Guarded (_, r, _) ->
+          (* The result is boxed after the check *)
+          if (not (repr_equal r Value)) && repr_equal (var_repr ctx x) Value
+          then `Call
+          else `Raise
       | Ccallv -> `Call)
   | Let (_, Prim ((Vectlength Generic | Array_get Float), _)) -> `No
   | Let (_, (Field _ | Constant _ | Special _ | Prim _)) -> `No
@@ -2227,7 +2284,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
             | Let (_, Prim (Extern (name, _), args)) ->
                 (match primitive out name (List.map args ~f:typed) with
                 | Plain _ -> ()
-                | Checked _ | Ccallv -> if depth = 0 then raises := true);
+                | Checked _ | Guarded _ | Ccallv -> if depth = 0 then raises := true);
                 gc_point depth i
             | Let _ | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ ->
                 gc_point depth i);
