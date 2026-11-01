@@ -270,6 +270,9 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
   in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
+  (* Little of what each phase allocates is still live at its end: without a
+     compaction, the next phase would grow the heap further *)
+  Gc.compact ();
   memory ();
   Config.set_effects_backend
     (match effects with
@@ -287,6 +290,7 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
   let optimized, global_flow_data =
     Driver.optimize_for_wasm ~profile ~shapes:false one.code
   in
+  Gc.compact ();
   memory ();
   let t = Timer.make () in
   let p, closures = Closure_conversion.f optimized.program in
