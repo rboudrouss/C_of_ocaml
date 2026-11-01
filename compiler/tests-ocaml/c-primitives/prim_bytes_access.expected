@@ -1,0 +1,192 @@
+u16le -2: Invalid_argument index out of bounds
+i16be -2: Invalid_argument index out of bounds
+s16ne -2: Invalid_argument index out of bounds
+i32le -2: Invalid_argument index out of bounds
+s32be -2: Invalid_argument index out of bounds
+i64le -2: Invalid_argument index out of bounds
+s64be -2: Invalid_argument index out of bounds
+u16le -1: Invalid_argument index out of bounds
+i16be -1: Invalid_argument index out of bounds
+s16ne -1: Invalid_argument index out of bounds
+i32le -1: Invalid_argument index out of bounds
+s32be -1: Invalid_argument index out of bounds
+i64le -1: Invalid_argument index out of bounds
+s64be -1: Invalid_argument index out of bounds
+u16le 0: 60872
+i16be 0: -14099
+s16ne 0: -4664
+i32le 0: 923987400
+s32be 0: -923987401
+i64le 0: -3772185404815249976
+s64be 0: -3968495667659036981
+u16le 1: 4845
+i16be 1: -4846
+s16ne 1: 4845
+i32le 1: 1547113197
+s32be 1: -317573284
+i64le 1: -1095599009806478611
+s64be 1: -1363966866688128016
+u16le 2: 14098
+i16be 2: 4663
+s16ne 2: 14098
+i32le 2: -2124663022
+s32be 2: 305618049
+i64le 2: 1580987385202358034
+s64be 2: 1312619528320708629
+u16le 3: 23607
+i16be 3: 14172
+s16ne 3: 23607
+i32le 3: -1501471689
+s32be 3: 928809382
+i64le 3: 4185516186173266999
+s64be 3: 3989205923329479994
+u16le 4: 33116
+i16be 4: 23681
+s16ne 4: -32420
+i32le 4: -878280356
+s32be 4: 1552000715
+i64le 4: 6861821106205393244
+s64be 4: 6665792318321539679
+u16le 5: 42625
+i16be 5: -32346
+s16ne 5: -22911
+i32le 5: -255089023
+s32be 5: -2119775248
+i64le 5: -8908337672006949247
+s64be 5: -9104365364674142332
+u16le 6: 52134
+i16be 6: -22837
+s16ne 6: -13402
+i32le 6: 368102310
+s32be 6: -1496584171
+i64le 6: -6231751281293079642
+s64be 6: -6427780069176933207
+u16le 7: 61643
+i16be 7: -13328
+s16ne 7: -3893
+i32le 7: 974516427
+s32be 7: -873458374
+i64le 7: -3555164886301019957
+s64be 7: -3751475149144806962
+u16le 8: 5616
+i16be 8: -4075
+s16ne 8: 5616
+i32le 8: 1597642224
+s32be 8: -267044257
+i64le 8: -878578491292248592
+s64be 8: -1146946348173897997
+u16le 9: 14869
+i16be 9: 5434
+s16ne 9: 14869
+i32le 9: -2074133995
+s32be 9: 356147076
+i64le 9: Invalid_argument index out of bounds
+s64be 9: Invalid_argument index out of bounds
+u16le 10: 24378
+i16be 10: 14943
+s16ne 10: 24378
+i32le 10: -1450942662
+s32be 10: 979338409
+i64le 10: Invalid_argument index out of bounds
+s64be 10: Invalid_argument index out of bounds
+u16le 11: 33887
+i16be 11: 24452
+s16ne 11: -31649
+i32le 11: -827751329
+s32be 11: 1602529742
+i64le 11: Invalid_argument index out of bounds
+s64be 11: Invalid_argument index out of bounds
+u16le 12: 43396
+i16be 12: -31575
+s16ne 12: -22140
+i32le 12: -204559996
+s32be 12: -2069246221
+i64le 12: Invalid_argument index out of bounds
+s64be 12: Invalid_argument index out of bounds
+u16le 13: 52905
+i16be 13: -22066
+s16ne 13: -12631
+i32le 13: Invalid_argument index out of bounds
+s32be 13: Invalid_argument index out of bounds
+i64le 13: Invalid_argument index out of bounds
+s64be 13: Invalid_argument index out of bounds
+u16le 14: 62414
+i16be 14: -12557
+s16ne 14: -3122
+i32le 14: Invalid_argument index out of bounds
+s32be 14: Invalid_argument index out of bounds
+i64le 14: Invalid_argument index out of bounds
+s64be 14: Invalid_argument index out of bounds
+u16le 15: Invalid_argument index out of bounds
+i16be 15: Invalid_argument index out of bounds
+s16ne 15: Invalid_argument index out of bounds
+i32le 15: Invalid_argument index out of bounds
+s32be 15: Invalid_argument index out of bounds
+i64le 15: Invalid_argument index out of bounds
+s64be 15: Invalid_argument index out of bounds
+u16le 16: Invalid_argument index out of bounds
+i16be 16: Invalid_argument index out of bounds
+s16ne 16: Invalid_argument index out of bounds
+i32le 16: Invalid_argument index out of bounds
+s32be 16: Invalid_argument index out of bounds
+i64le 16: Invalid_argument index out of bounds
+s64be 16: Invalid_argument index out of bounds
+u16le 17: Invalid_argument index out of bounds
+i16be 17: Invalid_argument index out of bounds
+s16ne 17: Invalid_argument index out of bounds
+i32le 17: Invalid_argument index out of bounds
+s32be 17: Invalid_argument index out of bounds
+i64le 17: Invalid_argument index out of bounds
+s64be 17: Invalid_argument index out of bounds
+set16 -1: Invalid_argument index out of bounds
+set32 -1: Invalid_argument index out of bounds
+set64 -1: Invalid_argument index out of bounds
+set16 0: \254\255\000\000\000\000\000\000\000\000\000\000
+set32 0: \0184Vx\000\000\000\000\000\000\000\000
+set64 0: \255\255\255\255\255\255\255\255\000\000\000\000
+set16 1: \255\254\255\255\255\255\255\255\000\000\000\000
+set32 1: \255\0184Vy\255\255\255\000\000\000\000
+set64 1: \255\254\255\255\255\255\255\255\255\000\000\000
+set16 2: \255\254\254\255\255\255\255\255\255\000\000\000
+set32 2: \255\254\0184Vz\255\255\255\000\000\000
+set64 2: \255\254\253\255\255\255\255\255\255\255\000\000
+set16 3: \255\254\253\254\255\255\255\255\255\255\000\000
+set32 3: \255\254\253\0184V{\255\255\255\000\000
+set64 3: \255\254\253\252\255\255\255\255\255\255\255\000
+set16 4: \255\254\253\252\254\255\255\255\255\255\255\000
+set32 4: \255\254\253\252\0184V|\255\255\255\000
+set64 4: \255\254\253\252\251\255\255\255\255\255\255\255
+set16 5: \255\254\253\252\251\254\255\255\255\255\255\255
+set32 5: \255\254\253\252\251\0184V}\255\255\255
+set64 5: Invalid_argument index out of bounds
+set16 6: \255\254\253\252\251\018\254\255}\255\255\255
+set32 6: \255\254\253\252\251\018\0184V~\255\255
+set64 6: Invalid_argument index out of bounds
+set16 7: \255\254\253\252\251\018\018\254\255~\255\255
+set32 7: \255\254\253\252\251\018\018\0184V\127\255
+set64 7: Invalid_argument index out of bounds
+set16 8: \255\254\253\252\251\018\018\018\254\255\127\255
+set32 8: \255\254\253\252\251\018\018\018\0184V\128
+set64 8: Invalid_argument index out of bounds
+set16 9: \255\254\253\252\251\018\018\018\018\254\255\128
+set32 9: Invalid_argument index out of bounds
+set64 9: Invalid_argument index out of bounds
+set16 10: \255\254\253\252\251\018\018\018\018\254\254\255
+set32 10: Invalid_argument index out of bounds
+set64 10: Invalid_argument index out of bounds
+set16 11: Invalid_argument index out of bounds
+set32 11: Invalid_argument index out of bounds
+set64 11: Invalid_argument index out of bounds
+set16 12: Invalid_argument index out of bounds
+set32 12: Invalid_argument index out of bounds
+set64 12: Invalid_argument index out of bounds
+-1744043962 8969907302263863917 22
+-937081133510541849
+-1660985136050118083
+4461082607163836258
+7079070319651171463
+-8691316260153142868
+-6014730759289241903
+-3338144367773158658
+-85097220474541838
+stopped at 9
