@@ -380,7 +380,6 @@ let noraise_primitives =
     ; "caml_blit_string"
     ; "caml_blit_bytes"
     ; "caml_fill_bytes"
-    ; "caml_create_bytes"
     ; "caml_obj_dup"
     ; "caml_array_unsafe_set"
     ; "caml_hash"
@@ -733,6 +732,7 @@ let primitive out name (args : parg list) =
                        (arg 2))
               | "caml_string_concat", 2 -> plain (c_call "camlc_string_concat" args)
               | "caml_format_int", 2 -> Checked (c_call "camlc_format_int" args)
+              | "caml_create_bytes", 1 -> Checked (c_call "camlc_create_bytes" args)
               | ("caml_register_global" | "caml_register_global_predef"), _ ->
                   plain "Val_unit"
               | "caml_register_global_by_index", 2 ->

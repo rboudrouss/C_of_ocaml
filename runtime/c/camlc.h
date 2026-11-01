@@ -36,7 +36,8 @@
      [Make_exception_result(exn)] to raise [exn], and each call site
      checks the result. C primitives raise with [longjmp]
      ([caml_raise]); they are called through wrappers which turn the
-     [longjmp] into a returned exception. */
+     [longjmp] into a returned exception, unless they cannot raise or have
+     a version below which returns its exceptions. */
 
 #ifndef CAMLC_H
 #define CAMLC_H
@@ -171,6 +172,9 @@ value camlc_ccallv(camlc_primv f, value *argv, int argc);
 value camlc_raise_zero_divide(void);
 value camlc_raise_bound_error(void);
 value camlc_raise_unhandled_effect(void);
+
+/* Primitives returning their exceptions */
+value camlc_create_bytes(value len);
 
 /* Integers */
 

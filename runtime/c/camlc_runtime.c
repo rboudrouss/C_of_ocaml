@@ -261,6 +261,31 @@ value camlc_raise_unhandled_effect(void)
   return camlc_ccall0(camlc_unhandled_effect);
 }
 
+/* The exception [exn] of the global data with a string argument, as
+   raised by [caml_raise_with_string] */
+static value camlc_exception_with_string(int exn, const char *msg)
+{
+  CAMLparam0();
+  CAMLlocal1(s);
+  value e;
+  s = caml_copy_string(msg);
+  e = caml_alloc_small(2, 0);
+  Field(e, 0) = Field(caml_global_data, exn);
+  Field(e, 1) = s;
+  CAMLreturnT(value, Make_exception_result(e));
+}
+
+/****************************************************************/
+/* Primitives returning their exceptions (called without wrapper), or
+   with a fast path which cannot raise */
+
+value camlc_create_bytes(value len)
+{
+  if (CAMLC_UNLIKELY((mlsize_t)Long_val(len) > Bsize_wsize(Max_wosize) - 1))
+    return camlc_exception_with_string(INVALID_EXN, "Bytes.create");
+  return caml_alloc_string(Long_val(len));
+}
+
 /****************************************************************/
 /* Strings */
 
