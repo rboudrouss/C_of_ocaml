@@ -297,16 +297,23 @@ static inline value camlc_array_unsafe_get(value a, value i)
   return Field(a, Long_val(i));
 }
 
+/* [caml_string_length], inline */
+static inline mlsize_t camlc_string_length(value s)
+{
+  mlsize_t last = Bosize_val(s) - 1;
+  return last - Byte(s, last);
+}
+
 static inline value camlc_string_get(value s, value i)
 {
-  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= caml_string_length(s)))
+  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= camlc_string_length(s)))
     return camlc_raise_bound_error();
   return Val_int(Byte_u(s, Long_val(i)));
 }
 
 static inline value camlc_bytes_set(value s, value i, value c)
 {
-  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= caml_string_length(s)))
+  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= camlc_string_length(s)))
     return camlc_raise_bound_error();
   Byte_u(s, Long_val(i)) = (unsigned char)Long_val(c);
   return Val_unit;
@@ -319,7 +326,7 @@ static inline value camlc_bytes_set(value s, value i, value c)
 static inline value camlc_check_bytes_access(value s, value i, intnat width)
 {
   if (CAMLC_UNLIKELY(Long_val(i) < 0
-                     || Long_val(i) > (intnat)caml_string_length(s) - width))
+                     || Long_val(i) > (intnat)camlc_string_length(s) - width))
     return camlc_raise_bound_error();
   return Val_unit;
 }

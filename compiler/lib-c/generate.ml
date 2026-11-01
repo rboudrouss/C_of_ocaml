@@ -666,12 +666,27 @@ let primitive out name (args : parg list) =
           | "of_" -> pure (r, Printf.sprintf "(%s)%s" (c_type r) (arg other 0))
           | "to_" -> pure (other, Printf.sprintf "(%s)%s" (c_type other) (arg r 0))
           | _ -> assert false)
+      | None, Some (r, "bswap") when n = 1 ->
+          pure
+            ( r
+            , Printf.sprintf
+                "(%s)__builtin_bswap%d((%s)%s)"
+                (c_type r)
+                (bits r)
+                (unsigned_type r)
+                (arg r 0) )
       | None, Some (Unboxed_int64, "bits_of_float") when n = 1 ->
           pure (Unboxed_int64, Printf.sprintf "camlc_bits_of_double(%s)" (arg Double 0))
       | None, Some (Unboxed_int64, "float_of_bits") when n = 1 ->
           pure (Double, Printf.sprintf "camlc_double_of_bits(%s)" (arg Unboxed_int64 0))
       | _ -> (
           match name, n with
+          | "caml_bswap16", 1 ->
+              pure
+                ( Value
+                , Printf.sprintf
+                    "Val_int(__builtin_bswap16((uint16_t)Long_val(%s)))"
+                    (value 0) )
           | "caml_neg_float", 1 -> pure (Double, Printf.sprintf "(-%s)" (arg Double 0))
           | "caml_float_of_int", 1 ->
               pure (Double, Printf.sprintf "(double)Long_val(%s)" (value 0))
@@ -735,7 +750,7 @@ let primitive out name (args : parg list) =
               | "%direct_obj_tag", 1 ->
                   plain (Printf.sprintf "Val_long(Tag_val(%s))" (arg 0))
               | ("caml_ml_string_length" | "caml_ml_bytes_length"), 1 ->
-                  plain (Printf.sprintf "Val_long(caml_string_length(%s))" (arg 0))
+                  plain (Printf.sprintf "Val_long(camlc_string_length(%s))" (arg 0))
               | ("caml_string_unsafe_get" | "caml_bytes_unsafe_get"), 2 ->
                   plain
                     (Printf.sprintf "Val_int(Byte_u(%s, Long_val(%s)))" (arg 0) (arg 1))
@@ -889,6 +904,7 @@ let register_typing_primitives () =
         ; "shift_right"
         ; "shift_right_unsigned"
         ; "of_float"
+        ; "bswap"
         ];
       Typing.register_prim (Printf.sprintf "caml_%s_of_int" t) ~unbox:false typ;
       Typing.register_prim (Printf.sprintf "caml_%s_to_int" t) ~unbox:true int;
@@ -952,6 +968,7 @@ let int_primitives =
     ; "caml_bytes_get"
     ; "caml_string_get16"
     ; "caml_bytes_get16"
+    ; "caml_bswap16"
     ; "caml_int_of_string"
     ; "caml_int_of_float"
     ; "caml_string_compare"
