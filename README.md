@@ -134,7 +134,11 @@ known not to raise. A few frequent primitives avoid the wrapper:
 `camlc_runtime.c` has versions of them that return their exceptions, or a fast
 path that cannot raise before falling back to the wrapper. This covers
 polymorphic comparison (on integers, strings, floats and small blocks of
-those), `int_of_string` and `Bytes.create`. One `setjmp` per `try` instead of
+those), `int_of_string` and `Bytes.create`. Other primitives are inlined in
+the generated code (`camlc.h`): the 16, 32 and 64-bit accesses to strings and
+bytes (`Bytes.get_int32_le`...), byte swaps, string lengths, and bigarray
+accesses, directly on the elements when the type analysis knows the kind and
+layout of the bigarray. One `setjmp` per `try` instead of
 one per primitive call was tried: each `try` then costs about as much as a
 wrapper, and a loop around `try ... with Not_found` became 70% slower.
 
@@ -142,7 +146,11 @@ wrapper, and a loop around `try ... with Not_found` became 70% slower.
 (`compiler/lib-c/typing.ml`) finds floats and boxed integers that never need
 to be boxed. They become C `double`s and integers, and their arithmetic is
 inlined. Parameters of functions that are only called directly can be unboxed
-as well.
+as well. A number used as a value is boxed once, where it is defined, unless
+it is only passed to calls outside of loops, and either defined in a loop (the
+accumulator of a loop printed at its end) or passed to a single call: it is
+then boxed at these calls.
+Boxed integers are allocated inline, like floats.
 
 **Effect handlers** (OCaml 5) use the double translation of js_of_ocaml
 (`compiler/lib/effects.ml`). Functions that may perform an effect get a second,
