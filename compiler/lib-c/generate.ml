@@ -97,9 +97,9 @@ let box r e =
   match r with
   | Value -> e
   | Double -> Printf.sprintf "camlc_box_double(%s)" e
-  | Unboxed_int64 -> Printf.sprintf "caml_copy_int64(%s)" e
-  | Unboxed_int32 -> Printf.sprintf "caml_copy_int32(%s)" e
-  | Unboxed_nativeint -> Printf.sprintf "caml_copy_nativeint(%s)" e
+  | Unboxed_int64 -> Printf.sprintf "camlc_box_int64(%s)" e
+  | Unboxed_int32 -> Printf.sprintf "camlc_box_int32(%s)" e
+  | Unboxed_nativeint -> Printf.sprintf "camlc_box_nativeint(%s)" e
 
 let unbox r e =
   match r with

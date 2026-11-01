@@ -361,4 +361,33 @@ static inline value camlc_box_double(double d)
   return v;
 }
 
+/* Boxed integers, as [caml_copy_int32]... allocate them: custom blocks
+   without finalizer nor out-of-heap memory, which the minor GC only has
+   to copy */
+#define CAMLC_CUSTOM_WOSIZE(t) (1 + (sizeof(t) + sizeof(value) - 1) / sizeof(value))
+
+static inline value camlc_box_int32(int32_t i)
+{
+  value v = camlc_alloc_small(CAMLC_CUSTOM_WOSIZE(int32_t), Custom_tag);
+  Custom_ops_val(v) = &caml_int32_ops;
+  Int32_val(v) = i;
+  return v;
+}
+
+static inline value camlc_box_int64(int64_t i)
+{
+  value v = camlc_alloc_small(CAMLC_CUSTOM_WOSIZE(int64_t), Custom_tag);
+  Custom_ops_val(v) = &caml_int64_ops;
+  Int64_val(v) = i;
+  return v;
+}
+
+static inline value camlc_box_nativeint(intnat i)
+{
+  value v = camlc_alloc_small(CAMLC_CUSTOM_WOSIZE(intnat), Custom_tag);
+  Custom_ops_val(v) = &caml_nativeint_ops;
+  Nativeint_val(v) = i;
+  return v;
+}
+
 #endif
