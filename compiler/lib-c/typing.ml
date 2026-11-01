@@ -592,7 +592,55 @@ let type_specialized_primitive types global_flow_state name args =
       false
 
 let box_numbers ~boxed p st types =
-  (* We box numbers eagerly if the boxed value is ever used. *)
+  (* We box numbers eagerly if the boxed value is ever used, except the
+     numbers which [box_at_calls] allows to box at each call they are passed
+     to (the C code boxes the arguments given to parameters holding
+     values). *)
+  let def_block = Var.Hashtbl.create 1024 in
+  let calls = Var.Hashtbl.create 1024 in
+  let function_parameters = Var.ISet.empty () in
+  Code.fold_closures
+    p
+    (fun _ params _ _ () -> List.iter params ~f:(Var.ISet.add function_parameters))
+    ();
+  Addr.Map.iter
+    (fun pc b ->
+      List.iter b.params ~f:(fun x -> Var.Hashtbl.replace def_block x pc);
+      List.iter b.body ~f:(fun i ->
+          match i with
+          | Let (x, e) -> (
+              Var.Hashtbl.replace def_block x pc;
+              match e with
+              | Apply { args; _ } ->
+                  List.iter args ~f:(fun y ->
+                      Var.Hashtbl.replace
+                        calls
+                        y
+                        (pc :: (Var.Hashtbl.find_opt calls y |> Option.value ~default:[])))
+              | _ -> ())
+          | Assign _ | Set_field _ | Offset_ref _ | Array_set _ | Event _ -> ()))
+    p.blocks;
+  let in_loop =
+    Code.fold_closures
+      p
+      (fun _ _ (pc, _) _ acc ->
+        Addr.Map.fold Addr.Map.add (Freevars.find_loops_in_closure p pc) acc)
+      Addr.Map.empty
+  in
+  (* Boxing [y] at each call it is passed to rather than at its definition
+     does not allocate more often: the calls are outside of loops, and
+     either the definition is in a loop or there is a single call *)
+  let box_at_calls y =
+    match Var.Hashtbl.find_opt def_block y, Var.Hashtbl.find_opt calls y with
+    | Some def, Some pcs ->
+        List.for_all pcs ~f:(fun pc -> not (Addr.Map.mem pc in_loop))
+        && (Addr.Map.mem def in_loop
+           ||
+           match pcs with
+           | [ _ ] -> true
+           | _ -> false)
+    | _ -> false
+  in
   let should_box = Var.ISet.empty () in
   let rec box y =
     if not (Var.ISet.mem should_box y)
@@ -614,7 +662,11 @@ let box_numbers ~boxed p st types =
                     let s = Var.Map.find g st.global_flow_info.info_return_vals in
                     Var.Set.iter box s)
           | Expr _ -> ()
-          | Phi { known; _ } -> Var.Set.iter box known)
+          | Phi { known; _ } ->
+              (* The values given to function parameters come from calls *)
+              let param = Var.ISet.mem function_parameters y in
+              Var.Set.iter (fun y' -> if not (param && box_at_calls y') then box y') known
+          )
       | Number (_, Boxed) | Int _ | Tuple _ | Bigarray _ | Null | Bot -> ())
   in
   List.iter ~f:box boxed;
@@ -626,7 +678,9 @@ let box_numbers ~boxed p st types =
       | Phi { known; _ } -> (
           match Var.Tbl.get types x with
           | Number (_, Unboxed) -> ()
-          | _ -> Var.Set.iter box known)
+          | _ ->
+              let param = Var.ISet.mem function_parameters x in
+              Var.Set.iter (fun y -> if not (param && box_at_calls y) then box y) known)
       | Expr _ -> ())
     st.global_flow_state.vars;
   Code.fold_closures
@@ -648,7 +702,7 @@ let box_numbers ~boxed p st types =
                         with
                         | None -> true
                         | Some (g, _, _) -> not (can_unbox_parameters st.fun_info g)
-                      then List.iter ~f:box args
+                      then List.iter args ~f:(fun y -> if not (box_at_calls y) then box y)
                   | Block (tag, lst, _, _, _) -> if tag <> 254 then Array.iter ~f:box lst
                   | Prim (Extern (s, _), args) ->
                       if
