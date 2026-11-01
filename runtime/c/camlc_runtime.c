@@ -286,6 +286,126 @@ value camlc_create_bytes(value len)
   return caml_alloc_string(Long_val(len));
 }
 
+/* Polymorphic comparisons, as [compare_val] of the OCaml runtime for the
+   values it compares without raising nor running any OCaml code:
+   integers, strings, floats, and the structured blocks made of them, up
+   to a bounded size. On any other value, it gives up and the comparison
+   is done again by the C primitive, through its wrapper. */
+
+#define CAMLC_UNORDERED ((intnat)1 << (8 * sizeof(value) - 1))
+#define CAMLC_COMPARE_STACK_SIZE 8
+#define CAMLC_COMPARE_BUDGET 1024
+
+/* Compare [v1] and [v2] into [*res] as [compare_val], or return 0 */
+static int camlc_compare_val(value v1, value v2, int total, intnat *res)
+{
+  struct { value v1, v2; mlsize_t offset, size; }
+    stack[CAMLC_COMPARE_STACK_SIZE], *sp = stack;
+  int budget = CAMLC_COMPARE_BUDGET;
+  while (--budget > 0) {
+    if (v1 == v2 && total) goto next_item;
+    if (Is_long(v1) && Is_long(v2)) {
+      if (v1 == v2) goto next_item;
+      *res = Long_val(v1) - Long_val(v2);
+      return 1;
+    }
+#if OCAML_VERSION_MAJOR < 5
+    /* Naked pointers */
+    if ((Is_block(v1) && !Is_in_value_area(v1))
+        || (Is_block(v2) && !Is_in_value_area(v2)))
+      return 0;
+#endif
+    /* An integer is less than a block, unless the block is forwarded or
+       custom */
+    if (Is_long(v1) || Is_long(v2)) {
+      tag_t t = Tag_val(Is_long(v1) ? v2 : v1);
+      if (t == Forward_tag || t == Custom_tag) return 0;
+      *res = Is_long(v1) ? -1 : 1;
+      return 1;
+    }
+    tag_t t = Tag_val(v1), t2 = Tag_val(v2);
+    if (t != t2) {
+      if (t == Forward_tag || t2 == Forward_tag || t == Infix_tag
+          || t2 == Infix_tag)
+        return 0;
+      *res = (intnat)t - (intnat)t2;
+      return 1;
+    }
+    if (t == String_tag) {
+      mlsize_t len1, len2;
+      int c;
+      if (v1 == v2) goto next_item;
+      len1 = caml_string_length(v1);
+      len2 = caml_string_length(v2);
+      c = memcmp(String_val(v1), String_val(v2), len1 <= len2 ? len1 : len2);
+      if (c != 0 || len1 != len2) {
+        *res = c < 0 ? -1 : c > 0 ? 1 : (intnat)len1 - (intnat)len2;
+        return 1;
+      }
+    } else if (t == Double_tag) {
+      double d1 = Double_val(v1), d2 = Double_val(v2);
+      if (d1 != d2) {
+        if (d1 < d2) *res = -1;
+        else if (d1 > d2) *res = 1;
+        else if (!total) *res = CAMLC_UNORDERED;
+        /* NaN = NaN and NaN < f for the total order */
+        else if (d1 == d1) *res = 1;
+        else if (d2 == d2) *res = -1;
+        else goto next_item;
+        return 1;
+      }
+    } else if (t < Lazy_tag - 2) {
+      /* Below the tags of lazy values, continuations and closures */
+      mlsize_t sz = Wosize_val(v1);
+      if (sz != Wosize_val(v2)) {
+        *res = (intnat)sz - (intnat)Wosize_val(v2);
+        return 1;
+      }
+      if (sz > 0) {
+        if (sz > 1) {
+          if (sp == stack + CAMLC_COMPARE_STACK_SIZE) return 0;
+          sp->v1 = v1;
+          sp->v2 = v2;
+          sp->offset = 1;
+          sp->size = sz;
+          sp++;
+        }
+        v1 = Field(v1, 0);
+        v2 = Field(v2, 0);
+        continue;
+      }
+    } else return 0;
+  next_item:
+    if (sp == stack) {
+      *res = 0;
+      return 1;
+    }
+    v1 = Field(sp[-1].v1, sp[-1].offset);
+    v2 = Field(sp[-1].v2, sp[-1].offset);
+    if (++sp[-1].offset == sp[-1].size) sp--;
+  }
+  return 0;
+}
+
+#define CAMLC_COMPARISON(name, total, result)                           \
+  extern value caml_##name(value, value);                               \
+  value camlc_##name(value a, value b)                                  \
+  {                                                                     \
+    intnat res;                                                         \
+    if (Is_long(a) && Is_long(b)) res = Long_val(a) - Long_val(b);      \
+    else if (!camlc_compare_val(a, b, total, &res))                     \
+      return camlc_ccall2(caml_##name, a, b);                           \
+    return Val_int(result);                                             \
+  }
+
+CAMLC_COMPARISON(compare, 1, (res > 0) - (res < 0))
+CAMLC_COMPARISON(equal, 0, res == 0)
+CAMLC_COMPARISON(notequal, 0, res != 0)
+CAMLC_COMPARISON(lessthan, 0, res < 0 && res != CAMLC_UNORDERED)
+CAMLC_COMPARISON(lessequal, 0, res <= 0 && res != CAMLC_UNORDERED)
+CAMLC_COMPARISON(greaterthan, 0, res > 0)
+CAMLC_COMPARISON(greaterequal, 0, res >= 0)
+
 /****************************************************************/
 /* Strings */
 

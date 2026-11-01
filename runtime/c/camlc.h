@@ -175,6 +175,13 @@ value camlc_raise_unhandled_effect(void);
 
 /* Primitives returning their exceptions */
 value camlc_create_bytes(value len);
+value camlc_compare(value a, value b);
+value camlc_equal(value a, value b);
+value camlc_notequal(value a, value b);
+value camlc_lessthan(value a, value b);
+value camlc_lessequal(value a, value b);
+value camlc_greaterthan(value a, value b);
+value camlc_greaterequal(value a, value b);
 
 /* Integers */
 
