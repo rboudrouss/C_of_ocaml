@@ -234,6 +234,9 @@ end = struct
     let read_paths ic : string list = List.map (input_value ic) ~f:rewrite_path in
     fun debug ~crcs ~includes ~orig ic ->
       let evl : debug_event list = input_value ic in
+      (* Only the modules of the environments are used (see [name_rec]) *)
+      let slim = Ocaml_compiler.slim_summary () in
+      let evl = List.map evl ~f:(fun ev -> { ev with ev_typenv = slim ev.ev_typenv }) in
       let paths = read_paths ic @ includes in
       List.iter evl ~f:(read_event ~paths ~crcs ~orig debug)
 

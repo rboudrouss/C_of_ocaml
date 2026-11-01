@@ -98,6 +98,76 @@ let is_module_in_summary ident summary =
   let _deep, b = is_module_in_summary 0 ident summary in
   b
 
+(* One step of [slim_summary]: the parent of a node, and how to rebuild it
+   above the reduced parent, if [is_module_in_summary] reads it *)
+let slim_step (summary : Env.summary) =
+  match summary with
+  | Env.Env_empty -> assert false
+  | ((Env.Env_not_aliasable (summary, ident)) [@if ocaml_version >= (5, 5, 0)]) ->
+      summary, Some (fun s -> Env.Env_persistent (s, ident))
+  | ((Env.Env_module (summary, ident, _, _)) [@if not oxcaml])
+  | ((Env.Env_module (summary, ident, _, _, _, _)) [@if oxcaml])
+  | ((Env.Env_functor_arg (summary, ident)) [@if ocaml_version < (5, 5, 0)])
+  | Env.Env_persistent (summary, ident) ->
+      summary, Some (fun s -> Env.Env_persistent (s, ident))
+  | Env.Env_modtype (summary, ident, decl) ->
+      summary, Some (fun s -> Env.Env_modtype (s, ident, { decl with mtd_type = None }))
+  | Env.Env_extension (summary, ident, ext) ->
+      summary, Some (fun s -> Env.Env_extension (s, ident, ext))
+  | ((Env.Env_jkind (summary, ident, jkind)) [@if oxcaml]) ->
+      summary, Some (fun s -> Env.Env_jkind (s, ident, jkind))
+  | Env.Env_type (summary, _, _)
+  | Env.Env_class (summary, _, _)
+  | Env.Env_cltype (summary, _, _)
+  | ((Env.Env_value (summary, _, _)) [@if not oxcaml])
+  | ((Env.Env_value (summary, _, _, _)) [@if oxcaml])
+  | Env.Env_open (summary, _)
+  | Env.Env_constraints (summary, _)
+  | Env.Env_copy_types summary
+  | Env.Env_value_unbound (summary, _, _)
+  | Env.Env_module_unbound (summary, _, _) -> summary, None
+
+(* [slim_summary ()] reduces summaries to what [is_module_in_summary] reads
+   (the modules, and the other names which may hide a module), which gives
+   the same results on them. Its results share their tails, as the
+   summaries it is called on do (those of the debug events of a
+   compilation unit, which take most of the memory of their events). *)
+let slim_summary () =
+  let memo = Int.Hashtbl.create 4096 in
+  let find s =
+    match Int.Hashtbl.find_opt memo (Hashtbl.hash s) with
+    | None -> None
+    | Some l -> List.find_map l ~f:(fun (o, r) -> if phys_equal o s then Some r else None)
+  in
+  let add s r =
+    let h = Hashtbl.hash s in
+    Int.Hashtbl.replace
+      memo
+      h
+      ((s, r) :: Option.value ~default:[] (Int.Hashtbl.find_opt memo h))
+  in
+  fun summary ->
+    (* Down to the end, or to a node already reduced *)
+    let rec down (s : Env.summary) path =
+      match s with
+      | Env.Env_empty -> Env.Env_empty, path
+      | _ -> (
+          match find s with
+          | Some r -> r, path
+          | None ->
+              let parent, rebuild = slim_step s in
+              down parent ((s, rebuild) :: path))
+    in
+    let base, path = down summary [] in
+    List.fold_left path ~init:base ~f:(fun r (s, rebuild) ->
+        let r =
+          match rebuild with
+          | Some f -> f r
+          | None -> r
+        in
+        add s r;
+        r)
+
 module Compilation_unit = struct
   type t = Cmo_format.compunit
 

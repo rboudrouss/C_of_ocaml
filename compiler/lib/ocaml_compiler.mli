@@ -28,6 +28,10 @@ type module_or_not =
 
 val is_module_in_summary : Ident.t -> Env.summary -> module_or_not
 
+val slim_summary : unit -> Env.summary -> Env.summary
+(** [slim_summary ()] reduces summaries to what {!is_module_in_summary} reads.
+    The results of a same function share their tails. *)
+
 module Symtable : sig
   module GlobalMap : sig
     type t
