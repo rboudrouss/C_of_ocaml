@@ -406,6 +406,28 @@ CAMLC_COMPARISON(lessequal, 0, res <= 0 && res != CAMLC_UNORDERED)
 CAMLC_COMPARISON(greaterthan, 0, res > 0)
 CAMLC_COMPARISON(greaterequal, 0, res >= 0)
 
+extern value caml_int_of_string(value s);
+
+/* [caml_int_of_string], with a fast path for the decimal integers too
+   short to overflow */
+value camlc_int_of_string(value s)
+{
+  const char *p = String_val(s);
+  mlsize_t len = caml_string_length(s);
+  intnat n = 0;
+  int neg = len > 1 && p[0] == '-';
+  if (neg) p++, len--;
+  if (len > 0 && len <= (sizeof(value) == 4 ? 9 : 18)) {
+    for (; len > 0; p++, len--) {
+      if (*p < '0' || *p > '9') goto slow;
+      n = 10 * n + (*p - '0');
+    }
+    return Val_long(neg ? -n : n);
+  }
+slow:
+  return camlc_ccall1(caml_int_of_string, s);
+}
+
 /****************************************************************/
 /* Strings */
 

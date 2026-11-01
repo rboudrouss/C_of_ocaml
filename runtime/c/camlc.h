@@ -182,6 +182,7 @@ value camlc_lessthan(value a, value b);
 value camlc_lessequal(value a, value b);
 value camlc_greaterthan(value a, value b);
 value camlc_greaterequal(value a, value b);
+value camlc_int_of_string(value s);
 
 /* Integers */
 

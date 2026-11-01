@@ -733,6 +733,7 @@ let primitive out name (args : parg list) =
               | "caml_string_concat", 2 -> plain (c_call "camlc_string_concat" args)
               | "caml_format_int", 2 -> Checked (c_call "camlc_format_int" args)
               | "caml_create_bytes", 1 -> Checked (c_call "camlc_create_bytes" args)
+              | "caml_int_of_string", 1 -> Checked (c_call "camlc_int_of_string" args)
               | ( ( "caml_compare"
                   | "caml_equal"
                   | "caml_notequal"
