@@ -50,6 +50,8 @@
 #include <caml/address_class.h>
 #include <caml/stacks.h>
 #include <caml/eventlog.h>
+#include <caml/memprof.h>
+#include <signal.h>
 #endif
 
 #define CAMLC_OCAML_5_5 \
@@ -289,6 +291,20 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
   }
   caml_alloc_small_dispatch(dom_st, wosize, CAML_DO_TRACK | CAML_FROM_C, 1,
                             NULL);
+}
+#else
+/* [caml_alloc_small_dispatch] asks the C code to poll for the
+   asynchronous actions, keeping the limit of the minor heap at its end
+   until then: all the allocations of the generated code would take the
+   slow path. The limit is reset, the actions staying pending, unless a
+   signal is (a switch to another thread, at the next poll). */
+void camlc_reset_young_limit(void)
+{
+  for (int i = 0; i < NSIG; i++)
+    if (caml_pending_signals[i]) return;
+  Caml_state->young_limit = caml_memprof_young_trigger < Caml_state->young_trigger
+                                ? Caml_state->young_trigger
+                                : caml_memprof_young_trigger;
 }
 #endif
 

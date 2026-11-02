@@ -488,6 +488,11 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize);
 #define Camlc_alloc_small_GC(dom_st, wosize) camlc_alloc_small_gc(dom_st, wosize)
 #endif
 
+#if OCAML_VERSION_MAJOR < 5
+/* After the slow path of an allocation */
+void camlc_reset_young_limit(void);
+#endif
+
 /* Allocation of a block of [wosize] fields, which the caller must then
    initialize with plain stores (small blocks) or [caml_initialize]
    (large blocks, [wosize > Max_young_wosize]) before the next
@@ -498,9 +503,8 @@ static inline value camlc_alloc_small(mlsize_t wosize, tag_t tag)
 #if OCAML_VERSION_MAJOR >= 5
   Alloc_small(v, wosize, tag, Camlc_alloc_small_GC);
 #else
-  /* Nothing to do around a GC in bytecode */
 #define Setup_for_gc
-#define Restore_after_gc
+#define Restore_after_gc camlc_reset_young_limit()
   Alloc_small(v, wosize, tag);
 #undef Setup_for_gc
 #undef Restore_after_gc
