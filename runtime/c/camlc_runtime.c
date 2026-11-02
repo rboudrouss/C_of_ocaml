@@ -26,6 +26,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten/threading.h>
+#endif
 #include "camlc.h"
 #include <caml/printexc.h>
 #include <caml/backtrace.h>
@@ -90,51 +94,126 @@ void camlc_register_data(const struct camlc_data *data)
 }
 
 /****************************************************************/
-/* Shadow stack */
+/* Threads and shadow stacks
+
+   Each thread running OCaml code has its own state ([camlc_thread]),
+   created when it first runs OCaml code (the main thread at startup, the
+   threads of the systhreads library and the domains in [caml_callback]),
+   and its own shadow stack. The threads are registered by domain, so that
+   the GC scans the shadow stacks and the effect state of the threads of
+   each domain (OCaml 5 scans the roots of the domains in parallel). They
+   are unregistered when they end. */
 
 #ifndef CAMLC_STACK_WORDS
 #define CAMLC_STACK_WORDS (4 * 1024 * 1024)
+#endif
+
+/* The shadow stack of the other threads */
+#ifndef CAMLC_THREAD_STACK_WORDS
+#define CAMLC_THREAD_STACK_WORDS (1024 * 1024)
 #endif
 
 /* Words below [camlc_stack_limit], used to report an overflow in a
    function which cannot raise it */
 #define CAMLC_STACK_RESERVE (64 * 1024)
 
-value *camlc_sp;
-value *camlc_stack_limit;
-static value *camlc_stack_base;
-static value *camlc_stack_top;
+_Thread_local struct camlc_thread camlc_thread;
+
+#define camlc_stack_base (camlc_thread.stack_base)
+#define camlc_fiber (camlc_thread.fiber)
+#define camlc_bounce_f (camlc_thread.bounce_f)
+#define camlc_bounce_n (camlc_thread.bounce_n)
+
+#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 3)
+#define CAMLC_MAX_DOMAINS (caml_params->max_domains)
+#elif OCAML_VERSION_MAJOR >= 5
+#define CAMLC_MAX_DOMAINS Max_domains
+#else
+#define CAMLC_MAX_DOMAINS 1
+#endif
+
+/* The threads of each domain, unregistered when they end (with a key
+   destructor, as a thread may end without returning from OCaml code) */
+static struct camlc_thread **camlc_threads;
+static pthread_mutex_t camlc_threads_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_key_t camlc_thread_key;
+
+static void camlc_thread_end(void *p)
+{
+  struct camlc_thread *t = p;
+  pthread_mutex_lock(&camlc_threads_lock);
+  if (t->next != NULL) t->next->prevp = t->prevp;
+  *t->prevp = t->next;
+  pthread_mutex_unlock(&camlc_threads_lock);
+  free(t->stack_base);
+  t->stack_base = NULL;
+}
+
+static void camlc_thread_start(mlsize_t words)
+{
+  struct camlc_thread *t = &camlc_thread;
+  value *base = malloc(words * sizeof(value));
+  if (base == NULL) caml_fatal_error("c_of_ocaml: cannot allocate the stack");
+  t->stack_base = base;
+  t->stack_limit = base + CAMLC_STACK_RESERVE;
+  t->stack_top = base + words;
+  t->sp = t->stack_top;
+  t->cps_depth = 0;
+  t->bounce_n = 0;
+  t->fiber = Val_unit;
+  t->bounce_f = Val_unit;
+#if OCAML_VERSION_MAJOR >= 5
+  t->domain = Caml_state->id;
+#else
+  t->domain = 0;
+#endif
+  pthread_mutex_lock(&camlc_threads_lock);
+  t->next = camlc_threads[t->domain];
+  if (t->next != NULL) t->next->prevp = &t->next;
+  t->prevp = &camlc_threads[t->domain];
+  camlc_threads[t->domain] = t;
+  pthread_mutex_unlock(&camlc_threads_lock);
+  pthread_setspecific(camlc_thread_key, t);
+}
+
+/* The other threads start running OCaml code in a callback */
+static inline void camlc_thread_check(void)
+{
+  if (CAMLC_UNLIKELY(camlc_thread.stack_base == NULL))
+    camlc_thread_start(CAMLC_THREAD_STACK_WORDS);
+}
 
 #if OCAML_VERSION_MAJOR >= 5
 
 static scan_roots_hook camlc_prev_scan_roots_hook = NULL;
 
-/* Effect handlers: the current fiber and the pending call (see below) */
-static value camlc_fiber = Val_unit;
-static value camlc_bounce_f = Val_unit;
-static int camlc_bounce_n = 0;
-#define CAMLC_MAX_BOUNCE_ARGS 256
-value camlc_bounce_args[CAMLC_MAX_BOUNCE_ARGS];
-
 static void camlc_scan_roots(scanning_action action,
                              scanning_action_flags flags, void *fdata,
                              caml_domain_state *domain)
 {
-  for (value *p = camlc_sp; p < camlc_stack_top; p++) {
-    value v = *p;
-    if (Is_block(v)) action(fdata, v, p);
-  }
-  for (struct camlc_data_list *l = camlc_data; l != NULL; l = l->next)
-    for (value *const *p = l->data->globals; *p != 0; p++) {
-      value v = **p;
-      if (Is_block(v)) action(fdata, v, *p);
+  pthread_mutex_lock(&camlc_threads_lock);
+  for (struct camlc_thread *t = camlc_threads[domain->id]; t != NULL;
+       t = t->next) {
+    for (value *p = t->sp; p < t->stack_top; p++) {
+      value v = *p;
+      if (Is_block(v)) action(fdata, v, p);
     }
-  if (Is_block(camlc_fiber)) action(fdata, camlc_fiber, &camlc_fiber);
-  if (Is_block(camlc_bounce_f)) action(fdata, camlc_bounce_f, &camlc_bounce_f);
-  for (int i = 0; i < camlc_bounce_n; i++) {
-    value v = camlc_bounce_args[i];
-    if (Is_block(v)) action(fdata, v, &camlc_bounce_args[i]);
+    if (Is_block(t->fiber)) action(fdata, t->fiber, &t->fiber);
+    if (Is_block(t->bounce_f)) action(fdata, t->bounce_f, &t->bounce_f);
+    for (int i = 0; i < t->bounce_n; i++) {
+      value v = t->bounce_args[i];
+      if (Is_block(v)) action(fdata, v, &t->bounce_args[i]);
+    }
   }
+  pthread_mutex_unlock(&camlc_threads_lock);
+  /* The globals, scanned once: by the main domain, which takes part in
+     all the collections */
+  if (domain->id == 0)
+    for (struct camlc_data_list *l = camlc_data; l != NULL; l = l->next)
+      for (value *const *p = l->data->globals; *p != 0; p++) {
+        value v = **p;
+        if (Is_block(v)) action(fdata, v, *p);
+      }
   if (camlc_prev_scan_roots_hook != NULL)
     camlc_prev_scan_roots_hook(action, flags, fdata, domain);
 }
@@ -151,10 +230,13 @@ static void (*camlc_prev_scan_roots_hook)(scanning_action) = NULL;
 
 static void camlc_scan_roots(scanning_action action)
 {
-  for (value *p = camlc_sp; p < camlc_stack_top; p++) {
-    value v = *p;
-    if (Is_block(v)) action(v, p);
-  }
+  pthread_mutex_lock(&camlc_threads_lock);
+  for (struct camlc_thread *t = camlc_threads[0]; t != NULL; t = t->next)
+    for (value *p = t->sp; p < t->stack_top; p++) {
+      value v = *p;
+      if (Is_block(v)) action(v, p);
+    }
+  pthread_mutex_unlock(&camlc_threads_lock);
   for (struct camlc_data_list *l = camlc_data; l != NULL; l = l->next)
     for (value *const *p = l->data->globals; *p != 0; p++) {
       value v = **p;
@@ -173,12 +255,11 @@ static void camlc_install_scan_roots_hook(void)
 
 static void camlc_init_stack(void)
 {
-  value *base = malloc(CAMLC_STACK_WORDS * sizeof(value));
-  if (base == NULL) caml_fatal_error("c_of_ocaml: cannot allocate the stack");
-  camlc_stack_base = base;
-  camlc_stack_limit = base + CAMLC_STACK_RESERVE;
-  camlc_stack_top = base + CAMLC_STACK_WORDS;
-  camlc_sp = camlc_stack_top;
+  camlc_threads = calloc(CAMLC_MAX_DOMAINS, sizeof(struct camlc_thread *));
+  if (camlc_threads == NULL ||
+      pthread_key_create(&camlc_thread_key, camlc_thread_end) != 0)
+    caml_fatal_error("c_of_ocaml: cannot initialize the threads");
+  camlc_thread_start(CAMLC_STACK_WORDS);
   camlc_install_scan_roots_hook();
 }
 
@@ -614,8 +695,6 @@ value camlc_applyv(value f, int n, value *args)
    running fiber. A continuation is a block holding the first fiber of the
    stack of fibers it resumes (unit once resumed) and the last one. */
 
-int camlc_cps_depth = 0;
-
 #if OCAML_VERSION_MAJOR >= 5
 
 #ifndef CAMLC_CPS_DEPTH
@@ -1039,6 +1118,7 @@ int caml_callback_depth = 0;
 
 CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
 {
+  camlc_thread_check();
   return camlc_applyv(closure, narg, args);
 }
 
@@ -1713,11 +1793,14 @@ int main(int argc, char **argv)
 #if OCAML_VERSION_MAJOR >= 5
   caml_parse_ocamlrunparam();
 #if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 3
+#ifdef __EMSCRIPTEN__
   /* Without threads, a single domain: the runtime reserves a minor heap
      for each possible domain, which emscripten's mmap allocates and
      clears */
-  if (caml_params->max_domains == Max_domains_def)
+  if (!emscripten_has_threading_support()
+      && caml_params->max_domains == Max_domains_def)
     ((struct caml_params *)caml_params)->max_domains = 1;
+#endif
 #endif
   if (!caml_startup_aux(0)) return 0;
   caml_init_codefrag();

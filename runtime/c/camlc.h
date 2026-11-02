@@ -84,9 +84,28 @@
 /* The runtime's table of global data, holding the predefined exceptions */
 extern value caml_global_data;
 
+/* The state of each thread running OCaml code (systhreads, domains): its
+   shadow stack, and the state of the effect handlers (see below) */
+#ifndef CAMLC_MAX_BOUNCE_ARGS
+#define CAMLC_MAX_BOUNCE_ARGS 256
+#endif
+struct camlc_thread {
+  value *sp;          /* Shadow stack pointer */
+  value *stack_limit; /* Overflow below */
+  value *stack_base, *stack_top;
+  int cps_depth;
+  int bounce_n;
+  value fiber, bounce_f;
+  value bounce_args[CAMLC_MAX_BOUNCE_ARGS];
+  /* The threads of the same domain, scanned by the GC */
+  int domain;
+  struct camlc_thread *next, **prevp;
+};
+extern _Thread_local struct camlc_thread camlc_thread;
+
 /* Shadow stack */
-extern value *camlc_sp;
-extern value *camlc_stack_limit;
+#define camlc_sp (camlc_thread.sp)
+#define camlc_stack_limit (camlc_thread.stack_limit)
 
 /* The toplevel values stored in globals (roots of the GC), and the blocks
    of static data (from their header), of a program or a plugin: tables
@@ -167,8 +186,8 @@ value camlc_make_pap(value f, int n, value *args);
    shorter stack. An exception result returned to the trampoline goes to
    the innermost handler of the current fiber. */
 extern const int camlc_double_translation;
-extern int camlc_cps_depth;
-extern value camlc_bounce_args[];
+#define camlc_cps_depth (camlc_thread.cps_depth)
+#define camlc_bounce_args (camlc_thread.bounce_args)
 value camlc_cps_bounce(value f, int n);
 /* Generic CPS application: apply [f] to the [n] arguments [args], then
    pass the result to the continuation [args[n]] */
