@@ -58,7 +58,8 @@ and `dynlink.c`. `c_of_ocaml --runtime-files DIR` writes `camlc.h` and
 | `--opt {1,2,3}` | Optimization profile (default 1). |
 | `--debug-info` | Record backtraces. The bytecode must be built with `ocamlc -g`. |
 | `--word-size {32,64}` | Target wasm32 (31-bit integers, default) or wasm64 (63-bit integers). |
-| `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects. |
+| `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects (disabled with `--dynlink` and for plugins). |
+| `--dynlink` | Compile a program which can load plugins (see below). |
 | `--runtime-files DIR` | Write the C runtime support files to `DIR`. |
 
 ### wasm64
@@ -90,6 +91,42 @@ wasm-ld report each mismatch as `function signature mismatch: NAME`.
 Such a primitive needs an adapter: compile the generated file with
 `-DNAME=ADAPTER`, where `ADAPTER` takes the arguments of the call site and
 calls the stub with its real signature.
+
+### Plugins
+
+A program compiled with `--dynlink` can load plugins compiled ahead of time,
+as emscripten side modules. The program is linked with `-linkall`, so that
+its units are all there, and with `-sMAIN_MODULE=2`, exporting the symbols
+the plugins use (the primitives, and the functions and data of
+`camlc_runtime.c` and of the OCaml runtime):
+
+```sh
+ocamlc -linkall shared.cmo main.ml -o main.bc
+c_of_ocaml --dynlink main.bc -o main.c
+emcc $CFLAGS main.o camlc_runtime.o ... -sMAIN_MODULE=2 -sEXPORTED_FUNCTIONS=...
+```
+
+A `.cmo` or `.cma` file given to c_of_ocaml is compiled to a plugin, with the
+same `--word-size` and `--effects` options as the program:
+
+```sh
+c_of_ocaml plugin.cma -o plugin.c          # or --split DIR
+emcc $CFLAGS -fPIC -c plugin.c
+emcc $CFLAGS -sSIDE_MODULE=1 plugin.o -o plugin.so
+```
+
+The program registers its compilation units by name, and keeps them whole
+(a plugin may use any of their fields). A plugin refers to the units of the
+program and of the plugins loaded before it by name. Its symbols are hidden,
+except its entry point, `value camlc_plugin_init(void)`, which the loader
+finds with `dlsym` and calls (as a primitive would: it raises the exceptions
+with `caml_raise`). It checks that the units the plugin needs are loaded and
+the ones it defines are not, as `Dynlink` does, and that the program and the
+plugin are compiled with the same effects option, raising `Failure`
+otherwise. Then it initializes the units of the plugin, letting their
+exceptions through. The API is documented in `runtime/c/camlc.h`
+(`camlc_load_plugin`, `camlc_find_unit`). The functions of a plugin have at
+most 64 arguments.
 
 ## Design
 
@@ -174,8 +211,10 @@ empty stack.
 ## Limitations
 
 - No domains.
-- Bytecode loading and shared libraries (`Dynlink`) are not supported.
-- Whole programs only: there is no separate compilation.
+- Bytecode loading and shared libraries (`Dynlink`) are not supported: the
+  plugins are compiled ahead of time (see above). The interfaces of the
+  units a plugin uses are not checked against those of the program.
+- Whole programs only, apart from plugins: there is no separate compilation.
 - `Marshal.Closures` is not supported.
 - Effects cannot be performed across a callback from C: they raise
   `Effect.Unhandled`, as with js_of_ocaml. `Effect.Deep.get_callstack` is
@@ -192,7 +231,9 @@ empty stack.
 `tools/c_of_ocaml_tests.sh` runs the tests of `compiler/tests-ocaml` through
 c_of_ocaml, emcc and node. Its header documents the environment variables
 (`WORD_SIZE=64` for wasm64). `make tests-c` builds c_of_ocaml and runs it for
-wasm32.
+wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
+(`compiler/tests-c/dynlink`). `dune build @compiler/tests-c/runtest` checks
+the primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
 All tests pass on both wasm32 and wasm64, except:
 
@@ -212,7 +253,8 @@ All tests pass on both wasm32 and wasm64, except:
   analyses, unboxing, and code generation).
 - `runtime/c/`: `camlc.h` and `camlc_runtime.c`, the runtime support linked
   with the generated code.
-- `tools/c_of_ocaml_tests.sh`: the test driver.
+- `tools/c_of_ocaml_tests.sh`, `tools/c_of_ocaml_dynlink_test.sh`: the test
+  drivers.
 
 Everything else comes from js_of_ocaml.
 
