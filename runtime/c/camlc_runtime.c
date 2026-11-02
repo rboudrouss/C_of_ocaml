@@ -579,26 +579,35 @@ value camlc_format_int(value fmt, value arg)
 /****************************************************************/
 /* Method caches (GETPUBMET in the bytecode interpreter) */
 
-static uintnat *camlc_method_cache = NULL;
-static intnat camlc_method_cache_size = 0;
-static intnat camlc_method_cache_count = 0;
+/* A cache is a word, allocated by chunks which never move (they are read
+   by the domains while others are allocated); its id is its address, an
+   integer as it is aligned */
+#define CAMLC_CACHE_CHUNK 256
+static uintnat *camlc_cache_chunk = NULL;
+static int camlc_cache_free = 0;
+static pthread_mutex_t camlc_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 value camlc_oo_cache_id(void)
 {
-  if (camlc_method_cache_count == camlc_method_cache_size) {
-    camlc_method_cache_size = 2 * camlc_method_cache_size + 16;
-    camlc_method_cache = caml_stat_resize(
-        camlc_method_cache, camlc_method_cache_size * sizeof(uintnat));
+  uintnat *cache;
+  pthread_mutex_lock(&camlc_cache_lock);
+  if (camlc_cache_free == 0) {
+    camlc_cache_chunk = calloc(CAMLC_CACHE_CHUNK, sizeof(uintnat));
+    if (camlc_cache_chunk == NULL) caml_fatal_error("c_of_ocaml: out of memory");
+    camlc_cache_free = CAMLC_CACHE_CHUNK;
   }
-  camlc_method_cache[camlc_method_cache_count] = 0;
-  return Val_long(camlc_method_cache_count++);
+  cache = camlc_cache_chunk++;
+  camlc_cache_free--;
+  pthread_mutex_unlock(&camlc_cache_lock);
+  return (value)cache | 1;
 }
 
 value camlc_get_cached_method(value obj, value tag, value cache_id)
 {
   value meths = Field(obj, 0);
-  uintnat *cache = &camlc_method_cache[Long_val(cache_id)];
-  uintnat ofs = *cache & Field(meths, 1);
+  /* Shared by the domains: the offset read is any offset written */
+  uintnat *cache = (uintnat *)(cache_id - 1);
+  uintnat ofs = __atomic_load_n(cache, __ATOMIC_RELAXED) & Field(meths, 1);
   if (*(value *)(((char *)&Field(meths, 3)) + ofs) == tag)
     return *(value *)(((char *)&Field(meths, 2)) + ofs);
   {
@@ -608,7 +617,7 @@ value camlc_get_cached_method(value obj, value tag, value cache_id)
       if (tag < Field(meths, mi)) hi = mi - 2;
       else li = mi;
     }
-    *cache = (li - 3) * sizeof(value);
+    __atomic_store_n(cache, (li - 3) * sizeof(value), __ATOMIC_RELAXED);
     return Field(meths, li - 1);
   }
 }
@@ -1466,6 +1475,8 @@ struct camlc_unit {
 
 #define CAMLC_UNIT_BUCKETS 256
 static struct camlc_unit *camlc_units[CAMLC_UNIT_BUCKETS];
+/* The units and the interfaces, which the domains may load */
+static pthread_mutex_t camlc_units_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned int camlc_unit_hash(const char *name)
 {
@@ -1484,7 +1495,9 @@ static struct camlc_unit *camlc_lookup_unit(const char *name)
 
 value camlc_register_unit(const char *name, value v)
 {
-  struct camlc_unit *u = camlc_lookup_unit(name);
+  struct camlc_unit *u;
+  pthread_mutex_lock(&camlc_units_lock);
+  u = camlc_lookup_unit(name);
   if (u == NULL) {
     unsigned int h = camlc_unit_hash(name);
     u = malloc(sizeof(struct camlc_unit));
@@ -1496,6 +1509,7 @@ value camlc_register_unit(const char *name, value v)
     camlc_units[h] = u;
   }
   caml_modify_generational_global_root(&u->block, v);
+  pthread_mutex_unlock(&camlc_units_lock);
   return Val_unit;
 }
 
@@ -1532,21 +1546,28 @@ static void camlc_register_interfaces(const char *const *l)
 
 value camlc_find_unit(const char *name)
 {
-  struct camlc_unit *u = camlc_lookup_unit(name);
+  struct camlc_unit *u;
+  pthread_mutex_lock(&camlc_units_lock);
+  u = camlc_lookup_unit(name);
+  pthread_mutex_unlock(&camlc_units_lock);
   return u == NULL ? 0 : u->block;
 }
 
-static void camlc_unit_error(const char *msg, const char *name)
+/* The message of the error [msg] about the unit [name] */
+static const char *camlc_unit_error(char *buf, size_t len, const char *msg,
+                                    const char *name)
 {
-  char buf[512];
-  snprintf(buf, sizeof(buf), "c_of_ocaml: %s %s", msg, name);
-  caml_failwith(buf);
+  snprintf(buf, len, "c_of_ocaml: %s %s", msg, name);
+  return buf;
 }
 
 value camlc_get_unit(const char *name)
 {
-  struct camlc_unit *u = camlc_lookup_unit(name);
+  struct camlc_unit *u;
   char buf[512];
+  pthread_mutex_lock(&camlc_units_lock);
+  u = camlc_lookup_unit(name);
+  pthread_mutex_unlock(&camlc_units_lock);
   if (u != NULL) return u->block;
   snprintf(buf, sizeof(buf),
            "c_of_ocaml: no implementation available for %s", name);
@@ -1570,21 +1591,34 @@ value camlc_load_plugin(const struct camlc_plugin *p)
              p->max_arity, camlc_max_arity);
     caml_failwith(buf);
   }
-  for (const char *const *n = p->imports; *n != 0; n++)
-    if (camlc_lookup_unit(*n) == NULL)
-      camlc_unit_error("no implementation available for", *n);
-  for (const char *const *n = p->units; *n != 0; n++)
-    if (camlc_lookup_unit(*n) != NULL)
-      camlc_unit_error("the plugin defines the unit already loaded", *n);
-  for (const char *const *n = p->interfaces; *n != 0; n += 2) {
-    struct camlc_interface *i = camlc_lookup_interface(n[0]);
-    if (i != NULL && strcmp(i->crc, n[1]) != 0)
-      camlc_unit_error(
-          "the plugin was compiled against another version of the interface",
-          n[0]);
+  {
+    char buf[512];
+    const char *error = NULL;
+    pthread_mutex_lock(&camlc_units_lock);
+    for (const char *const *n = p->imports; *n != 0 && error == NULL; n++)
+      if (camlc_lookup_unit(*n) == NULL)
+        error = camlc_unit_error(buf, sizeof(buf),
+                                 "no implementation available for", *n);
+    for (const char *const *n = p->units; *n != 0 && error == NULL; n++)
+      if (camlc_lookup_unit(*n) != NULL)
+        error = camlc_unit_error(
+            buf, sizeof(buf), "the plugin defines the unit already loaded", *n);
+    for (const char *const *n = p->interfaces; *n != 0 && error == NULL;
+         n += 2) {
+      struct camlc_interface *i = camlc_lookup_interface(n[0]);
+      if (i != NULL && strcmp(i->crc, n[1]) != 0)
+        error = camlc_unit_error(buf, sizeof(buf),
+                                 "the plugin was compiled against another "
+                                 "version of the interface",
+                                 n[0]);
+    }
+    if (error == NULL) {
+      camlc_register_interfaces(p->interfaces);
+      camlc_register_data(&p->data);
+    }
+    pthread_mutex_unlock(&camlc_units_lock);
+    if (error != NULL) caml_failwith(error);
   }
-  camlc_register_interfaces(p->interfaces);
-  camlc_register_data(&p->data);
   res = camlc_ccall0(p->program);
   if (Is_exception_result(res)) caml_raise(Extract_exception(res));
   return Val_unit;
