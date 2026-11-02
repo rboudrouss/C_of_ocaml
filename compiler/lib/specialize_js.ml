@@ -565,6 +565,19 @@ let f_once_before p =
             let x' = Code.Var.fork x in
             let acc = Let (x', p) :: Let (x, Constant (Int Targetint.zero)) :: acc in
             loop acc r
+        | Let (x, Prim (Extern ("caml_assume_no_perform", _), [ Pv f ]))
+          when match Config.target () with
+               | `C -> true
+               | `JavaScript | `Wasm -> false ->
+            (* With C, [f] is called in direct style, as with the double
+               translation *)
+            let unit = Code.Var.fresh_n "unit" in
+            let acc =
+              Let (x, Apply { f; args = [ unit ]; exact = false })
+              :: Let (unit, Constant (Int Targetint.zero))
+              :: acc
+            in
+            loop acc r
         | _ -> loop (i :: acc) r)
   in
   let blocks =
