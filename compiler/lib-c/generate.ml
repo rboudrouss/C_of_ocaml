@@ -118,6 +118,7 @@ type output =
   { data : Buffer.t  (** Definitions of the static data *)
   ; static_names : string String.Hashtbl.t
         (** The contents of each block of static data, by C name *)
+  ; mutable static_list : string list  (** The blocks of static data, in reverse order *)
   ; mutable definitions : definition list  (** Function definitions, in reverse order *)
   ; mutable refs : Var.Set.t  (** The functions referred to by the current code *)
   ; constants : (constant * string) list Int.Hashtbl.t
@@ -263,9 +264,9 @@ let int64_words i =
 
 let int32_word i = Printf.sprintf "(value)0x%lxu" i
 
-(* The static data is in its own section, so that the runtime can tell
-   where it is (OCaml 4 needs it in its page table). [static_block out
-   words] adds a block (header and fields) to it, and returns its C name. *)
+(* [static_block out words] adds a block (header and fields) to the static
+   data, and returns its C name. The runtime finds the blocks in a table
+   (OCaml 4 needs them in its page table). *)
 let static_block out words =
   let contents = String.concat ~sep:", " words in
   let rec name rank =
@@ -279,9 +280,10 @@ let static_block out words =
     | Some _ -> name (rank + 1)
     | None ->
         String.Hashtbl.add out.static_names n contents;
+        out.static_list <- n :: out.static_list;
         Printf.bprintf
           out.data
-          "%svalue %s[%d] CAMLC_STATIC = { %s };\n"
+          "%svalue %s[%d] = { %s };\n"
           (if out.split then "" else "static ")
           n
           (List.length words)
@@ -2927,6 +2929,7 @@ let f
   let out =
     { data = Buffer.create 65536
     ; static_names = String.Hashtbl.create 1024
+    ; static_list = []
     ; definitions = []
     ; refs = Var.Set.empty
     ; constants = Int.Hashtbl.create 1024
@@ -3200,10 +3203,7 @@ let f
     (* Never static: the GC updates them, which the C compiler must not
        ignore *)
     List.iter global_list ~f:(fun x ->
-        Printf.bprintf
-          b
-          "value %s CAMLC_GLOBAL = Val_unit;\n"
-          (Var.Hashtbl.find globals x));
+        Printf.bprintf b "value %s = Val_unit;\n" (Var.Hashtbl.find globals x));
     Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
     Printf.bprintf
       b
@@ -3225,6 +3225,20 @@ let f
        else "");
     Buffer.add_buffer b out.data;
     Buffer.add_char b '\n';
+    (* The globals and the static data, for the runtime *)
+    let table name l =
+      Printf.bprintf b "static value *const %s[] = {\n" name;
+      List.iter l ~f:(fun e -> Printf.bprintf b "  %s,\n" e);
+      Printf.bprintf b "  0\n};\n"
+    in
+    table
+      "camlc_globals_table"
+      (List.map global_list ~f:(fun x -> "&" ^ Var.Hashtbl.find globals x));
+    table "camlc_static_table" (List.rev out.static_list);
+    Buffer.add_string
+      b
+      "const struct camlc_data camlc_program_data = { camlc_globals_table, \
+       camlc_static_table };\n\n";
     (* Partial applications: the closure holds the function and the
        arguments already given (after the code pointer of the CPS version,
        with effect handlers), see [camlc_make_pap] *)

@@ -88,12 +88,17 @@ extern value caml_global_data;
 extern value *camlc_sp;
 extern value *camlc_stack_limit;
 
-/* The toplevel values stored in globals (roots of the GC), and the static
-   data, each in its own section, of which the linker defines the bounds
-   (__start_camlc_globals, __stop_camlc_globals, ...): the generated code
-   names each one, independently of the rest of the program */
-#define CAMLC_GLOBAL __attribute__((section("camlc_globals")))
-#define CAMLC_STATIC __attribute__((section("camlc_static")))
+/* The toplevel values stored in globals (roots of the GC), and the blocks
+   of static data (from their header), of a program or a plugin: tables
+   ending with 0. Sections with bounds defined by the linker would not work
+   with the dynamic linking of emscripten. */
+struct camlc_data {
+  value *const *globals;
+  value *const *statics;
+};
+
+/* Registers the globals and the static data of a plugin */
+void camlc_register_data(const struct camlc_data *data);
 
 /* Returns the Stack_overflow exception, as an exception result */
 value camlc_stack_overflow(void);

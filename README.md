@@ -98,10 +98,11 @@ Both OCaml 4.14 and 5.x runtimes are supported, and `camlc_runtime.c` follows th
 startup and callback code of each.
 
 **Values** use the representation of the bytecode runtime. Constants are
-static data in their own section, `camlc_static`, with headers the GC never
-marks (on 4.14 the section is registered as static data in the page table).
-Toplevel values used by functions are C globals in the section
-`camlc_globals`, which the GC scans.
+static data, with headers the GC never marks (on 4.14 they are registered as
+static data in the page table). Toplevel values used by functions are C
+globals, which the GC scans. The generated code lists both in a table,
+`camlc_program_data` (sections with bounds defined by the linker would not
+work with the dynamic linking of emscripten).
 
 **Functions.** Each OCaml function becomes a C function taking its arguments
 followed by its closure. Closures keep the bytecode layout (including

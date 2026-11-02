@@ -51,13 +51,40 @@
 /* Defined by the generated code */
 extern value camlc_program(void);
 extern const int camlc_global_data_size;
+extern const struct camlc_data camlc_program_data;
 
-/* The bounds of the globals and of the static data. The sections are never
-   empty: they contain these anchors */
-extern value __start_camlc_globals[], __stop_camlc_globals[];
-extern value __start_camlc_static[], __stop_camlc_static[];
-__attribute__((used)) value camlc_globals_anchor CAMLC_GLOBAL = Val_unit;
-__attribute__((used)) value camlc_static_anchor CAMLC_STATIC = Val_unit;
+/* The globals and static data of the program and of the plugins */
+struct camlc_data_list {
+  const struct camlc_data *data;
+  struct camlc_data_list *next;
+};
+static struct camlc_data_list *camlc_data = NULL;
+
+void camlc_register_data(const struct camlc_data *data)
+{
+  struct camlc_data_list *l = malloc(sizeof(struct camlc_data_list));
+  if (l == NULL) caml_fatal_error("c_of_ocaml: out of memory");
+#if OCAML_VERSION_MAJOR < 5
+  /* Static data are values outside the heap: the adjacent blocks are
+     added together */
+  value *start = NULL, *end = NULL;
+  for (value *const *p = data->statics; *p != 0; p++) {
+    value *b = *p, *e = b + Wosize_hd(b[0]) + 1;
+    if (b != end) {
+      if (start != NULL &&
+          caml_page_table_add(In_static_data, start, end) != 0)
+        caml_fatal_error("c_of_ocaml: out of memory");
+      start = b;
+    }
+    end = e;
+  }
+  if (start != NULL && caml_page_table_add(In_static_data, start, end) != 0)
+    caml_fatal_error("c_of_ocaml: out of memory");
+#endif
+  l->data = data;
+  l->next = camlc_data;
+  camlc_data = l;
+}
 
 /****************************************************************/
 /* Shadow stack */
@@ -94,10 +121,11 @@ static void camlc_scan_roots(scanning_action action,
     value v = *p;
     if (Is_block(v)) action(fdata, v, p);
   }
-  for (value *p = __start_camlc_globals; p < __stop_camlc_globals; p++) {
-    value v = *p;
-    if (Is_block(v)) action(fdata, v, p);
-  }
+  for (struct camlc_data_list *l = camlc_data; l != NULL; l = l->next)
+    for (value *const *p = l->data->globals; *p != 0; p++) {
+      value v = **p;
+      if (Is_block(v)) action(fdata, v, *p);
+    }
   if (Is_block(camlc_fiber)) action(fdata, camlc_fiber, &camlc_fiber);
   if (Is_block(camlc_bounce_f)) action(fdata, camlc_bounce_f, &camlc_bounce_f);
   for (int i = 0; i < camlc_bounce_n; i++) {
@@ -124,10 +152,11 @@ static void camlc_scan_roots(scanning_action action)
     value v = *p;
     if (Is_block(v)) action(v, p);
   }
-  for (value *p = __start_camlc_globals; p < __stop_camlc_globals; p++) {
-    value v = *p;
-    if (Is_block(v)) action(v, p);
-  }
+  for (struct camlc_data_list *l = camlc_data; l != NULL; l = l->next)
+    for (value *const *p = l->data->globals; *p != 0; p++) {
+      value v = **p;
+      if (Is_block(v)) action(v, *p);
+    }
   if (camlc_prev_scan_roots_hook != NULL) camlc_prev_scan_roots_hook(action);
 }
 
@@ -1564,10 +1593,8 @@ int main(int argc, char **argv)
   caml_init_atom_table();
   caml_init_backtrace();
   Caml_state->external_raise = NULL;
-  /* Static data are values outside the heap */
-  caml_page_table_add(In_static_data, __start_camlc_static,
-                      __stop_camlc_static);
 #endif
+  camlc_register_data(&camlc_program_data);
   camlc_init_stack();
 #if OCAML_VERSION_MAJOR >= 5
   caml_register_generational_global_root(&caml_global_data);
