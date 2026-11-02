@@ -203,6 +203,21 @@ depth and bounce through a trampoline past a threshold.
 **Callbacks** from C (`caml_callback*`) apply the closure with
 `camlc_applyv`.
 
+**Threads and domains.** Each thread running OCaml code (the systhreads, and
+the domains of OCaml 5) has its own shadow stack and its own state of the
+effect handlers, in a thread-local structure (`camlc_thread`) set up when it
+first runs OCaml code. The threads are registered by domain: for each domain,
+the GC scans the shadow stacks of its threads, and the main domain scans the
+globals. When the program uses threads or domains (it calls `Thread.create`
+or `Domain.spawn`), the generated code polls, at the start of each loop and of
+each function that makes a tail call, as the native code of OCaml does: a
+poll compares the allocation pointer with its limit, and runs the pending
+actions (the stop-the-world collections of the other domains, a switch to
+another thread, signal handlers, finalisers). The values held in C variables
+are saved on the shadow stack around the actions, which may raise. The
+allocations of the generated code also switch to another thread when the
+tick thread asks for it. Without threads nor domains, the code does not poll.
+
 **Backtraces** (`--debug-info`). When backtraces are active, a raise and
 every call an exception passes through record a static description of their
 location, taken from the debug events, in the runtime's backtrace buffer. The
@@ -211,7 +226,11 @@ empty stack.
 
 ## Limitations
 
-- No domains.
+- Threads and domains need a runtime built with pthreads. The shadow stack
+  of the threads other than the main one is smaller (1M words,
+  `-DCAMLC_THREAD_STACK_WORDS=` when compiling `camlc_runtime.c`).
+- A plugin which starts threads in a program which does not use them: the
+  code of the program does not poll.
 - Bytecode loading and shared libraries (`Dynlink`) are not supported: the
   plugins are compiled ahead of time (see above).
 - Whole programs only, apart from plugins: there is no separate compilation.
@@ -224,7 +243,8 @@ empty stack.
   interpreter has its own much larger stack. Exhausting it raises a JavaScript
   `RangeError` rather than `Stack_overflow`. Under node, ocaml-emcc runs
   compiled programs in a worker thread with a large stack to mitigate this.
-- Signals and finalisers only run when the runtime polls on its own.
+- Signals and finalisers only run when the runtime polls on its own, and at
+  the polls of the programs which use threads or domains.
 
 ## Testing
 
@@ -232,7 +252,9 @@ empty stack.
 c_of_ocaml, emcc and node. Its header documents the environment variables
 (`WORD_SIZE=64` for wasm64). `make tests-c` builds c_of_ocaml and runs it for
 wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
-(`compiler/tests-c/dynlink`). `dune build @compiler/tests-c/runtest` checks
+(`compiler/tests-c/dynlink`). `tools/c_of_ocaml_threads_test.sh` tests the
+systhreads and the domains (`compiler/tests-c/threads`), natively, with the
+runtime of the OCaml switch. `dune build @compiler/tests-c/runtest` checks
 the primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
 All tests pass on both wasm32 and wasm64, except:
@@ -253,8 +275,8 @@ All tests pass on both wasm32 and wasm64, except:
   analyses, unboxing, and code generation).
 - `runtime/c/`: `camlc.h` and `camlc_runtime.c`, the runtime support linked
   with the generated code.
-- `tools/c_of_ocaml_tests.sh`, `tools/c_of_ocaml_dynlink_test.sh`: the test
-  drivers.
+- `tools/c_of_ocaml_tests.sh`, `tools/c_of_ocaml_dynlink_test.sh`,
+  `tools/c_of_ocaml_threads_test.sh`: the test drivers.
 
 Everything else comes from js_of_ocaml.
 
