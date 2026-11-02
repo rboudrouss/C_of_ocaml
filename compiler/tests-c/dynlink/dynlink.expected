@@ -3,6 +3,7 @@ plugin: 3 ABC
 plugin: Not_found caught
 plugin: 3
 loaded plugin.so
+pcrc.so: Failure "c_of_ocaml: the plugin was compiled against another version of the interface Shared"
 p4uses.so: Failure "c_of_ocaml: no implementation available for P2a"
 p2b uses p2a
 loaded p2.so

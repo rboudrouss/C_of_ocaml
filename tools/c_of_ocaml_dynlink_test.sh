@@ -79,7 +79,13 @@ ocamlc -linkall -use-prims <(echo test_loadfile; ocamlrun -p) shared.cmo main.ml
   -o main.bc
 for m in plugin p2a p2b p3 p4uses; do ocamlc -c $m.ml; done
 ocamlc -a p2a.cmo p2b.cmo -o p2.cma
-plugins="plugin.cmo p2.cma p3.cmo p4uses.cmo shared.cmo"
+# A plugin compiled against another version of the interface of Shared
+mkdir -p v2
+cp shared.ml pcrc.ml v2/
+echo "let extra = 0" >> v2/shared.ml
+(cd v2 && ocamlc -c shared.ml && ocamlc -c pcrc.ml)
+cp v2/pcrc.cmo .
+plugins="plugin.cmo p2.cma p3.cmo p4uses.cmo shared.cmo pcrc.cmo"
 if [ "${EFFECTS:-}" = double-translation ]; then
   ocamlc -c peffect.ml
   plugins="$plugins peffect.cmo"
@@ -103,7 +109,8 @@ emcc $CFLAGS $main_objs camlc_runtime.o stub.o "$SYSROOT/lib/libcamlrun.a" -lm \
   -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o main.js
 
 result=PASS
-node main.js plugin.so p4uses.so p2.so p4uses.so p3.so shared.so p2.so > out.txt 2>&1 \
+node main.js plugin.so pcrc.so p4uses.so p2.so p4uses.so p3.so shared.so p2.so \
+  > out.txt 2>&1 \
   || true
 if ! diff out.txt "$TEST/dynlink.expected"; then result=FAIL; fi
 if [ "${EFFECTS:-}" = double-translation ]; then
