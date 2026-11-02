@@ -121,9 +121,10 @@ program and of the plugins loaded before it by name. Its symbols are hidden,
 except its entry point, `value camlc_plugin_init(void)`, which the loader
 finds with `dlsym` and calls (as a primitive would: it raises the exceptions
 with `caml_raise`). It checks that the units the plugin needs are loaded and
-the ones it defines are not, as `Dynlink` does, and that the program and the
-plugin are compiled with the same effects option, raising `Failure`
-otherwise. Then it initializes the units of the plugin, letting their
+the ones it defines are not, and that the interfaces it was compiled against
+are those of the loaded units (their CRCs), as `Dynlink` does, and that the
+program and the plugin are compiled with the same effects option, raising
+`Failure` otherwise. Then it initializes the units of the plugin, letting their
 exceptions through. The API is documented in `runtime/c/camlc.h`
 (`camlc_load_plugin`, `camlc_find_unit`). The functions of a plugin have at
 most 64 arguments.
@@ -212,8 +213,7 @@ empty stack.
 
 - No domains.
 - Bytecode loading and shared libraries (`Dynlink`) are not supported: the
-  plugins are compiled ahead of time (see above). The interfaces of the
-  units a plugin uses are not checked against those of the program.
+  plugins are compiled ahead of time (see above).
 - Whole programs only, apart from plugins: there is no separate compilation.
 - `Marshal.Closures` is not supported.
 - Effects cannot be performed across a callback from C: they raise
