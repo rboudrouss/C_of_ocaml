@@ -100,6 +100,32 @@ struct camlc_data {
 /* Registers the globals and the static data of a plugin */
 void camlc_register_data(const struct camlc_data *data);
 
+/* Compilation units, by name, of the program compiled with --dynlink and
+   of the plugins. [camlc_register_unit] registers the module block [v] of
+   the unit [name]; [camlc_find_unit] returns the block of a unit, or 0 if
+   it is not loaded; [camlc_get_unit] returns it, or the exception
+   Failure, as an exception result, if it is not loaded. */
+value camlc_register_unit(const char *name, value v);
+value camlc_find_unit(const char *name);
+value camlc_get_unit(const char *name);
+
+/* A plugin, compiled by c_of_ocaml from a .cmo or .cma file: its entry
+   point [camlc_plugin_init] calls [camlc_load_plugin] with it */
+struct camlc_plugin {
+  struct camlc_data data;
+  const char *const *units;   /* The units it defines (ending with 0) */
+  const char *const *imports; /* The units it refers to (ending with 0) */
+  int double_translation;     /* Compiled with double translation */
+  int max_arity;              /* Maximal arity of its functions */
+  value (*program)(void);     /* Initializes its units */
+};
+
+/* Loads the plugin [p]: checks that it can be loaded (the units it refers
+   to are loaded, not the ones it defines, ...), then registers its data and
+   initializes its units. Raises the exception Failure if the plugin cannot
+   be loaded, or the exception raised by its initialization. */
+value camlc_load_plugin(const struct camlc_plugin *p);
+
 /* Returns the Stack_overflow exception, as an exception result */
 value camlc_stack_overflow(void);
 /* The overflow of the shadow stack in a function which cannot raise */

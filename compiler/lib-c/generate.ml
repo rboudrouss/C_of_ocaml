@@ -367,6 +367,7 @@ type prim =
    representation *)
 type parg =
   { a_typ : Typing.typ
+  ; a_const : constant option
   ; get : repr -> string
   }
 
@@ -566,6 +567,12 @@ let bigarray_element (kind : Optimization_hint.Bigarray.kind) =
 let primitive out name (args : parg list) =
   let n = List.length args in
   let arg r i = (List.nth args i).get r in
+  (* The name of a compilation unit *)
+  let unit_name i =
+    match (List.nth args i).a_const with
+    | Some (String s | NativeString (Byte s | Utf (Utf8 s))) -> s
+    | _ -> failwith (Printf.sprintf "c_of_ocaml: %s: unknown unit" name)
+  in
   let value i = arg Value i in
   let lookup l =
     List.find_map l ~f:(fun (n, op) -> if String.equal n name then Some op else None)
@@ -882,8 +889,27 @@ let primitive out name (args : parg list) =
                     (c_call
                        ("camlc_" ^ String.sub name ~pos:5 ~len:(String.length name - 5))
                        args)
-              | ("caml_register_global" | "caml_register_global_predef"), _ ->
-                  plain "Val_unit"
+              (* The compilation units are registered by name with --dynlink
+                 and in plugins, and found by name in plugins *)
+              | "caml_register_global", 2 ->
+                  plain
+                    (Printf.sprintf
+                       "camlc_register_unit(%s, %s)"
+                       (c_string (unit_name 1))
+                       (arg 0))
+              | "caml_get_global", 1 ->
+                  Checked (Printf.sprintf "camlc_get_unit(%s)" (c_string (unit_name 0)))
+              | "caml_get_global_predef", 1 ->
+                  let exn = unit_name 0 in
+                  let rec index i =
+                    if i = Array.length Runtimedef.builtin_exceptions
+                    then failwith (Printf.sprintf "c_of_ocaml: unknown exception %s" exn)
+                    else if String.equal Runtimedef.builtin_exceptions.(i) exn
+                    then i
+                    else index (i + 1)
+                  in
+                  plain (Printf.sprintf "Field(caml_global_data, %d)" (index 0))
+              | "caml_register_global_predef", _ -> plain "Val_unit"
               | "caml_register_global_by_index", 2 ->
                   plain
                     (Printf.sprintf
@@ -1370,8 +1396,16 @@ let constant_repr out c r =
 
 let prim_arg ctx a =
   match a with
-  | Pv x -> { a_typ = Typing.var_type ctx.out.types x; get = (fun r -> as_repr ctx r x) }
-  | Pc c -> { a_typ = Typing.constant_type c; get = (fun r -> constant_repr ctx.out c r) }
+  | Pv x ->
+      { a_typ = Typing.var_type ctx.out.types x
+      ; a_const = None
+      ; get = (fun r -> as_repr ctx r x)
+      }
+  | Pc c ->
+      { a_typ = Typing.constant_type c
+      ; a_const = Some c
+      ; get = (fun r -> constant_repr ctx.out c r)
+      }
 
 let line ctx fmt = Printf.bprintf ctx.buf ("  " ^^ fmt ^^ "\n")
 
@@ -2042,7 +2076,8 @@ let gc_point ctx i =
       let dummy a = { (prim_arg ctx a) with get = (fun _ -> "_") } in
       let dummy a =
         match a with
-        | Pc c -> { a_typ = Typing.constant_type c; get = (fun _ -> "_") }
+        | Pc c ->
+            { a_typ = Typing.constant_type c; a_const = Some c; get = (fun _ -> "_") }
         | Pv _ -> dummy a
       in
       match primitive ctx.out name (List.map args ~f:dummy) with
@@ -2338,8 +2373,9 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   in
   let typed a =
     match a with
-    | Pv x -> { a_typ = Typing.var_type out.types x; get = (fun _ -> "_") }
-    | Pc c -> { a_typ = Typing.constant_type c; get = (fun _ -> "_") }
+    | Pv x ->
+        { a_typ = Typing.var_type out.types x; a_const = None; get = (fun _ -> "_") }
+    | Pc c -> { a_typ = Typing.constant_type c; a_const = Some c; get = (fun _ -> "_") }
   in
   (* Whether a function raises by itself, the functions it calls outside
      any handler, whether it triggers a GC by itself (and then returns, or
@@ -2836,8 +2872,48 @@ let name_functions out blocks functions =
            (if rank = 0 then "" else Printf.sprintf "_%d" rank)
            (if String.equal base "" then "" else "_" ^ base)))
 
+type mode =
+  [ `Program
+  | `Dynlink
+  | `Plugin
+  ]
+
+(* The maximal arity of the functions of the plugins of a program compiled
+   with --dynlink (the runtime handles their partial applications with the
+   tables of the program) *)
+let dynlink_max_arity = 64
+
+(* The names of the compilation units defined by [p], and of those it
+   refers to *)
+let units (p : program) =
+  let defined = String.Hashtbl.create 16 in
+  let imported = String.Hashtbl.create 16 in
+  Addr.Map.iter
+    (fun _ block ->
+      List.iter block.body ~f:(fun i ->
+          match i with
+          | Let
+              ( _
+              , Prim
+                  ( Extern ("caml_register_global", _)
+                  , [ _; Pc (String n | NativeString (Byte n | Utf (Utf8 n))) ] ) ) ->
+              String.Hashtbl.replace defined n ()
+          | Let
+              ( _
+              , Prim
+                  ( Extern ("caml_get_global", _)
+                  , [ Pc (String n | NativeString (Byte n | Utf (Utf8 n))) ] ) ) ->
+              String.Hashtbl.replace imported n ()
+          | _ -> ()))
+    p.blocks;
+  let names t =
+    List.sort ~cmp:String.compare (String.Hashtbl.fold (fun n () acc -> n :: acc) t [])
+  in
+  names defined, names imported
+
 let f
     (p : program)
+    ?(mode : mode = `Program)
     ~global_flow_data
     ~deadcode_sentinel
     ~debug_info
@@ -2963,6 +3039,10 @@ let f
         f
         (List.map params ~f:(fun x -> repr_of_type (Typing.var_type types x)));
       ignore (fun_name out f));
+  let functions_max_arity = out.max_arity in
+  (match mode with
+  | `Dynlink -> out.max_arity <- max out.max_arity dynlink_max_arity
+  | `Program | `Plugin -> ());
   (* The static data of the constants and the closed closures *)
   Var.Hashtbl.iter
     (fun x c -> Var.Hashtbl.replace out.statics x (code_constant out c))
@@ -3031,7 +3111,10 @@ let f
     p.blocks
     closures
     ~fn:None
-    ~name:"value camlc_program"
+    ~name:
+      (match mode with
+      | `Program | `Dynlink -> "value camlc_program"
+      | `Plugin -> "value camlc_plugin_program")
     ~params:[]
     ~param_reprs:[]
     ~env:[]
@@ -3161,7 +3244,14 @@ let f
              else String.concat ~sep:", " (List.init ~len:n ~f:(fun _ -> "value")))
         else Printf.bprintf b "extern value %s(value *, int);\n" name)
       out.primitives;
-    Buffer.add_char b '\n'
+    Buffer.add_char b '\n';
+    match mode with
+    | `Plugin ->
+        (* The symbols of a plugin are local to it, except its entry point:
+           they cannot conflict with those of the program or of other
+           plugins *)
+        Buffer.add_string b "#pragma GCC visibility push(hidden)\n\n"
+    | `Program | `Dynlink -> ()
   in
   let prototypes b l =
     List.iter l ~f:(fun f ->
@@ -3193,36 +3283,45 @@ let f
         else Printf.bprintf b "  %s((value *)0, 0);\n" name)
       out.primitives;
     Buffer.add_string b "}\n\n";
-    for m = 1 to out.max_arity - 1 do
+    let program =
+      match mode with
+      | `Program | `Dynlink -> true
+      | `Plugin -> false
+    in
+    for m = 1 to if program then out.max_arity - 1 else 0 do
       Printf.bprintf b "static value camlc_pap%d(%s);\n" m (fun_params m);
       if dt
       then Printf.bprintf b "static value camlc_pap_cps%d(%s);\n" m (fun_params (m + 1))
     done;
     Buffer.add_char b '\n';
-    Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
+    if program
+    then Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
     (* Never static: the GC updates them, which the C compiler must not
        ignore *)
     List.iter global_list ~f:(fun x ->
         Printf.bprintf b "value %s = Val_unit;\n" (Var.Hashtbl.find globals x));
-    Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
-    Printf.bprintf
-      b
-      "const value camlc_pap_code[] = { 0%s };\n"
-      (String.concat
-         ~sep:""
-         (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
-              Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
-    Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
-    Printf.bprintf
-      b
-      "const value camlc_pap_cps_code[] = { 0%s };\n\n"
-      (if dt
-       then
-         String.concat
+    if program
+    then (
+      Printf.bprintf b "const int camlc_max_arity = %d;\n" out.max_arity;
+      Printf.bprintf
+        b
+        "const value camlc_pap_code[] = { 0%s };\n"
+        (String.concat
            ~sep:""
            (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
-                Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
-       else "");
+                Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
+      Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
+      Printf.bprintf
+        b
+        "const value camlc_pap_cps_code[] = { 0%s };\n"
+        (if dt
+         then
+           String.concat
+             ~sep:""
+             (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
+                  Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
+         else ""));
+    Buffer.add_char b '\n';
     Buffer.add_buffer b out.data;
     Buffer.add_char b '\n';
     (* The globals and the static data, for the runtime *)
@@ -3235,15 +3334,44 @@ let f
       "camlc_globals_table"
       (List.map global_list ~f:(fun x -> "&" ^ Var.Hashtbl.find globals x));
     table "camlc_static_table" (List.rev out.static_list);
-    Buffer.add_string
-      b
-      "const struct camlc_data camlc_program_data = { camlc_globals_table, \
-       camlc_static_table };\n\n";
+    (match mode with
+    | `Program | `Dynlink ->
+        Buffer.add_string
+          b
+          "const struct camlc_data camlc_program_data = { camlc_globals_table, \
+           camlc_static_table };\n\n"
+    | `Plugin ->
+        (* The entry point of the plugin *)
+        let defined, imported = units p in
+        let names name l =
+          Printf.bprintf
+            b
+            "static const char *const %s[] = { %s0 };\n"
+            name
+            (String.concat ~sep:"" (List.map l ~f:(fun n -> c_string n ^ ", ")))
+        in
+        names "camlc_plugin_units" defined;
+        names "camlc_plugin_imports" imported;
+        Printf.bprintf
+          b
+          "value camlc_plugin_program(void);\n\n\
+           static const struct camlc_plugin camlc_plugin = {\n\
+          \  { camlc_globals_table, camlc_static_table },\n\
+          \  camlc_plugin_units,\n\
+          \  camlc_plugin_imports,\n\
+          \  %d,\n\
+          \  %d,\n\
+          \  camlc_plugin_program\n\
+           };\n\n\
+           __attribute__((visibility(\"default\")))\n\
+           value camlc_plugin_init(void) { return camlc_load_plugin(&camlc_plugin); }\n\n"
+          (if dt then 1 else 0)
+          functions_max_arity);
     (* Partial applications: the closure holds the function and the
        arguments already given (after the code pointer of the CPS version,
        with effect handlers), see [camlc_make_pap] *)
     let e = if dt then 3 else 2 in
-    for m = 1 to out.max_arity - 1 do
+    for m = 1 to if program then out.max_arity - 1 else 0 do
       Printf.bprintf
         b
         "static value camlc_pap%d(%s) {\n\
@@ -3294,42 +3422,44 @@ let f
           m
           (m + 1)
     done;
-    (* Exact calls with the arguments in an array *)
-    Printf.bprintf
-      b
-      "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
-    for n = 1 to out.max_arity do
+    if program
+    then (
+      (* Exact calls with the arguments in an array *)
       Printf.bprintf
         b
-        "  case %d: return ((%s)Field(f, 0))(%s);\n"
-        n
-        (fun_type n)
-        (String.concat
-           ~sep:", "
-           (List.init ~len:n ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
-    done;
-    Printf.bprintf
-      b
-      "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
-    (* Same, for the CPS versions, the last argument being the continuation *)
-    Printf.bprintf
-      b
-      "value camlc_call_exact_cps(value f, int n, value *args) {\n  switch (n) {\n";
-    if dt
-    then
+        "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
       for n = 1 to out.max_arity do
         Printf.bprintf
           b
-          "  case %d: return ((%s)Field(f, 2))(%s);\n"
+          "  case %d: return ((%s)Field(f, 0))(%s);\n"
           n
-          (fun_type (n + 1))
+          (fun_type n)
           (String.concat
              ~sep:", "
-             (List.init ~len:(n + 1) ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
+             (List.init ~len:n ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
       done;
-    Printf.bprintf
-      b
-      "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n"
+      Printf.bprintf
+        b
+        "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
+      (* Same, for the CPS versions, the last argument being the continuation *)
+      Printf.bprintf
+        b
+        "value camlc_call_exact_cps(value f, int n, value *args) {\n  switch (n) {\n";
+      if dt
+      then
+        for n = 1 to out.max_arity do
+          Printf.bprintf
+            b
+            "  case %d: return ((%s)Field(f, 2))(%s);\n"
+            n
+            (fun_type (n + 1))
+            (String.concat
+               ~sep:", "
+               (List.init ~len:(n + 1) ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
+        done;
+      Printf.bprintf
+        b
+        "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n")
   in
   (* The application functions, in each part which may use them *)
   let helpers b =

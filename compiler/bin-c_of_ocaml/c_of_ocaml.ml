@@ -35,6 +35,7 @@ let memory () =
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
   \       c_of_ocaml [options] program.bc --split DIR\n\
+  \       c_of_ocaml [options] plugin.cmo|plugin.cma (-o plugin.c | --split DIR)\n\
   \       c_of_ocaml --runtime-files DIR"
 
 (* The C files of a split program, see [write_parts] *)
@@ -243,30 +244,38 @@ let uses_effects (p : Code.program) =
     p.blocks
     false
 
-let compile ~profile ~effects ~debug_info ~input_file ~output =
+let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
   let ic = open_in_bin input_file in
-  (match Parse_bytecode.from_channel ic with
-  | `Exe -> ()
-  | `Cmo _ | `Cma _ -> failwith "c_of_ocaml: only bytecode executables are supported");
-  let t = Timer.make () in
-  let parse ~link_info =
-    seek_in ic 0;
-    Parse_bytecode.from_exe
-      ~includes:[]
-      ~include_cmis:false
-      ~link_info
-      ~linkall:false
-      ~debug:debug_info
-      ic
+  let input = Parse_bytecode.from_channel ic in
+  let mode =
+    match input with
+    | `Exe -> if dynlink then `Dynlink else `Program
+    | `Cmo _ | `Cma _ -> `Plugin
   in
-  let one = parse ~link_info:false in
-  (* The sections of the bytecode executable read by the toplevel
-     (Symtable.init_toplevel) are linked in as data, if the program reads
-     them *)
+  let t = Timer.make () in
   let one =
-    if uses_primitive one.code "caml_dynlink_get_bytecode_sections"
-    then parse ~link_info:true
-    else one
+    match input with
+    | `Exe ->
+        (* With --dynlink, all the compilation units are registered by name *)
+        let parse ~link_info =
+          seek_in ic 0;
+          Parse_bytecode.from_exe
+            ~includes:[]
+            ~include_cmis:false
+            ~link_info
+            ~linkall:dynlink
+            ~debug:debug_info
+            ic
+        in
+        let one = parse ~link_info:false in
+        (* The sections of the bytecode executable read by the toplevel
+           (Symtable.init_toplevel) are linked in as data, if the program
+           reads them *)
+        if uses_primitive one.code "caml_dynlink_get_bytecode_sections"
+        then parse ~link_info:true
+        else one
+    | `Cmo unit -> Parse_bytecode.from_cmo ~debug:debug_info unit ic
+    | `Cma lib -> Parse_bytecode.from_cma ~debug:debug_info lib ic
   in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
@@ -275,9 +284,12 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
   Gc.compact ();
   memory ();
   Config.set_effects_backend
-    (match effects with
-    | Some e -> e
-    | None ->
+    (match effects, mode with
+    | Some e, _ -> e
+    | None, (`Dynlink | `Plugin) ->
+        (* The program and its plugins must agree *)
+        `Disabled
+    | None, `Program ->
         (* Effect handlers in dead code only, the module Effect linked with
            -linkall for instance, do not need the double translation, which
            doubles the size of the code *)
@@ -297,6 +309,7 @@ let compile ~profile ~effects ~debug_info ~input_file ~output =
   let c =
     Generate.f
       p
+      ~mode
       ~global_flow_data
       ~deadcode_sentinel:optimized.deadcode_sentinel
       ~debug_info
@@ -327,6 +340,7 @@ let () =
   let profile = ref Profile.O1 in
   let debug_info = ref false in
   let effects = ref None in
+  let dynlink = ref false in
   let word_size = ref 32 in
   let spec =
     [ "-o", Arg.String (fun s -> output_file := Some s), "FILE Write the C code to FILE"
@@ -369,7 +383,11 @@ let () =
                   | "disabled" -> `Disabled
                   | _ -> `Double_translation) )
       , " Support of effect handlers (default: double-translation if the program \
-         performs effects)" )
+         performs effects, disabled with --dynlink and for plugins)" )
+    ; ( "--dynlink"
+      , Arg.Set dynlink
+      , " Compile a program which can load plugins: its compilation units are registered \
+         by name, and kept whole. A .cmo or .cma file is compiled to a plugin" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
     ; "--enable", Arg.String Config.Flag.enable, "OPT Enable the option OPT"
     ; "--disable", Arg.String Config.Flag.disable, "OPT Disable the option OPT"
@@ -394,6 +412,7 @@ let () =
         compile
           ~profile:!profile
           ~effects:!effects
+          ~dynlink:!dynlink
           ~debug_info:!debug_info
           ~input_file
           ~output

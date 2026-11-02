@@ -1010,14 +1010,14 @@ let get_global state instrs i =
                 | None -> ()
                 | Some shape -> Shape.State.assign x shape));
             match Config.target () with
-            | `JavaScript ->
+            | `JavaScript | `C ->
                 (* Cache the var and mark as const; the prelude will
                    initialize it with a single caml_get_global
                    or caml_get_global_predef call. *)
                 g.is_const.(i) <- true;
                 g.vars.(i) <- Some x;
                 x, state, instrs
-            | `Wasm | `C ->
+            | `Wasm ->
                 let prim =
                   if Global_name.is_predef gn
                   then "caml_get_global_predef"

@@ -1373,6 +1373,102 @@ code_t caml_next_frame_pointer(value **sp, value **trsp)
 #endif
 
 /****************************************************************/
+/* Compilation units and plugins (see camlc.h) */
+
+struct camlc_unit {
+  char *name;
+  value block;
+  struct camlc_unit *next;
+};
+
+#define CAMLC_UNIT_BUCKETS 256
+static struct camlc_unit *camlc_units[CAMLC_UNIT_BUCKETS];
+
+static unsigned int camlc_unit_hash(const char *name)
+{
+  unsigned int h = 0;
+  for (; *name != 0; name++) h = h * 31 + (unsigned char)*name;
+  return h % CAMLC_UNIT_BUCKETS;
+}
+
+static struct camlc_unit *camlc_lookup_unit(const char *name)
+{
+  for (struct camlc_unit *u = camlc_units[camlc_unit_hash(name)]; u != NULL;
+       u = u->next)
+    if (strcmp(u->name, name) == 0) return u;
+  return NULL;
+}
+
+value camlc_register_unit(const char *name, value v)
+{
+  struct camlc_unit *u = camlc_lookup_unit(name);
+  if (u == NULL) {
+    unsigned int h = camlc_unit_hash(name);
+    u = malloc(sizeof(struct camlc_unit));
+    if (u == NULL) caml_fatal_error("c_of_ocaml: out of memory");
+    u->name = caml_stat_strdup(name);
+    u->block = Val_unit;
+    caml_register_generational_global_root(&u->block);
+    u->next = camlc_units[h];
+    camlc_units[h] = u;
+  }
+  caml_modify_generational_global_root(&u->block, v);
+  return Val_unit;
+}
+
+value camlc_find_unit(const char *name)
+{
+  struct camlc_unit *u = camlc_lookup_unit(name);
+  return u == NULL ? 0 : u->block;
+}
+
+static void camlc_unit_error(const char *msg, const char *name)
+{
+  char buf[512];
+  snprintf(buf, sizeof(buf), "c_of_ocaml: %s %s", msg, name);
+  caml_failwith(buf);
+}
+
+value camlc_get_unit(const char *name)
+{
+  struct camlc_unit *u = camlc_lookup_unit(name);
+  char buf[512];
+  if (u != NULL) return u->block;
+  snprintf(buf, sizeof(buf),
+           "c_of_ocaml: no implementation available for %s", name);
+  return camlc_exception_with_string(FAILURE_EXN, buf);
+}
+
+value camlc_load_plugin(const struct camlc_plugin *p)
+{
+  value res;
+  if (p->double_translation != camlc_double_translation)
+    caml_failwith(p->double_translation
+                      ? "c_of_ocaml: the plugin is compiled with double "
+                        "translation, not the program"
+                      : "c_of_ocaml: the program is compiled with double "
+                        "translation, not the plugin");
+  if (p->max_arity > camlc_max_arity) {
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "c_of_ocaml: the plugin has functions of arity %d, the program "
+             "supports %d",
+             p->max_arity, camlc_max_arity);
+    caml_failwith(buf);
+  }
+  for (const char *const *n = p->imports; *n != 0; n++)
+    if (camlc_lookup_unit(*n) == NULL)
+      camlc_unit_error("no implementation available for", *n);
+  for (const char *const *n = p->units; *n != 0; n++)
+    if (camlc_lookup_unit(*n) != NULL)
+      camlc_unit_error("the plugin defines the unit already loaded", *n);
+  camlc_register_data(&p->data);
+  res = camlc_ccall0(p->program);
+  if (Is_exception_result(res)) caml_raise(Extract_exception(res));
+  return Val_unit;
+}
+
+/****************************************************************/
 /* Bytecode and shared libraries (replaces meta.c and dynlink.c): the
    global data are supported, not the loading of code */
 

@@ -16,8 +16,20 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *)
 
+type mode =
+  [ `Program  (** A program *)
+  | `Dynlink
+    (** A program which can load plugins: it registers its compilation
+        units, and handles the partial applications of functions of arity up
+        to 64 *)
+  | `Plugin
+    (** A plugin, from compilation units which refer to the units of the
+        program or of other plugins by name *)
+  ]
+
 val f :
      Code.program
+  -> ?mode:mode
   -> global_flow_data:Global_flow.state * Global_flow.info
   -> deadcode_sentinel:Code.Var.t
   -> debug_info:bool
@@ -31,7 +43,9 @@ val f :
     whose closures are [closures] (see {!Closure_conversion.f}): a single C
     file, or with [part_size], several, which can be compiled separately: the
     static data and the tables of the runtime, then the functions, in parts
-    of about [part_size] bytes. With
+    of about [part_size] bytes. A plugin defines the entry point
+    [camlc_plugin_init] (see [runtime/c/camlc.h]), its other symbols are
+    hidden. With
     [debug_info], it records backtraces at the locations of the debug events of
     [p]. With effect handlers (double translation), [in_cps] are the CPS calls
     and [trampolined_calls] those which may bounce (see {!Effects.f}). *)
