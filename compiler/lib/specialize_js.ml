@@ -70,21 +70,24 @@ let specialize_instr opt_count ~target info i =
           incr opt_count;
           Let (x, Constant (Int Targetint.zero))
       | None -> i)
-  | Let (x, Prim (Extern ("caml_js_call", _), [ f; o; a ])), _ -> (
+  (* Not with C: the primitives on JavaScript values are C functions, called
+     with their arguments as OCaml values *)
+  | Let (x, Prim (Extern ("caml_js_call", _), [ f; o; a ])), (`JavaScript | `Wasm) -> (
       match the_block_contents_of info a with
       | Some a ->
           incr opt_count;
           let a = Array.map a ~f:(fun x -> Pv x) in
           Let (x, Prim (Extern ("%caml_js_opt_call", None), f :: o :: Array.to_list a))
       | _ -> i)
-  | Let (x, Prim (Extern ("caml_js_fun_call", _), [ f; a ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_fun_call", _), [ f; a ])), (`JavaScript | `Wasm) -> (
       match the_block_contents_of info a with
       | Some a ->
           incr opt_count;
           let a = Array.map a ~f:(fun x -> Pv x) in
           Let (x, Prim (Extern ("%caml_js_opt_fun_call", None), f :: Array.to_list a))
       | _ -> i)
-  | Let (x, Prim (Extern ("caml_js_meth_call", _), [ o; m; a ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_meth_call", _), [ o; m; a ])), (`JavaScript | `Wasm)
+    -> (
       match the_string_of info m with
       | Some m when Javascript.is_ident m -> (
           match the_block_contents_of info a with
@@ -100,14 +103,14 @@ let specialize_instr opt_count ~target info i =
                       :: Array.to_list a ) )
           | None -> i)
       | _ -> i)
-  | Let (x, Prim (Extern ("caml_js_new", _), [ c; a ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_new", _), [ c; a ])), (`JavaScript | `Wasm) -> (
       match the_block_contents_of info a with
       | Some a ->
           incr opt_count;
           let a = Array.map a ~f:(fun x -> Pv x) in
           Let (x, Prim (Extern ("%caml_js_opt_new", None), c :: Array.to_list a))
       | _ -> i)
-  | Let (x, Prim (Extern ("caml_js_object", _), [ a ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_object", _), [ a ])), (`JavaScript | `Wasm) -> (
       try
         let a =
           match the_def_of info a with
@@ -134,19 +137,22 @@ let specialize_instr opt_count ~target info i =
         Let
           (x, Prim (Extern ("%caml_js_opt_object", None), List.flatten (Array.to_list a)))
       with Exit -> i)
-  | Let (x, Prim (Extern ("caml_js_get", _), [ o; (Pv _ as f) ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_get", _), [ o; (Pv _ as f) ])), (`JavaScript | `Wasm)
+    -> (
       match the_native_string_of info f with
       | Some s ->
           incr opt_count;
           Let (x, Prim (Extern ("caml_js_get", None), [ o; Pc (NativeString s) ]))
       | _ -> i)
-  | Let (x, Prim (Extern ("caml_js_set", _), [ o; (Pv _ as f); v ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_set", _), [ o; (Pv _ as f); v ])), (`JavaScript | `Wasm)
+    -> (
       match the_native_string_of info f with
       | Some s ->
           incr opt_count;
           Let (x, Prim (Extern ("caml_js_set", None), [ o; Pc (NativeString s); v ]))
       | _ -> i)
-  | Let (x, Prim (Extern ("caml_js_delete", _), [ o; (Pv _ as f) ])), _ -> (
+  | Let (x, Prim (Extern ("caml_js_delete", _), [ o; (Pv _ as f) ])), (`JavaScript | `Wasm)
+    -> (
       match the_native_string_of info f with
       | Some s ->
           incr opt_count;
@@ -154,13 +160,14 @@ let specialize_instr opt_count ~target info i =
       | _ -> i)
   | ( Let
         (x, Prim (Extern (("caml_jsstring_of_string" | "caml_js_from_string"), _), [ y ]))
-    , _ ) -> (
+    , (`JavaScript | `Wasm) ) -> (
       match the_string_of info y with
       | Some s when String.is_valid_utf_8 s ->
           incr opt_count;
           Let (x, Constant (NativeString (Native_string.of_string s)))
       | Some _ | None -> i)
-  | Let (x, Prim (Extern ("caml_jsbytes_of_string", _), [ y ])), _ -> (
+  | Let (x, Prim (Extern ("caml_jsbytes_of_string", _), [ y ])), (`JavaScript | `Wasm)
+    -> (
       match the_string_of info y with
       | Some s ->
           incr opt_count;
