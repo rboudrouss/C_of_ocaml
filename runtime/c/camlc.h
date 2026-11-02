@@ -290,7 +290,8 @@ static inline value camlc_store_double_flat(value a, value i, double d)
 static inline void camlc_modify(volatile value *fp, value v)
 {
   if ((Is_long(v) && Is_long(*fp)) || Is_young((value)fp)) *fp = v;
-  else caml_modify(fp, v);
+  /* Without volatile in OCaml 4.14 */
+  else caml_modify((value *)fp, v);
 }
 
 /* Arrays and strings */
