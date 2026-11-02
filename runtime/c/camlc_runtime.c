@@ -48,6 +48,9 @@
 #include <caml/eventlog.h>
 #endif
 
+#define CAMLC_OCAML_5_5 \
+  (OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 5))
+
 /* Defined by the generated code */
 extern value camlc_program(void);
 extern const int camlc_global_data_size;
@@ -1592,6 +1595,23 @@ struct ext_table caml_prim_table;
 struct ext_table caml_prim_name_table;
 struct ext_table caml_shared_libs_path;
 
+#if CAMLC_OCAML_5_5
+/* Defined with the table of primitives by ocamlc -custom (prims.c) */
+const char_os *caml_runtime_standard_library_default = T("");
+
+CAMLexport char_os *caml_parse_ld_conf(const char_os *stdlib,
+                                       struct ext_table *table)
+{
+  (void)stdlib; (void)table;
+  return NULL;
+}
+
+CAMLprim value caml_dynlink_parse_ld_conf(value stdlib)
+{
+  (void)stdlib;
+  return Val_emptylist;
+}
+#else
 #if OCAML_VERSION_MAJOR >= 5
 CAMLexport const char_os *caml_get_stdlib_location(void)
 #else
@@ -1605,6 +1625,7 @@ CAMLexport char_os *caml_parse_ld_conf(void)
 {
   return NULL;
 }
+#endif
 
 void caml_build_primitive_table(char_os *lib_path, char_os *libs,
                                 char *req_prims)
@@ -1685,7 +1706,7 @@ static value camlc_run_program(void) { return camlc_program(); }
 
 int main(int argc, char **argv)
 {
-  char_os *exe_name;
+  char_os *exe_name, *proc_self_exe;
   value res;
   (void)argc;
 
@@ -1705,7 +1726,8 @@ int main(int argc, char **argv)
   caml_init_os_params();
   caml_init_gc();
   CAML_RUNTIME_EVENTS_INIT();
-  exe_name = caml_executable_name();
+  proc_self_exe = caml_executable_name();
+  exe_name = proc_self_exe;
   if (exe_name == NULL) exe_name = caml_search_exe_in_path(argv[0]);
   Caml_state->external_raise = NULL;
   caml_init_signals();
@@ -1716,7 +1738,8 @@ int main(int argc, char **argv)
   if (!caml_startup_aux(0)) return 0;
   caml_init_locale();
   caml_init_custom_operations();
-  exe_name = caml_executable_name();
+  proc_self_exe = caml_executable_name();
+  exe_name = proc_self_exe;
   if (exe_name == NULL) exe_name = caml_search_exe_in_path(argv[0]);
   caml_init_gc(caml_init_minor_heap_wsz, caml_init_heap_wsz,
                caml_init_heap_chunk_sz, caml_init_percent_free,
@@ -1743,7 +1766,12 @@ int main(int argc, char **argv)
   for (int i = 0; i < camlc_global_data_size; i++)
     Field(caml_global_data, i) = Val_unit;
 #endif
+#if CAMLC_OCAML_5_5
+  caml_sys_init(proc_self_exe, exe_name, argv);
+#else
+  (void)proc_self_exe;
   caml_sys_init(exe_name, argv);
+#endif
   res = camlc_ccall0(camlc_run_program);
   if (Is_exception_result(res))
     caml_fatal_uncaught_exception(Extract_exception(res));
