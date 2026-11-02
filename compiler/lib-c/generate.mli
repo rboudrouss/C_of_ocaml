@@ -30,6 +30,7 @@ type mode =
 val f :
      Code.program
   -> ?mode:mode
+  -> ?interfaces:(string * string) list
   -> global_flow_data:Global_flow.state * Global_flow.info
   -> deadcode_sentinel:Code.Var.t
   -> debug_info:bool
@@ -45,7 +46,9 @@ val f :
     static data and the tables of the runtime, then the functions, in parts
     of about [part_size] bytes. A plugin defines the entry point
     [camlc_plugin_init] (see [runtime/c/camlc.h]), its other symbols are
-    hidden. With
+    hidden. [interfaces] are the names and CRCs (in hexadecimal) of the
+    interfaces a program compiled with [`Dynlink] or a plugin is compiled
+    against, which the runtime checks when it loads a plugin. With
     [debug_info], it records backtraces at the locations of the debug events of
     [p]. With effect handlers (double translation), [in_cps] are the CPS calls
     and [trampolined_calls] those which may bounce (see {!Effects.f}). *)

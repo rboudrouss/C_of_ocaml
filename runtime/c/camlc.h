@@ -115,13 +115,21 @@ struct camlc_plugin {
   struct camlc_data data;
   const char *const *units;   /* The units it defines (ending with 0) */
   const char *const *imports; /* The units it refers to (ending with 0) */
+  /* The names and CRCs (in hexadecimal) of the interfaces it was compiled
+     against, ending with 0 */
+  const char *const *interfaces;
   int double_translation;     /* Compiled with double translation */
   int max_arity;              /* Maximal arity of its functions */
   value (*program)(void);     /* Initializes its units */
 };
 
+/* The interfaces of the program compiled with --dynlink, as those of a
+   plugin (empty without --dynlink) */
+extern const char *const camlc_program_interfaces[];
+
 /* Loads the plugin [p]: checks that it can be loaded (the units it refers
-   to are loaded, not the ones it defines, ...), then registers its data and
+   to are loaded, not the ones it defines, the interfaces it was compiled
+   against are those of the loaded units, ...), then registers its data and
    initializes its units. Raises the exception Failure if the plugin cannot
    be loaded, or the exception raised by its initialization. */
 value camlc_load_plugin(const struct camlc_plugin *p);

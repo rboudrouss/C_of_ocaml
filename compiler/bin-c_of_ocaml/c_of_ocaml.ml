@@ -277,6 +277,35 @@ let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
     | `Cmo unit -> Parse_bytecode.from_cmo ~debug:debug_info unit ic
     | `Cma lib -> Parse_bytecode.from_cma ~debug:debug_info lib ic
   in
+  (* The interfaces the program or the plugin is compiled against, checked
+     when a plugin is loaded *)
+  let interfaces =
+    let imports =
+      match input, mode with
+      | `Exe, `Dynlink -> Parse_bytecode.read_crcs ic
+      | `Exe, (`Program | `Plugin) -> []
+      | `Cmo unit, _ -> Ocaml_compiler.Cmo_format.imports unit
+      | `Cma lib, _ ->
+          List.concat_map lib.Cmo_format.lib_units ~f:Ocaml_compiler.Cmo_format.imports
+    in
+    let t = String.Hashtbl.create 64 in
+    List.iter imports ~f:(fun i ->
+        match Ocaml_compiler.Import_info.crc i with
+        | None -> ()
+        | Some crc -> (
+            let name = Ocaml_compiler.Import_info.name i in
+            let crc = Digest.to_hex crc in
+            match String.Hashtbl.find_opt t name with
+            | Some crc' when not (String.equal crc crc') ->
+                failwith
+                  (Printf.sprintf
+                     "c_of_ocaml: inconsistent assumptions over interface %s"
+                     name)
+            | _ -> String.Hashtbl.replace t name crc));
+    List.sort
+      ~cmp:(fun (a, _) (b, _) -> String.compare a b)
+      (String.Hashtbl.fold (fun n crc acc -> (n, crc) :: acc) t [])
+  in
   close_in ic;
   if times () then Format.eprintf "  parsing: %a@." Timer.print t;
   (* Little of what each phase allocates is still live at its end: without a
@@ -310,6 +339,7 @@ let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
     Generate.f
       p
       ~mode
+      ~interfaces
       ~global_flow_data
       ~deadcode_sentinel:optimized.deadcode_sentinel
       ~debug_info

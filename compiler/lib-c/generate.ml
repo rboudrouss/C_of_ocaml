@@ -2914,6 +2914,7 @@ let units (p : program) =
 let f
     (p : program)
     ?(mode : mode = `Program)
+    ?(interfaces = [])
     ~global_flow_data
     ~deadcode_sentinel
     ~debug_info
@@ -3334,12 +3335,25 @@ let f
       "camlc_globals_table"
       (List.map global_list ~f:(fun x -> "&" ^ Var.Hashtbl.find globals x));
     table "camlc_static_table" (List.rev out.static_list);
+    let interface_table storage name =
+      Printf.bprintf
+        b
+        "%sconst char *const %s[] = { %s0 };\n"
+        storage
+        name
+        (String.concat
+           ~sep:""
+           (List.map interfaces ~f:(fun (n, crc) ->
+                Printf.sprintf "%s, %s, " (c_string n) (c_string crc))))
+    in
     (match mode with
     | `Program | `Dynlink ->
         Buffer.add_string
           b
           "const struct camlc_data camlc_program_data = { camlc_globals_table, \
-           camlc_static_table };\n\n"
+           camlc_static_table };\n";
+        interface_table "" "camlc_program_interfaces";
+        Buffer.add_char b '\n'
     | `Plugin ->
         (* The entry point of the plugin *)
         let defined, imported = units p in
@@ -3352,6 +3366,7 @@ let f
         in
         names "camlc_plugin_units" defined;
         names "camlc_plugin_imports" imported;
+        interface_table "static " "camlc_plugin_interfaces";
         Printf.bprintf
           b
           "value camlc_plugin_program(void);\n\n\
@@ -3359,6 +3374,7 @@ let f
           \  { camlc_globals_table, camlc_static_table },\n\
           \  camlc_plugin_units,\n\
           \  camlc_plugin_imports,\n\
+          \  camlc_plugin_interfaces,\n\
           \  %d,\n\
           \  %d,\n\
           \  camlc_plugin_program\n\

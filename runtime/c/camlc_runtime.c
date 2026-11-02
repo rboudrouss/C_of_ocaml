@@ -1416,6 +1416,37 @@ value camlc_register_unit(const char *name, value v)
   return Val_unit;
 }
 
+/* The interfaces of the program and of the plugins, with their CRCs */
+struct camlc_interface {
+  char *name;
+  char *crc;
+  struct camlc_interface *next;
+};
+
+static struct camlc_interface *camlc_interfaces[CAMLC_UNIT_BUCKETS];
+
+static struct camlc_interface *camlc_lookup_interface(const char *name)
+{
+  for (struct camlc_interface *i = camlc_interfaces[camlc_unit_hash(name)];
+       i != NULL; i = i->next)
+    if (strcmp(i->name, name) == 0) return i;
+  return NULL;
+}
+
+static void camlc_register_interfaces(const char *const *l)
+{
+  for (; *l != 0; l += 2)
+    if (camlc_lookup_interface(l[0]) == NULL) {
+      unsigned int h = camlc_unit_hash(l[0]);
+      struct camlc_interface *i = malloc(sizeof(struct camlc_interface));
+      if (i == NULL) caml_fatal_error("c_of_ocaml: out of memory");
+      i->name = caml_stat_strdup(l[0]);
+      i->crc = caml_stat_strdup(l[1]);
+      i->next = camlc_interfaces[h];
+      camlc_interfaces[h] = i;
+    }
+}
+
 value camlc_find_unit(const char *name)
 {
   struct camlc_unit *u = camlc_lookup_unit(name);
@@ -1462,6 +1493,14 @@ value camlc_load_plugin(const struct camlc_plugin *p)
   for (const char *const *n = p->units; *n != 0; n++)
     if (camlc_lookup_unit(*n) != NULL)
       camlc_unit_error("the plugin defines the unit already loaded", *n);
+  for (const char *const *n = p->interfaces; *n != 0; n += 2) {
+    struct camlc_interface *i = camlc_lookup_interface(n[0]);
+    if (i != NULL && strcmp(i->crc, n[1]) != 0)
+      camlc_unit_error(
+          "the plugin was compiled against another version of the interface",
+          n[0]);
+  }
+  camlc_register_interfaces(p->interfaces);
   camlc_register_data(&p->data);
   res = camlc_ccall0(p->program);
   if (Is_exception_result(res)) caml_raise(Extract_exception(res));
@@ -1691,6 +1730,7 @@ int main(int argc, char **argv)
   Caml_state->external_raise = NULL;
 #endif
   camlc_register_data(&camlc_program_data);
+  camlc_register_interfaces(camlc_program_interfaces);
   camlc_init_stack();
 #if OCAML_VERSION_MAJOR >= 5
   caml_register_generational_global_root(&caml_global_data);
