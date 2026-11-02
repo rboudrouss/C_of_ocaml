@@ -1,0 +1,26 @@
+(executable
+ (name js_prims)
+ (modules js_prims)
+ (libraries js_of_ocaml)
+ (modes byte))
+
+(executable
+ (name list_prims)
+ (modules list_prims)
+ (libraries str))
+
+(rule
+ (target js_prims.c)
+ (deps js_prims.bc)
+ (action
+  (run %{exe:../bin-c_of_ocaml/c_of_ocaml.exe} %{deps} -o %{target})))
+
+(rule
+ (with-stdout-to
+  js_prims.output
+  (run ./list_prims.exe %{dep:js_prims.c})))
+
+(rule
+ (alias runtest)
+ (action
+  (diff js_prims.expected js_prims.output)))
