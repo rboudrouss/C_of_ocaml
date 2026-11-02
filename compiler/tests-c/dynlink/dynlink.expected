@@ -1,0 +1,14 @@
+main
+plugin: 3 ABC
+plugin: Not_found caught
+plugin: 3
+loaded plugin.so
+p4uses.so: Failure "c_of_ocaml: no implementation available for P2a"
+p2b uses p2a
+loaded p2.so
+p4uses p2a
+loaded p4uses.so
+p3.so: Plugin_error "boom"
+shared.so: Failure "c_of_ocaml: the plugin defines the unit already loaded Shared"
+p2.so: Failure "c_of_ocaml: the plugin defines the unit already loaded P2a"
+counter = 11, hooks: 8 500 45 -5
