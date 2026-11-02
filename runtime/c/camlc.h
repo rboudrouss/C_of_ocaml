@@ -465,6 +465,29 @@ void camlc_backtrace_call(const struct camlc_location *loc);
 value camlc_oo_cache_id(void);
 value camlc_get_cached_method(value obj, value tag, value cache_id);
 
+/* Polls, in the loops and at the start of the functions which make tail
+   calls, when the program uses threads or domains: when
+   [Camlc_poll_needed()], [camlc_poll] runs the asynchronous actions (stop
+   the world requests of the other domains, switch to another thread,
+   signal handlers, finalisers...), and returns [Val_unit] or an exception
+   result. */
+#if OCAML_VERSION_MAJOR >= 5
+/* The limit of an interrupted domain */
+#define Camlc_poll_needed() \
+  (atomic_load_relaxed(&Caml_state->young_limit) == CAML_UINTNAT_MAX)
+#else
+#define Camlc_poll_needed() (Caml_state->young_ptr < Caml_state->young_limit)
+#endif
+value camlc_poll(void);
+
+#if OCAML_VERSION_MAJOR >= 5
+/* The allocation of a block when the minor heap is full or an
+   asynchronous action is pending: it also switches to another thread if
+   requested */
+void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize);
+#define Camlc_alloc_small_GC(dom_st, wosize) camlc_alloc_small_gc(dom_st, wosize)
+#endif
+
 /* Allocation of a block of [wosize] fields, which the caller must then
    initialize with plain stores (small blocks) or [caml_initialize]
    (large blocks, [wosize > Max_young_wosize]) before the next
@@ -473,7 +496,7 @@ static inline value camlc_alloc_small(mlsize_t wosize, tag_t tag)
 {
   value v;
 #if OCAML_VERSION_MAJOR >= 5
-  Alloc_small(v, wosize, tag, Alloc_small_enter_GC);
+  Alloc_small(v, wosize, tag, Camlc_alloc_small_GC);
 #else
   /* Nothing to do around a GC in bytecode */
 #define Setup_for_gc

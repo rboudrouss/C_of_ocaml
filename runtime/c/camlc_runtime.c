@@ -264,6 +264,35 @@ static void camlc_init_stack(void)
 }
 
 /****************************************************************/
+/* Asynchronous actions (see camlc.h) */
+
+value camlc_poll(void)
+{
+#if OCAML_VERSION_MAJOR >= 5
+  caml_result r = caml_process_pending_actions_res();
+  if (caml_result_is_exception(r)) return Make_exception_result(r.data);
+  return Val_unit;
+#else
+  return caml_process_pending_actions_exn();
+#endif
+}
+
+#if OCAML_VERSION_MAJOR >= 5
+void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
+{
+  if (atomic_load_relaxed(&dom_st->requested_external_interrupt)) {
+    /* The allocation is undone while the other threads run */
+    dom_st->young_ptr += Whsize_wosize(wosize);
+    caml_process_external_interrupt();
+    dom_st->young_ptr -= Whsize_wosize(wosize);
+    if (!Caml_check_gc_interrupt(dom_st)) return;
+  }
+  caml_alloc_small_dispatch(dom_st, wosize, CAML_DO_TRACK | CAML_FROM_C, 1,
+                            NULL);
+}
+#endif
+
+/****************************************************************/
 /* Exceptions */
 
 /* Call [f], turning an exception it raises with longjmp into an

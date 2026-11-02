@@ -147,6 +147,8 @@ type output =
         (** The closed closures and the constants, which are not free
             variables *)
   ; split : bool  (** The code is split into several files *)
+  ; polling : bool
+        (** The program uses threads or domains: the code polls (see [polls]) *)
   ; mutable raising : Var.Set.t  (** The functions which may raise *)
   ; mutable collecting : Var.Set.t
         (** The functions which may trigger a garbage collection and return *)
@@ -2169,6 +2171,113 @@ and handler_live ctx live_in pc =
       in
       Var.Set.remove exn_var (cont_uses ctx live_in h Var.Set.empty)
 
+(* Polls (see [Camlc_poll_needed] in camlc.h), when the program uses
+   threads or domains: the code must let the other threads run, and take
+   part in the collections of the other domains, even when it does not
+   allocate. A function polls at the start of its loops, and at its start
+   if it makes a tail call, which may loop as well. With OCaml 5, an
+   allocation of the minor heap polls already (but for the signal handlers
+   and the finalisers): there is no poll at the start of a loop or of a
+   function whose first block allocates. Returns whether it polls at its
+   start, and the start of its loops. *)
+let polls out blocks pc =
+  if not out.polling
+  then false, Addr.Set.empty
+  else
+    let allocates pc =
+      Ocaml_version.compare Ocaml_version.current [ 5; 0 ] >= 0
+      && List.exists (Addr.Map.find pc blocks).body ~f:(fun i ->
+          match i with
+          | Let (_, Block (_, a, _, _, _)) ->
+              (* Allocated in the minor heap, even with unboxed floats *)
+              Array.length a > 0 && Array.length a <= 128
+          | _ -> false)
+    in
+    let state = Addr.Hashtbl.create 16 in
+    let headers = ref Addr.Set.empty in
+    let tail_call = ref false in
+    let rec visit pc =
+      match Addr.Hashtbl.find_opt state pc with
+      | Some true -> if not (allocates pc) then headers := Addr.Set.add pc !headers
+      | Some false -> ()
+      | None ->
+          Addr.Hashtbl.add state pc true;
+          let block = Addr.Map.find pc blocks in
+          (match List.rev block.body, block.branch with
+          | Let (x, Apply _) :: _, Return y when Var.equal x y -> tail_call := true
+          | _ -> ());
+          Code.fold_children blocks pc (fun pc' () -> visit pc') ();
+          Addr.Hashtbl.replace state pc false
+    in
+    visit pc;
+    !tail_call && not (allocates pc), !headers
+
+let uses_threads (p : program) =
+  Addr.Map.fold
+    (fun _ block acc ->
+      acc
+      || List.exists block.body ~f:(fun i ->
+          match i with
+          | Let
+              ( _
+              , Prim
+                  ( Extern
+                      ( ( "caml_thread_initialize"
+                        | "caml_thread_new"
+                        | "caml_domain_spawn" )
+                      , _ )
+                  , _ ) ) -> true
+          | _ -> false))
+    p.blocks
+    false
+
+(* Whether a variable may hold a pointer to the heap *)
+let gc_value ctx x =
+  if Var.equal x ctx.env_var
+  then not ctx.static_env
+  else
+    repr_equal (var_repr ctx x) Value
+    && (match Typing.var_type ctx.out.types x with
+      | Int _ -> false
+      | _ -> true)
+    && not
+         (BitSet.mem ctx.facts.is_int (Var.idx x)
+         || BitSet.mem ctx.facts.is_static (Var.idx x))
+
+(* A poll: the values of the C variables [vars] are saved on the shadow
+   stack meanwhile (in the reserve below the limit, if needed); [raise]
+   raises the exception result [r] *)
+let poll_stmt vars ~raise =
+  let n = List.length vars in
+  let save =
+    if n = 0
+    then ""
+    else
+      Printf.sprintf
+        "value *pp = camlc_sp - %d; camlc_sp = pp; %s "
+        n
+        (String.concat
+           ~sep:" "
+           (List.mapi vars ~f:(fun i x -> Printf.sprintf "pp[%d] = %s;" i x)))
+  in
+  let restore =
+    if n = 0
+    then ""
+    else
+      Printf.sprintf
+        " %s camlc_sp = pp + %d;"
+        (String.concat
+           ~sep:" "
+           (List.mapi vars ~f:(fun i x -> Printf.sprintf "%s = pp[%d];" x i)))
+        n
+  in
+  Printf.sprintf
+    "if (CAMLC_UNLIKELY(Camlc_poll_needed())) { %sr = camlc_poll();%s if \
+     (CAMLC_UNLIKELY(Is_exception_result(r))) %s }"
+    save
+    restore
+    raise
+
 (* The variables which must be kept in the frame *)
 let rooted_variables ctx pcs ~params =
   let live_in = Addr.Hashtbl.create 64 in
@@ -2219,20 +2328,7 @@ let rooted_variables ctx pcs ~params =
                      | None -> l));
              instr_uses ctx i live_after)));
   ignore params;
-  ( Var.Set.filter
-      (fun x ->
-        if Var.equal x ctx.env_var
-        then not ctx.static_env
-        else
-          repr_equal (var_repr ctx x) Value
-          && (match Typing.var_type ctx.out.types x with
-            | Int _ -> false
-            | _ -> true)
-          && not
-               (BitSet.mem ctx.facts.is_int (Var.idx x)
-               || BitSet.mem ctx.facts.is_static (Var.idx x)))
-      !rooted
-  , live_in )
+  Var.Set.filter (fun x -> gc_value ctx x) !rooted, live_in
 
 (* The slots of the rooted variables: two variables live at the same time
    have different slots. A variable interferes with the variables live
@@ -2436,6 +2532,12 @@ let analyze_functions out facts global_flow_info closures blocks functions =
             visit pc2 depth)
     in
     visit pc 0;
+    (* A poll may raise and collect *)
+    let entry_poll, loop_polls = polls out blocks pc in
+    if entry_poll || not (Addr.Set.is_empty loop_polls)
+    then (
+      raises := true;
+      gcs := true);
     !raises, !outer, !gcs, !gcs || !any_gcs, !inner
   in
   (* The functions with the property, and the callers of each function *)
@@ -2544,6 +2646,7 @@ let translate_function
       | Pushtrap (_, x, _) -> add_local x
       | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ());
   let rooted, live_in = rooted_variables ctx pcs ~params in
+  let entry_poll, loop_polls = polls out blocks pc in
   assign_slots ctx pcs ~params ~entry:(pc, args) rooted live_in;
   let frame_size = Var.Hashtbl.fold (fun _ i n -> max n (i + 1)) ctx.slots 0 in
   (* The first slots, written at the start of the function: those of the
@@ -2645,6 +2748,18 @@ let translate_function
       | Some s -> ctx.framed <- Addr.Set.mem pc s
       | None -> ());
       Printf.bprintf ctx.buf " %s:;\n" (label ctx pc);
+      if Addr.Set.mem pc loop_polls
+      then
+        line
+          ctx
+          "%s"
+          (poll_stmt
+             (Addr.Hashtbl.find live_in pc
+             |> Var.Set.elements
+             |> List.filter ~f:(fun x ->
+                 (not (Var.Hashtbl.mem ctx.slots x)) && gc_value ctx x)
+             |> List.map ~f:(fun x -> local ctx x))
+             ~raise:(raise_stmt ctx traps "r"));
       (* An application whose result is returned, outside any handler *)
       let tail_call =
         let rec strip_events l =
@@ -2706,6 +2821,21 @@ let translate_function
   Buffer.add_string
     fb
     "  value r, b, *argv, *bx;\n  (void)r; (void)b; (void)argv; (void)bx;\n";
+  if entry_poll
+  then
+    Printf.bprintf
+      fb
+      "  %s\n"
+      (poll_stmt
+         (List.concat
+            (List.mapi params ~f:(fun i x ->
+                 if not (gc_value ctx x)
+                 then []
+                 else if Var.Hashtbl.mem ctx.slots x
+                 then [ Printf.sprintf "a%d" i ]
+                 else [ local_name ctx x ]))
+         @ if List.is_empty env || static_env then [] else [ "env" ])
+         ~raise:"return r;");
   if frame_size > 0 && Option.is_some ctx.framed_blocks
   then Printf.bprintf fb "#define FRAME_SIZE %d\n  value *fp;\n" frame_size
   else if frame_size > 0
@@ -3027,6 +3157,7 @@ let f
     ; globals
     ; statics = Var.Hashtbl.create 1024
     ; split = Option.is_some part_size
+    ; polling = uses_threads p
     ; raising = Var.Set.empty
     ; collecting = Var.Set.empty
     ; collecting_on_raise = Var.Set.empty
