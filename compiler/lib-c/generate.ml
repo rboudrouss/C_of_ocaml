@@ -977,81 +977,6 @@ let primitive out name (args : parg list) =
                   then Checked (c_call (Printf.sprintf "camlc_ccall%d" n) (name :: args))
                   else Ccallv)))
 
-(* The types of the primitives computed on unboxed numbers, for {!Typing}:
-   whether they take unboxed arguments, and their result *)
-let register_typing_primitives () =
-  let float = Typing.Number (Float, Unboxed) in
-  let int = Typing.Int Normalized in
-  List.iter float_binops ~f:(fun (name, _) -> Typing.register_prim name ~unbox:true float);
-  List.iter float_functions ~f:(fun (name, _) ->
-      Typing.register_prim name ~unbox:true float);
-  List.iter float_comparisons ~f:(fun (name, _) ->
-      Typing.register_prim name ~unbox:true int);
-  Typing.register_prim "caml_neg_float" ~unbox:true float;
-  Typing.register_prim "caml_float_of_int" ~unbox:false float;
-  Typing.register_prim "caml_int_of_float" ~unbox:true int;
-  Typing.register_prim "caml_float_compare" ~unbox:true int;
-  Typing.register_prim "caml_floatarray_unsafe_get" ~unbox:false float;
-  Typing.register_prim "caml_floatarray_unsafe_set" ~unbox:true int;
-  List.iter boxed_ints ~f:(fun (t, r) ->
-      let number : Typing.boxed_number =
-        match r with
-        | Unboxed_int64 -> Int64
-        | Unboxed_int32 -> Int32
-        | Unboxed_nativeint -> Nativeint
-        | Value | Double -> assert false
-      in
-      let typ = Typing.Number (number, Unboxed) in
-      List.iter
-        ~f:(fun f ->
-          Typing.register_prim (Printf.sprintf "caml_%s_%s" t f) ~unbox:true typ)
-        [ "add"
-        ; "sub"
-        ; "mul"
-        ; "and"
-        ; "or"
-        ; "xor"
-        ; "neg"
-        ; "shift_left"
-        ; "shift_right"
-        ; "shift_right_unsigned"
-        ; "of_float"
-        ; "bswap"
-        ];
-      Typing.register_prim (Printf.sprintf "caml_%s_of_int" t) ~unbox:false typ;
-      Typing.register_prim (Printf.sprintf "caml_%s_to_int" t) ~unbox:true int;
-      Typing.register_prim (Printf.sprintf "caml_%s_to_float" t) ~unbox:true float;
-      Typing.register_prim (Printf.sprintf "caml_%s_compare" t) ~unbox:true int;
-      List.iter boxed_ints ~f:(fun (t', r') ->
-          if not (repr_equal r r')
-          then (
-            let number' : Typing.boxed_number =
-              match r' with
-              | Unboxed_int64 -> Int64
-              | Unboxed_int32 -> Int32
-              | Unboxed_nativeint -> Nativeint
-              | Value | Double -> assert false
-            in
-            Typing.register_prim (Printf.sprintf "caml_%s_of_%s" t t') ~unbox:true typ;
-            Typing.register_prim
-              (Printf.sprintf "caml_%s_to_%s" t t')
-              ~unbox:true
-              (Typing.Number (number', Unboxed)))));
-  Typing.register_prim
-    "caml_int64_bits_of_float"
-    ~unbox:true
-    (Typing.Number (Int64, Unboxed));
-  Typing.register_prim "caml_int64_float_of_bits" ~unbox:true float;
-  List.iter
-    [ "caml_string_get32", Typing.Int32
-    ; "caml_bytes_get32", Int32
-    ; "caml_string_get64", Int64
-    ; "caml_bytes_get64", Int64
-    ]
-    ~f:(fun (name, n) -> Typing.register_prim name ~unbox:false (Number (n, Unboxed)));
-  List.iter [ "caml_bytes_set32"; "caml_bytes_set64" ] ~f:(fun name ->
-      Typing.register_prim name ~unbox:true (Typing.Int Normalized))
-
 (* Primitives whose result is an integer *)
 let int_primitives =
   StringSet.of_list
@@ -1127,6 +1052,86 @@ let int_primitives =
     ; "caml_int32_compare"
     ; "caml_nativeint_compare"
     ]
+
+(* The types of the primitives computed on unboxed numbers, for {!Typing}:
+   whether they take unboxed arguments, and their result *)
+let register_typing_primitives () =
+  let float = Typing.Number (Float, Unboxed) in
+  let int = Typing.Int Normalized in
+  (* The primitives returning integers, unless their type is more precise
+     below *)
+  StringSet.iter
+    (fun name -> Typing.register_prim name ~unbox:false (Typing.Int Unnormalized))
+    int_primitives;
+  List.iter float_binops ~f:(fun (name, _) -> Typing.register_prim name ~unbox:true float);
+  List.iter float_functions ~f:(fun (name, _) ->
+      Typing.register_prim name ~unbox:true float);
+  List.iter float_comparisons ~f:(fun (name, _) ->
+      Typing.register_prim name ~unbox:true int);
+  Typing.register_prim "caml_neg_float" ~unbox:true float;
+  Typing.register_prim "caml_float_of_int" ~unbox:false float;
+  Typing.register_prim "caml_int_of_float" ~unbox:true int;
+  Typing.register_prim "caml_float_compare" ~unbox:true int;
+  Typing.register_prim "caml_floatarray_unsafe_get" ~unbox:false float;
+  Typing.register_prim "caml_floatarray_unsafe_set" ~unbox:true int;
+  List.iter boxed_ints ~f:(fun (t, r) ->
+      let number : Typing.boxed_number =
+        match r with
+        | Unboxed_int64 -> Int64
+        | Unboxed_int32 -> Int32
+        | Unboxed_nativeint -> Nativeint
+        | Value | Double -> assert false
+      in
+      let typ = Typing.Number (number, Unboxed) in
+      List.iter
+        ~f:(fun f ->
+          Typing.register_prim (Printf.sprintf "caml_%s_%s" t f) ~unbox:true typ)
+        [ "add"
+        ; "sub"
+        ; "mul"
+        ; "and"
+        ; "or"
+        ; "xor"
+        ; "neg"
+        ; "shift_left"
+        ; "shift_right"
+        ; "shift_right_unsigned"
+        ; "of_float"
+        ; "bswap"
+        ];
+      Typing.register_prim (Printf.sprintf "caml_%s_of_int" t) ~unbox:false typ;
+      Typing.register_prim (Printf.sprintf "caml_%s_to_int" t) ~unbox:true int;
+      Typing.register_prim (Printf.sprintf "caml_%s_to_float" t) ~unbox:true float;
+      Typing.register_prim (Printf.sprintf "caml_%s_compare" t) ~unbox:true int;
+      List.iter boxed_ints ~f:(fun (t', r') ->
+          if not (repr_equal r r')
+          then (
+            let number' : Typing.boxed_number =
+              match r' with
+              | Unboxed_int64 -> Int64
+              | Unboxed_int32 -> Int32
+              | Unboxed_nativeint -> Nativeint
+              | Value | Double -> assert false
+            in
+            Typing.register_prim (Printf.sprintf "caml_%s_of_%s" t t') ~unbox:true typ;
+            Typing.register_prim
+              (Printf.sprintf "caml_%s_to_%s" t t')
+              ~unbox:true
+              (Typing.Number (number', Unboxed)))));
+  Typing.register_prim
+    "caml_int64_bits_of_float"
+    ~unbox:true
+    (Typing.Number (Int64, Unboxed));
+  Typing.register_prim "caml_int64_float_of_bits" ~unbox:true float;
+  List.iter
+    [ "caml_string_get32", Typing.Int32
+    ; "caml_bytes_get32", Int32
+    ; "caml_string_get64", Int64
+    ; "caml_bytes_get64", Int64
+    ]
+    ~f:(fun (name, n) -> Typing.register_prim name ~unbox:false (Number (n, Unboxed)));
+  List.iter [ "caml_bytes_set32"; "caml_bytes_set64" ] ~f:(fun name ->
+      Typing.register_prim name ~unbox:true (Typing.Int Normalized))
 
 (* Primitives whose arguments are integers *)
 let int_argument_primitives =
