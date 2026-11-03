@@ -3013,6 +3013,14 @@ type mode =
    tables of the program) *)
 let dynlink_max_arity = 64
 
+(* The maximal arity of the functions whose partial applications call them
+   directly, see [camlc_curry_code] *)
+let curry_max = 8
+
+(* The maximal number of arguments of the partial applications allocated
+   by [camlc_partial<n>] (small blocks) *)
+let partial_max = 64
+
 (* The names of the compilation units defined by [p], and of those it
    refers to *)
 let units (p : program) =
@@ -3425,6 +3433,12 @@ let f
       if dt
       then Printf.bprintf b "static value camlc_pap_cps%d(%s);\n" m (fun_params (m + 1))
     done;
+    let curry_max = if program then min out.max_arity curry_max else 0 in
+    for a = 2 to curry_max do
+      for n = 1 to a - 1 do
+        Printf.bprintf b "static value camlc_curry%d_%d(%s);\n" a n (fun_params (a - n))
+      done
+    done;
     Buffer.add_char b '\n';
     if program
     then Printf.bprintf b "const int camlc_global_data_size = %d;\n" out.global_data_size;
@@ -3442,6 +3456,20 @@ let f
            ~sep:""
            (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
                 Printf.sprintf ", (value)&camlc_pap%d" (i + 1))));
+      Printf.bprintf b "const int camlc_curry_max = %d;\n" curry_max;
+      Printf.bprintf
+        b
+        "const value camlc_curry_code[] = { %s };\n"
+        (String.concat
+           ~sep:", "
+           (List.concat
+              (List.init
+                 ~len:(max 0 (curry_max - 1))
+                 ~f:(fun i ->
+                   let a = i + 2 in
+                   List.init ~len:(a - 1) ~f:(fun n ->
+                       Printf.sprintf "(value)&camlc_curry%d_%d" a (n + 1))))
+           @ [ "0" ]));
       Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
       Printf.bprintf
         b
@@ -3569,6 +3597,29 @@ let f
           m
           (m + 1)
     done;
+    (* The partial applications of the functions of arity at most
+       [curry_max]: once applied to the arguments left, they call the
+       function directly *)
+    for a = 2 to curry_max do
+      for n = 1 to a - 1 do
+        Printf.bprintf
+          b
+          "static value camlc_curry%d_%d(%s) {\n\
+          \  value g = Field(env, %d);\n\
+          \  return ((%s)Field(g, 0))(%s);\n\
+           }\n\n"
+          a
+          n
+          (fun_params (a - n))
+          e
+          (fun_type a)
+          (String.concat
+             ~sep:", "
+             (List.init ~len:n ~f:(fun i -> Printf.sprintf "Field(env, %d)" (e + 1 + i))
+             @ List.init ~len:(a - n) ~f:(fun i -> Printf.sprintf "a%d" i)
+             @ [ "g" ]))
+      done
+    done;
     if program
     then (
       (* Exact calls with the arguments in an array *)
@@ -3658,15 +3709,71 @@ let f
           (String.concat ~sep:", " args)
           n)
       out.cps_apply_arities;
+    (* The partial applications of unknown functions to [n] arguments, as
+       [camlc_make_pap]; not in plugins, which do not see the tables of the
+       program *)
+    let partial_max =
+      match mode with
+      | `Program | `Dynlink -> partial_max
+      | `Plugin -> 0
+    in
+    let e = if dt then 3 else 2 in
+    IntSet.iter
+      (fun n ->
+        Printf.bprintf
+          b
+          "static value camlc_partial%d(value f, %s) {\n\
+          \  int arity = Arity_closinfo(Closinfo_val(f));\n\
+          \  value *fp = camlc_sp - %d, r;\n\
+          \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();\n\
+          \  camlc_sp = fp;\n\
+          \  fp[0] = f;\n\
+           %s  r = camlc_alloc_small(%d, Closure_tag);\n\
+          \  Field(r, 0) = arity <= camlc_curry_max\n\
+          \    ? camlc_curry_code[(arity - 1) * (arity - 2) / 2 + %d]\n\
+          \    : camlc_pap_code[arity - %d];\n\
+          \  Field(r, 1) = Make_closinfo(arity - %d, %d);\n\
+           %s  Field(r, %d) = fp[0];\n\
+           %s  camlc_sp = fp + %d;\n\
+          \  return r;\n\
+           }\n\n"
+          n
+          (String.concat
+             ~sep:", "
+             (List.init ~len:n ~f:(fun i -> Printf.sprintf "value a%d" i)))
+          (n + 1)
+          (String.concat
+             ~sep:""
+             (List.init ~len:n ~f:(fun i -> Printf.sprintf "  fp[%d] = a%d;\n" (i + 1) i)))
+          (e + 1 + n)
+          (n - 1)
+          n
+          n
+          e
+          (if dt
+           then
+             Printf.sprintf
+               "  Field(r, 2) = Field(fp[0], 2) ? camlc_pap_cps_code[arity - %d] : 0;\n"
+               n
+           else "")
+          e
+          (String.concat
+             ~sep:""
+             (List.init ~len:n ~f:(fun i ->
+                  Printf.sprintf "  Field(r, %d) = fp[%d];\n" (e + 1 + i) (i + 1))))
+          (n + 1))
+      (IntSet.filter (fun n -> n <= partial_max) out.apply_arities);
     IntSet.iter
       (fun n ->
         let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
         Printf.bprintf
           b
           "static inline value camlc_apply%d(value f, %s) {\n\
-          \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
+          \  int arity = Arity_closinfo(Closinfo_val(f));\n\
+          \  if (arity == %d)\n\
           \    CAMLC_MUSTTAIL return ((%s)Field(f, 0))(%s, f);\n\
           \  value args[%d] = { %s };\n\
+          \  if (arity > %d) return %s;\n\
           \  return camlc_applyv(f, %d, args);\n\
            }\n\n"
           n
@@ -3676,6 +3783,10 @@ let f
           (String.concat ~sep:", " args)
           n
           (String.concat ~sep:", " args)
+          n
+          (if n <= partial_max
+           then Printf.sprintf "camlc_partial%d(f, %s)" n (String.concat ~sep:", " args)
+           else Printf.sprintf "camlc_make_pap(f, %d, args)" n)
           n)
       out.apply_arities
   in

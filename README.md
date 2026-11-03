@@ -165,7 +165,10 @@ pointers as code pointers, so `compare`, `hash` and `Obj` keep working.
 - Calls to statically known functions are direct C calls.
 - Other calls with the right number of arguments go through the code pointer.
 - All remaining calls go through `camlc_applyN`, which handles partial and
-  over-application.
+  over-application. A partial application allocates a closure whose code
+  calls the function directly once given the arguments left (generated for
+  the functions of arity up to 8, like the `caml_curry` functions of
+  ocamlopt).
 
 With the WebAssembly tail call extension (`-mtail-call`), a call in tail
 position is emitted with `musttail` when the callee takes as many arguments as

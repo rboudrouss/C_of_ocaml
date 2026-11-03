@@ -682,6 +682,9 @@ value camlc_make_pap(value f, int n, value *args)
   mlsize_t wosize = e + 1 + n;
   value *fp = camlc_sp - (n + 1);
   value r, cps = 0;
+  value code = arity <= camlc_curry_max
+    ? camlc_curry_code[(arity - 1) * (arity - 2) / 2 + n - 1]
+    : camlc_pap_code[arity - n];
   if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
   if (camlc_double_translation && Field(f, 2) != 0)
     cps = camlc_pap_cps_code[arity - n];
@@ -690,14 +693,14 @@ value camlc_make_pap(value f, int n, value *args)
   for (int i = 0; i < n; i++) fp[1 + i] = args[i];
   if (wosize <= Max_young_wosize) {
     r = camlc_alloc_small(wosize, Closure_tag);
-    Field(r, 0) = camlc_pap_code[arity - n];
+    Field(r, 0) = code;
     Field(r, 1) = Make_closinfo(arity - n, e);
     if (camlc_double_translation) Field(r, 2) = cps;
     Field(r, e) = fp[0];
     for (int i = 0; i < n; i++) Field(r, e + 1 + i) = fp[1 + i];
   } else {
     r = caml_alloc_shr(wosize, Closure_tag);
-    Field(r, 0) = camlc_pap_code[arity - n];
+    Field(r, 0) = code;
     Field(r, 1) = Make_closinfo(arity - n, e);
     if (camlc_double_translation) Field(r, 2) = cps;
     caml_initialize(&Field(r, e), fp[0]);
@@ -713,6 +716,7 @@ value camlc_applyv(value f, int n, value *args)
   value *fp = camlc_sp - (n + 1);
   value r;
   int i = 0;
+  if (Arity_closinfo(Closinfo_val(f)) > n) return camlc_make_pap(f, n, args);
   if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
   camlc_sp = fp;
   fp[0] = f;

@@ -166,6 +166,12 @@ value camlc_call_exact(value f, int n, value *args);
 /* Code pointers of the partial applications of each arity */
 extern const value camlc_pap_code[];
 extern const int camlc_max_arity;
+/* Code pointers of the partial applications of the functions of arity at
+   most [camlc_curry_max], which call them directly: the one of a function
+   of arity [a] applied to [n] arguments is at index
+   [(a - 1) * (a - 2) / 2 + n - 1] */
+extern const value camlc_curry_code[];
+extern const int camlc_curry_max;
 /* Allocate the closure for the partial application of [f] to [n]
    arguments [args] */
 value camlc_make_pap(value f, int n, value *args);
