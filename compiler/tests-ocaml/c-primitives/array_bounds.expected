@@ -1,0 +1,15 @@
+sum: 285
+get past the end: Invalid_argument "index out of bounds"
+get negative: Invalid_argument "index out of bounds"
+set past the end: Invalid_argument "index out of bounds"
+set kept: 9
+float get: 12
+float get past the end: Invalid_argument "index out of bounds"
+float set past the end: Invalid_argument "index out of bounds"
+string get: 1
+string set past the end: Invalid_argument "index out of bounds"
+generic: 7
+generic get past the end: Invalid_argument "index out of bounds"
+generic set past the end: Invalid_argument "index out of bounds"
+generic set: 12
+through a call: Invalid_argument "index out of bounds"

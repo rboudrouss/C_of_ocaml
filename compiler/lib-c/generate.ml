@@ -865,10 +865,14 @@ let primitive out name (args : parg list) =
                     (c_call
                        ("camlc" ^ String.sub name ~pos:4 ~len:(String.length name - 4))
                        args)
-              | "caml_check_bound", 2 -> Checked (c_call "camlc_check_bound" args)
-              | "caml_check_bound_float", 2 ->
-                  Checked (c_call "camlc_check_bound_float" args)
-              | "caml_check_bound_gen", 2 -> Checked (c_call "camlc_check_bound_gen" args)
+              | ( ("caml_check_bound" | "caml_check_bound_float" | "caml_check_bound_gen")
+                , 2 ) ->
+                  Guarded
+                    ( c_call
+                        ("camlc" ^ String.sub name ~pos:4 ~len:(String.length name - 4))
+                        args
+                    , Value
+                    , arg 0 )
               | "caml_array_unsafe_get", 2 -> plain (c_call "camlc_array_unsafe_get" args)
               | "caml_array_unsafe_set_addr", 3 ->
                   plain

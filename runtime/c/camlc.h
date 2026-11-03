@@ -329,18 +329,20 @@ static inline void camlc_modify(volatile value *fp, value v)
 
 /* Arrays and strings */
 
+/* The bound checks of arrays return [Val_unit] or the exception, so that
+   the C compiler knows that the array is not an exception result */
 static inline value camlc_check_bound(value a, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Wosize_val(a)))
     return camlc_raise_bound_error();
-  return a;
+  return Val_unit;
 }
 
 static inline value camlc_check_bound_float(value a, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Wosize_val(a) / Double_wosize))
     return camlc_raise_bound_error();
-  return a;
+  return Val_unit;
 }
 
 static inline mlsize_t camlc_array_length(value a)
@@ -353,7 +355,7 @@ static inline value camlc_check_bound_gen(value a, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= camlc_array_length(a)))
     return camlc_raise_bound_error();
-  return a;
+  return Val_unit;
 }
 
 static inline value camlc_array_unsafe_get(value a, value i)
