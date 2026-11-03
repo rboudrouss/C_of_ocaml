@@ -45,6 +45,10 @@ if [ "$WORD_SIZE" = 64 ]; then
   LDFLAGS="-sMAXIMUM_MEMORY=16GB"
 fi
 if [ -n "${EFFECTS:-}" ]; then COOC_FLAGS="$COOC_FLAGS --effects $EFFECTS"; fi
+# A runtime built with -pthread (its thread-local variables): so is the C
+# code, and the program and the plugins are linked with threads, emscripten
+# then relocating the thread-local variables of the plugins
+if grep -qs '^cflags=.*-pthread' "$SYSROOT/manifest"; then CFLAGS="$CFLAGS -pthread"; fi
 
 if [ -z "${WORKDIR:-}" ]; then
   WORKDIR=$(mktemp -d)

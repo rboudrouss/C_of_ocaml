@@ -40,10 +40,14 @@ if [ "$WORD_SIZE" = 64 ]; then
   COOC_FLAGS="--word-size 64"
   LDFLAGS="-sMAXIMUM_MEMORY=16GB"
 fi
+# The C code is compiled as the runtime of the sysroot, with -pthread if it
+# is (its thread-local variables), then linked without, as ocaml-emcc does
+CCFLAGS=$CFLAGS
+if grep -qs '^cflags=.*-pthread' "$SYSROOT/manifest"; then CCFLAGS="$CCFLAGS -pthread"; fi
 # The C part of the unix library (libunix.a before OCaml 5)
 UNIX_LIB=$SYSROOT/lib/libunixbyt.a
 [ -f "$UNIX_LIB" ] || UNIX_LIB=$SYSROOT/lib/libunix.a
-export SYSROOT C_OF_OCAML RT CFLAGS UNIX_LIB COOC_FLAGS LDFLAGS
+export SYSROOT C_OF_OCAML RT CFLAGS CCFLAGS UNIX_LIB COOC_FLAGS LDFLAGS
 
 run_test() {
   local ml=$1
@@ -83,14 +87,14 @@ run_test() {
       || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
     objs=
     for c in parts/*.c; do
-      emcc $CFLAGS -Wno-everything -c "$c" -o "${c%.c}.o" >> cc.log 2>&1 \
+      emcc $CCFLAGS -Wno-everything -c "$c" -o "${c%.c}.o" >> cc.log 2>&1 \
         || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
       objs="$objs ${c%.c}.o"
     done
   else
     "$C_OF_OCAML" $COOC_FLAGS "$name.bc" -o "$name.c" > cooc.log 2>&1 \
       || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
-    emcc $CFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
+    emcc $CCFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
       || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
   fi
   emcc $CFLAGS $objs "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" \
@@ -121,7 +125,7 @@ if [ -z "${WORKDIR:-}" ]; then
 fi
 mkdir -p "$WORKDIR"
 export WORKDIR
-emcc $CFLAGS -c "$RT/camlc_runtime.c" -o "$WORKDIR/camlc_runtime.o" || exit 1
+emcc $CCFLAGS -c "$RT/camlc_runtime.c" -o "$WORKDIR/camlc_runtime.o" || exit 1
 
 if [ $# -gt 0 ]; then
   tests=("$@")
