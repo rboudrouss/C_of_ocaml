@@ -1,5 +1,7 @@
 (executable
  (name c_of_ocaml)
+ (public_name c_of_ocaml)
+ (package c_of_ocaml)
  (libraries c_of_ocaml_compiler js_of_ocaml-compiler compiler-libs.common)
  (modes
   byte

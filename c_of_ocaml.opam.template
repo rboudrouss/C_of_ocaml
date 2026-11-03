@@ -1,0 +1,9 @@
+maintainer: ["rboudrouss <r.boudrouss@gmail.com>"]
+authors: ["Ocsigen team <dev@ocsigen.org>" "rboudrouss <r.boudrouss@gmail.com>"]
+homepage: "https://github.com/rboudrouss/C_of_ocaml"
+doc: "https://github.com/rboudrouss/C_of_ocaml#readme"
+bug-reports: "https://github.com/rboudrouss/C_of_ocaml/issues"
+dev-repo: "git+https://github.com/rboudrouss/C_of_ocaml.git"
+build: [
+  ["dune" "build" "--release" "-j" jobs "c_of_ocaml.install"]
+]
