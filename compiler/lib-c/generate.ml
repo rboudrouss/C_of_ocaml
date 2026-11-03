@@ -19,10 +19,11 @@
 (* Translation of the intermediate code into C, for the runtime described
    in runtime/c/camlc.h.
 
-   Each function of the program becomes a C function. Its variables live
-   in a frame on the shadow stack ([fp[i]]), so that they are seen and
-   updated by the GC; the variables of the enclosing functions are read
-   from the closure ([fp[0]]). Blocks are labels, and branches are gotos.
+   Each function of the program becomes a C function. Its variables are C
+   variables; those live where the GC may run are also stored in a frame
+   on the shadow stack ([fp[i]]), so that they are seen and updated by the
+   GC, and reloaded from it after. The variables of the enclosing functions
+   are read from the closure. Blocks are labels, and branches are gotos.
    An exception is returned as an exception result: each call is followed
    by a check, which jumps to the handler of the innermost [Pushtrap] of
    the function or returns the exception. *)
@@ -1352,10 +1353,10 @@ let label ctx pc =
   in
   Printf.sprintf "L%d" n
 
-let local ctx x =
-  match Var.Hashtbl.find_opt ctx.slots x with
-  | Some i -> Printf.sprintf "fp[%d]" i
-  | None -> local_name ctx x
+(* A variable is read from its C variable. Those in the frame are also
+   written to their slot when defined, and their C variable is reloaded
+   from it after each point where the GC may run (see [reload]). *)
+let local ctx x = local_name ctx x
 
 let var ctx x =
   match location ctx x with
@@ -1370,10 +1371,39 @@ let var ctx x =
 
 let slot ctx x =
   match location ctx x with
-  | Some Local -> local ctx x
+  | Some Local -> (
+      (* Assigned as [fp[i] = x = e] *)
+      match Var.Hashtbl.find_opt ctx.slots x with
+      | Some i -> Printf.sprintf "fp[%d] = %s" i (local_name ctx x)
+      | None -> local ctx x)
   | Some (Global g) -> g
   | Some (Env _ | Sibling _ | Static _) | None ->
       failwith (Format.asprintf "c_of_ocaml: variable %a is not local" Var.print x)
+
+(* The local variables used by an expression, the variables of the
+   enclosing functions standing for the closure *)
+let use ctx x acc =
+  match location ctx x with
+  | Some Local -> Var.Set.add x acc
+  | Some (Env _ | Sibling _) -> Var.Set.add ctx.env_var acc
+  | Some (Global _ | Static _) | None -> acc
+
+let use_list ctx l acc = List.fold_left l ~init:acc ~f:(fun acc x -> use ctx x acc)
+
+(* Reload the C variables of the variables in the frame among the variables
+   [l] (the closure standing for itself) or the closure they are read
+   from *)
+let reload ctx l =
+  String.concat
+    ~sep:""
+    (List.filter_map
+       (Var.Set.elements
+          (List.fold_left l ~init:Var.Set.empty ~f:(fun acc x ->
+               if Var.equal x ctx.env_var then Var.Set.add x acc else use ctx x acc)))
+       ~f:(fun x ->
+         match Var.Hashtbl.find_opt ctx.slots x with
+         | Some i -> Some (Printf.sprintf "%s = fp[%d]; " (local_name ctx x) i)
+         | None -> None))
 
 let var_repr ctx x =
   if Var.equal x ctx.env_var
@@ -1508,16 +1538,18 @@ let branch ctx (pc, args) =
 
 (* Allocate a block whose fields are [fields] (C expressions, read after
    the allocation), and store it in [dst] *)
-let alloc_block ctx ~dst ~tag ~prefix fields =
+let alloc_block ?(reload = "") ctx ~dst ~tag ~prefix fields =
   let wosize = List.length prefix + List.length fields in
   if wosize <= 256
   then (
     line ctx "b = camlc_alloc_small(%d, %d);" wosize tag;
+    if not (String.equal reload "") then line ctx "%s" reload;
     List.iteri prefix ~f:(fun i e -> line ctx "Field(b, %d) = %s;" i e);
     List.iteri fields ~f:(fun i e ->
         line ctx "Field(b, %d) = %s;" (i + List.length prefix) e))
   else (
     line ctx "b = caml_alloc_shr(%d, %d);" wosize tag;
+    if not (String.equal reload "") then line ctx "%s" reload;
     List.iteri prefix ~f:(fun i e -> line ctx "Field(b, %d) = %s;" i e);
     List.iteri fields ~f:(fun i e ->
         line ctx "caml_initialize(&Field(b, %d), %s);" (i + List.length prefix) e));
@@ -1596,6 +1628,7 @@ let translate_closure ctx f =
       else
         let _, positions = closure_layout functions in
         alloc_block
+          ~reload:(reload ctx info.free_variables)
           ctx
           ~dst:(slot ctx f)
           ~tag:Obj.closure_tag
@@ -1702,7 +1735,8 @@ let boxing_prelude ctx traps x ~f ~args ~exact =
     List.iteri boxed ~f:(fun i _ -> line ctx "bx[%d] = Val_unit;" i);
     List.iteri boxed ~f:(fun i a ->
         let r = var_repr ctx a in
-        line ctx "bx[%d] = %s;" i (box r (var ctx a))));
+        line ctx "bx[%d] = %s;" i (box r (var ctx a)));
+    line ctx "%s" (reload ctx (f :: args)));
   k
 
 (* An application whose result is returned: the frame is released before
@@ -1855,11 +1889,13 @@ let translate_instr ctx traps i =
             if wosize <= 256
             then line ctx "b = camlc_alloc_small(%d, Double_array_tag);" wosize
             else line ctx "b = caml_alloc_shr(%d, Double_array_tag);" wosize;
+            line ctx "%s" (reload ctx (Array.to_list a));
             Array.iteri a ~f:(fun i x ->
                 line ctx "Store_double_flat_field(b, %d, %s);" i (as_repr ctx Double x));
             line ctx "%s = b;" dst)
           else
             alloc_block
+              ~reload:(reload ctx (Array.to_list a))
               ctx
               ~dst
               ~tag
@@ -2033,16 +2069,6 @@ let function_blocks ctx pc =
 
 (* Liveness, to find the variables which must survive a garbage
    collection: they are kept in the frame of the function *)
-
-(* The local variables used by an expression, the variables of the
-   enclosing functions standing for the closure *)
-let use ctx x acc =
-  match location ctx x with
-  | Some Local -> Var.Set.add x acc
-  | Some (Env _ | Sibling _) -> Var.Set.add ctx.env_var acc
-  | Some (Global _ | Static _) | None -> acc
-
-let use_list ctx l acc = List.fold_left l ~init:acc ~f:(fun acc x -> use ctx x acc)
 
 let use_prim_args ctx l acc =
   List.fold_left l ~init:acc ~f:(fun acc a ->
@@ -2772,9 +2798,10 @@ let translate_function
   ctx.framed <- frame_size > 0 && Option.is_none ctx.framed_blocks;
   (* Body *)
   List.iteri params ~f:(fun i x ->
-      if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (local ctx x) i);
-  if Var.Hashtbl.mem ctx.slots ctx.env_var
-  then line ctx "%s = env;" (local ctx ctx.env_var);
+      if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (slot ctx x) i);
+  (match Var.Hashtbl.find_opt ctx.slots ctx.env_var with
+  | Some i -> line ctx "fp[%d] = env;" i
+  | None -> ());
   line ctx "%s" (branch ctx (pc, args));
   List.iter pcs ~f:(fun pc ->
       let block = Addr.Map.find pc blocks in
@@ -2791,10 +2818,38 @@ let translate_function
           (poll_stmt
              (Addr.Hashtbl.find live_in pc
              |> Var.Set.elements
-             |> List.filter ~f:(fun x ->
-                 (not (Var.Hashtbl.mem ctx.slots x)) && gc_value ctx x)
+             |> List.filter ~f:(fun x -> gc_value ctx x)
              |> List.map ~f:(fun x -> local ctx x))
              ~raise:(raise_stmt ctx traps "r"));
+      (* After a point where the GC may run, the variables of the frame
+         live after it are reloaded (those live in a handler are reloaded
+         at its start) *)
+      let translate_body ?(live_end = live_out ctx live_in pc) body =
+        let body = Array.of_list body in
+        let n = Array.length body in
+        let live_after = Array.make n live_end in
+        for k = n - 1 downto 1 do
+          let i = body.(k) in
+          let live =
+            match instr_defs i with
+            | Some x -> Var.Set.remove x live_after.(k)
+            | None -> live_after.(k)
+          in
+          live_after.(k - 1) <- instr_uses ctx i live
+        done;
+        Array.iteri body ~f:(fun k i ->
+            translate_instr ctx traps i;
+            match gc_point ctx i with
+            | `Call | `Alloc ->
+                let live =
+                  match instr_defs i with
+                  | Some x -> Var.Set.remove x live_after.(k)
+                  | None -> live_after.(k)
+                in
+                let s = reload ctx (Var.Set.elements live) in
+                if not (String.equal s "") then line ctx "%s" s
+            | `No | `Raise -> ())
+      in
       (* An application whose result is returned, outside any handler *)
       let tail_call =
         let rec strip_events l =
@@ -2809,20 +2864,32 @@ let translate_function
       in
       match tail_call with
       | Some (body, x, f, args, exact) ->
-          List.iter body ~f:(fun i -> translate_instr ctx traps i);
+          translate_body
+            ~live_end:(instr_uses ctx (Let (x, Apply { f; args; exact })) Var.Set.empty)
+            body;
           translate_tail_call ctx x ~f ~args ~exact
       | None -> (
-          List.iter block.body ~f:(fun i -> translate_instr ctx traps i);
+          translate_body block.body;
           translate_last ctx traps block.branch;
           match block.branch with
           | Pushtrap (_, _, handler) ->
               Printf.bprintf ctx.buf " H%d:;\n" (Addr.Hashtbl.find ctx.handler_ids pc);
+              line
+                ctx
+                "%s"
+                (reload
+                   ctx
+                   (Var.Set.elements
+                      (Var.Set.union
+                         (Addr.Hashtbl.find_opt live_in (fst handler)
+                         |> Option.value ~default:Var.Set.empty)
+                         (use_list ctx (snd handler) Var.Set.empty))));
               line ctx "%s" (branch ctx handler)
           | Return _ | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Poptrap _ -> ()));
   let param_set = Var.Set.of_list params in
   let decls =
     List.filter_map (List.rev !locals) ~f:(fun x ->
-        if Var.Hashtbl.mem ctx.slots x || Var.Set.mem x param_set
+        if Var.Set.mem x param_set && not (Var.Hashtbl.mem ctx.slots x)
         then None
         else Some (var_repr ctx x, local_name ctx x))
   in

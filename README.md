@@ -177,7 +177,10 @@ the caller.
 **GC roots.** Variables that are live across a point where the GC may run (an
 allocation or a call) are stored in the function's frame on a shadow stack,
 which the GC scans through `caml_scan_roots_hook`. Variables holding integers
-or static data are exempt. Everything else is a plain C local.
+or static data are exempt. All variables are C locals: those in the frame are
+also written to it where they are defined, and reloaded from it after each
+point where the GC may run, so that loops without such points do not read
+the frame.
 
 **Exceptions** are return values. Raising returns
 `Make_exception_result(exn)`, and every call is followed by a check that jumps
