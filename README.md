@@ -12,13 +12,28 @@ c_of_ocaml reuses its front-end and optimizer: the bytecode is parsed into the
 intermediate representation (`compiler/lib/code.mli`), optimized by
 `Driver.optimize_for_wasm`, and then translated to C by `compiler/lib-c`.
 
+## Installation
+
+```sh
+opam pin add c_of_ocaml git+https://github.com/rboudrouss/C_of_ocaml.git
+```
+
+The opam package `c_of_ocaml` installs the `c_of_ocaml` command only. The
+js_of_ocaml libraries it is built from, modified, stay inside its build: it
+can be installed next to js_of_ocaml. OCaml 4.14 or later is needed.
+`vendor/ppx_devtools` is a copy of
+[ppx_devtools](https://github.com/ocsigen/ppx_devtools), which is not in
+opam yet.
+
 ## Usage
 
 ### With ocaml-emcc
 
 ```sh
-ocaml-emcc build main.js --compiled
+ocaml-emcc build main.js
 ```
+
+ocaml-emcc finds `c_of_ocaml` in `PATH` (or `$OCAML_EMCC_C_OF_OCAML`).
 
 This runs every step below.
 
