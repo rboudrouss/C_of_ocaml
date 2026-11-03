@@ -128,9 +128,11 @@ type output =
   ; mutable max_arity : int  (** Maximal arity of the functions *)
   ; global_data_size : int
   ; fun_names : string Var.Hashtbl.t  (** C name of each function *)
-  ; types : Typing.t
+  ; mutable types : Typing.t
   ; fun_reprs : repr list Var.Hashtbl.t
         (** The representation of the parameters of each function *)
+  ; fun_returns : repr Var.Hashtbl.t
+        (** The representation of the result of each function *)
   ; debug_info : bool  (** Record backtraces *)
   ; locations : string String.Hashtbl.t  (** The initializer of each location, by name *)
   ; in_cps : Var.Set.t  (** The CPS calls *)
@@ -1279,6 +1281,7 @@ type fctx =
   ; mutable position : Parse_info.t option  (** The last debug event *)
   ; source_name : string option  (** The name of the function in the source *)
   ; raises : bool  (** The function may raise *)
+  ; ret : repr  (** The representation of its result *)
   ; mutable framed : bool  (** The frame is allocated in the current block *)
   ; mutable framed_blocks : Addr.Set.t option
         (** The blocks where the frame is allocated, if not all *)
@@ -1425,10 +1428,14 @@ let define ctx x r e =
   in
   line ctx "%s = %s;" (slot ctx x) e
 
-let return_stmt ctx e =
+(* Return [e], in representation [r] *)
+let return_stmt ?(r = Value) ctx e =
+  if not (repr_equal r ctx.ret)
+  then failwith "c_of_ocaml: a function returning an unboxed number returns a value";
   if not ctx.framed
   then Printf.sprintf "return %s;" e
-  else Printf.sprintf "{ value res = %s; camlc_sp = fp + FRAME_SIZE; return res; }" e
+  else
+    Printf.sprintf "{ %s res = %s; camlc_sp = fp + FRAME_SIZE; return res; }" (c_type r) e
 
 (* Jump to the handler of the innermost trap, or return the exception
    result [r] *)
@@ -1714,9 +1721,18 @@ let translate_tail_call ctx x ~f ~args ~exact =
         Printf.sprintf "%s t%d = %s;" t i a)
   in
   let t i = Printf.sprintf "t%d" i in
+  let ret =
+    match kind with
+    | Known g -> Var.Hashtbl.find ctx.out.fun_returns g
+    | Known_direct _ | Unknown -> Value
+  in
+  (* The typing ensures that an unboxed result is never boxed *)
+  if (not (repr_equal ret ctx.ret)) && repr_equal ctx.ret Value
+  then failwith "c_of_ocaml: an unboxed result would need to be boxed";
   let musttail =
     match kind, ctx.arity with
-    | (Known _ | Unknown), Some reprs' -> List.equal ~eq:repr_equal reprs reprs'
+    | (Known _ | Unknown), Some reprs' ->
+        List.equal ~eq:repr_equal reprs reprs' && repr_equal ret ctx.ret
     | Known_direct _, _ | _, None -> false
   in
   let bounce =
@@ -1774,7 +1790,7 @@ let translate_tail_call ctx x ~f ~args ~exact =
         pop
         bounce
         (if musttail then "CAMLC_MUSTTAIL " else "")
-        call
+        (if repr_equal ret ctx.ret then call else unbox ctx.ret call)
 
 let translate_instr ctx traps i =
   match i with
@@ -1792,20 +1808,25 @@ let translate_instr ctx traps i =
       | Apply { f; args; exact } ->
           if is_cps_call ctx x then failwith "c_of_ocaml: a CPS call is not a tail call";
           let k = boxing_prelude ctx traps x ~f ~args ~exact in
-          let raises =
+          let raises, ret =
             match callee ctx x ~f ~exact with
-            | Known g -> Var.Set.mem g ctx.out.raising
-            | Known_direct _ | Unknown -> true
+            | Known g ->
+                Var.Set.mem g ctx.out.raising, Var.Hashtbl.find ctx.out.fun_returns g
+            | Known_direct _ | Unknown -> true, Value
           in
+          (* The typing ensures that an unboxed result is never boxed *)
+          if (not (repr_equal ret Value)) && repr_equal (var_repr ctx x) Value
+          then failwith "c_of_ocaml: an unboxed result would need to be boxed";
           let callee, args, _ = apply ctx x ~f ~args ~exact in
           if not raises
           then
             if k = 0
-            then define ctx x Value (c_call callee args)
+            then define ctx x ret (c_call callee args)
             else (
-              line ctx "r = %s;" (c_call callee args);
+              line ctx "{ %s rv = %s;" (c_type ret) (c_call callee args);
               line ctx "camlc_sp = bx + %d;" k;
-              define ctx x Value "r")
+              define ctx x ret "rv";
+              line ctx "}")
           else if k = 0
           then checked ~bt:`Call (c_call callee args)
           else (
@@ -1929,7 +1950,7 @@ let translate_instr ctx traps i =
 
 let translate_last ctx traps last =
   match last with
-  | Return x -> line ctx "%s" (return_stmt ctx (as_value ctx x))
+  | Return x -> line ctx "%s" (return_stmt ~r:ctx.ret ctx (as_repr ctx ctx.ret x))
   | Raise (x, kind) -> (
       let bt =
         match kind with
@@ -2462,6 +2483,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     ; position = None
     ; source_name = None
     ; raises = true
+    ; ret = Value
     ; framed = false
     ; framed_blocks = None
     ; frame_push = ""
@@ -2619,6 +2641,10 @@ let translate_function
     ; position = None
     ; source_name
     ; raises
+    ; ret =
+        (match fn with
+        | Some f -> Var.Hashtbl.find out.fun_returns f
+        | None -> Value)
     ; framed = false
     ; framed_blocks = None
     ; frame_push = ""
@@ -3127,20 +3153,31 @@ let f
      parameters of the CPS versions, which the runtime may call. *)
   Typing.reset ();
   register_typing_primitives ();
-  let types =
-    let fun_info = Call_graph_analysis.f p global_flow_info in
-    let boxed =
-      Var.Map.fold
-        (fun _ (info : Closure_conversion.closure) acc -> info.free_variables @ acc)
-        closures
-        global_list
-    in
-    let boxed =
-      List.fold_left functions ~init:boxed ~f:(fun acc (f, params, _) ->
-          if Var.Set.mem f cps_sides then params @ acc else acc)
-    in
-    Typing.f ~global_flow_state ~global_flow_info ~fun_info ~deadcode_sentinel ~boxed p
+  Typing.prepare ~global_flow_state p;
+  let fun_info = Call_graph_analysis.f p global_flow_info in
+  let boxed =
+    Var.Map.fold
+      (fun _ (info : Closure_conversion.closure) acc -> info.free_variables @ acc)
+      closures
+      global_list
   in
+  let boxed =
+    List.fold_left functions ~init:boxed ~f:(fun acc (f, params, _) ->
+        if Var.Set.mem f cps_sides then params @ acc else acc)
+  in
+  let typing ~unboxed_returns =
+    Typing.f
+      ~global_flow_state
+      ~global_flow_info
+      ~fun_info
+      ~unboxed_returns
+      ~deadcode_sentinel
+      ~boxed
+      p
+  in
+  (* First with boxed return values, to find the functions which cannot
+     raise (see below) *)
+  let types = typing ~unboxed_returns:(fun _ -> false) in
   let out =
     { data = Buffer.create 65536
     ; static_names = String.Hashtbl.create 1024
@@ -3155,6 +3192,7 @@ let f
     ; fun_names = Var.Hashtbl.create 1024
     ; types
     ; fun_reprs = Var.Hashtbl.create 1024
+    ; fun_returns = Var.Hashtbl.create 1024
     ; debug_info
     ; locations = String.Hashtbl.create 1024
     ; in_cps
@@ -3172,12 +3210,20 @@ let f
     }
   in
   name_functions out p.blocks located_functions;
+  let set_reprs () =
+    List.iter functions ~f:(fun (f, params, _) ->
+        Var.Hashtbl.replace
+          out.fun_reprs
+          f
+          (List.map params ~f:(fun x -> repr_of_type (Typing.var_type out.types x)));
+        Var.Hashtbl.replace
+          out.fun_returns
+          f
+          (repr_of_type (Typing.return_type out.types f)))
+  in
+  set_reprs ();
   List.iter functions ~f:(fun (f, params, _) ->
       out.max_arity <- max out.max_arity (List.length params);
-      Var.Hashtbl.replace
-        out.fun_reprs
-        f
-        (List.map params ~f:(fun x -> repr_of_type (Typing.var_type types x)));
       ignore (fun_name out f));
   let functions_max_arity = out.max_arity in
   (match mode with
@@ -3206,6 +3252,36 @@ let f
     global_flow_info.Global_flow.info_cps_closures;
   let data_refs = out.refs in
   analyze_functions out facts global_flow_info closures p.blocks functions;
+  (* The functions which cannot raise may return unboxed numbers (when they
+     are only called directly), except those with two versions and those
+     called in direct style by CPS code, whose result goes to a
+     continuation. Whether a function raises does not depend on the
+     boxing of numbers. *)
+  let direct_style =
+    Addr.Map.fold
+      (fun _ block acc ->
+        List.fold_left block.body ~init:acc ~f:(fun acc i ->
+            match i with
+            | Let (x, Apply { f; exact; _ }) -> (
+                match resolve_callee global_flow_info closures x ~f ~exact with
+                | Known_direct g -> Var.Set.add g acc
+                | Known _ | Unknown -> acc)
+            | _ -> acc))
+      p.blocks
+      Var.Set.empty
+  in
+  let unboxed_returns f =
+    not
+      (Var.Set.mem f out.raising
+      || Var.Set.mem f cps_sides
+      || Var.Map.mem f cps_pairs
+      || Var.Set.mem f direct_style)
+  in
+  if List.exists functions ~f:(fun (f, _, _) -> unboxed_returns f)
+  then (
+    out.types <- typing ~unboxed_returns;
+    set_reprs ();
+    analyze_functions out facts global_flow_info closures p.blocks functions);
   List.iter functions ~f:(fun (f, params, cont) ->
       let info = Var.Map.find f closures in
       let startenv, positions = closure_layout info.Closure_conversion.functions in
@@ -3236,7 +3312,11 @@ let f
         p.blocks
         closures
         ~fn:(Some f)
-        ~name:(Printf.sprintf "value %s" (fun_name out f))
+        ~name:
+          (Printf.sprintf
+             "%s %s"
+             (c_type (Var.Hashtbl.find out.fun_returns f))
+             (fun_name out f))
         ~params
         ~param_reprs:(Var.Hashtbl.find out.fun_reprs f)
         ~env
@@ -3397,8 +3477,9 @@ let f
     List.iter l ~f:(fun f ->
         Printf.bprintf
           b
-          "%svalue %s(%s);\n"
+          "%s%s %s(%s);\n"
           (storage f)
+          (c_type (Var.Hashtbl.find out.fun_returns f))
           (fun_name out f)
           (String.concat
              ~sep:", "

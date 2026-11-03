@@ -63,12 +63,18 @@ val reset : unit -> unit
 
 val register_prim : string -> unbox:bool -> typ -> unit
 
+val prepare : global_flow_state:Global_flow.state -> Code.program -> unit
+(** To call once before [f] *)
+
 val f :
      global_flow_state:Global_flow.state
   -> global_flow_info:Global_flow.info
   -> fun_info:Call_graph_analysis.t
+  -> unboxed_returns:(Code.Var.t -> bool)
   -> deadcode_sentinel:Code.Var.t
   -> boxed:Code.Var.t list
   -> Code.program
   -> t
-(** [boxed]: variables which must be boxed *)
+(** [boxed]: variables which must be boxed. [unboxed_returns]: the
+    functions which may return unboxed numbers (those which cannot raise),
+    if they are only called directly. *)

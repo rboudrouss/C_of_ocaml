@@ -203,7 +203,8 @@ wrapper, and a loop around `try ... with Not_found` became 70% slower.
 (`compiler/lib-c/typing.ml`) finds floats and boxed integers that never need
 to be boxed. They become C `double`s and integers, and their arithmetic is
 inlined. Parameters of functions that are only called directly can be unboxed
-as well. A number used as a value is boxed once, where it is defined, unless
+as well, and so can their results if they cannot raise (exceptions are
+returned as values). A number used as a value is boxed once, where it is defined, unless
 it is only passed to calls outside of loops, and either defined in a loop (the
 accumulator of a loop printed at its end) or passed to a single call: it is
 then boxed at these calls.

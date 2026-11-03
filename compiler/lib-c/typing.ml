@@ -17,9 +17,10 @@
  *)
 
 (* Copied from compiler/lib-wasm/typing.ml. Differences: return values are
-   never unboxed (the C code returns exceptions as values), the free
-   variables of closures are boxed (closures hold values), and so are the
-   values given to parameters holding values. *)
+   only unboxed for the functions which cannot raise (the C code returns
+   exceptions as values), the free variables of closures are boxed (closures
+   hold values), and so are the values given to parameters holding
+   values. *)
 
 open! Stdlib
 open Code
@@ -37,8 +38,6 @@ let can_unbox_parameters fun_info f =
      call from the same call site, one could enforce somehow that they
      have the same signature. *)
   Call_graph_analysis.direct_calls_only fun_info f
-
-let can_unbox_return_value _fun_info _f = false
 
 module Integer = struct
   type kind =
@@ -315,7 +314,13 @@ type st =
   ; boxed_function_parameters : Var.ISet.t
   ; parameter_type_hints : typ Var.Hashtbl.t
   ; fun_info : Call_graph_analysis.t
+  ; unboxed_returns : Var.t -> bool
   }
+
+let can_unbox_return_value st f =
+  (* As for wasm_of_ocaml, unboxing return values can unoptimize a tail
+     call, once in a sequence of tail calls *)
+  Call_graph_analysis.direct_calls_only st.fun_info f && st.unboxed_returns f
 
 let rec constant_type (c : constant) =
   match c with
@@ -524,7 +529,7 @@ let propagate st approx x : Domain.t =
                             | _ -> Var.Tbl.get approx y)
                           (Var.Map.find g st.global_flow_state.return_values)
                       in
-                      if can_unbox_return_value st.fun_info g then res else Domain.box res
+                      if can_unbox_return_value st g then res else Domain.box res
                   | Expr (Closure (_, _, _)) ->
                       (* The function is partially applied or over applied *)
                       Top
@@ -657,7 +662,7 @@ let box_numbers ~boxed p st types =
               match Global_flow.get_unique_closure st.global_flow_info ~call:y f with
               | None | Some (_, _, true) -> ()
               | Some (g, _, false) ->
-                  if can_unbox_return_value st.fun_info g
+                  if can_unbox_return_value st g
                   then
                     let s = Var.Map.find g st.global_flow_info.info_return_vals in
                     Var.Set.iter box s)
@@ -741,7 +746,21 @@ let box_numbers ~boxed p st types =
           match b.branch with
           | Return y ->
               Option.iter
-                ~f:(fun g -> if not (can_unbox_return_value st.fun_info g) then box y)
+                ~f:(fun g ->
+                  (* The return values of a function are boxed unless they
+                     are numbers of the same kind, some unboxed *)
+                  if
+                    not
+                      (can_unbox_return_value st g
+                      &&
+                      match
+                        Domain.join_set
+                          (Var.Tbl.get types)
+                          (Var.Map.find g st.global_flow_info.info_return_vals)
+                      with
+                      | Number (_, Unboxed) -> true
+                      | _ -> false)
+                  then box y)
                 name_opt
           | Raise _ | Stop | Branch _ | Cond _ | Switch _ | Pushtrap _ | Poptrap _ -> ())
         pc
@@ -761,9 +780,17 @@ type t =
   ; return_types : typ Var.Hashtbl.t
   }
 
-let f ~global_flow_state ~global_flow_info ~fun_info ~deadcode_sentinel ~boxed p =
+let prepare ~global_flow_state p = update_deps global_flow_state p
+
+let f
+    ~global_flow_state
+    ~global_flow_info
+    ~fun_info
+    ~unboxed_returns
+    ~deadcode_sentinel
+    ~boxed
+    p =
   let t = Timer.make () in
-  update_deps global_flow_state p;
   let boxed_function_parameters = mark_boxed_function_parameters ~fun_info p in
   let parameter_type_hints = collect_parameter_type_hints p in
   let st =
@@ -772,6 +799,7 @@ let f ~global_flow_state ~global_flow_info ~fun_info ~deadcode_sentinel ~boxed p
     ; boxed_function_parameters
     ; parameter_type_hints
     ; fun_info
+    ; unboxed_returns
     }
   in
   let types = solver st in
@@ -808,7 +836,7 @@ let f ~global_flow_state ~global_flow_info ~fun_info ~deadcode_sentinel ~boxed p
     (fun name_opt _ _ _ () ->
       Option.iter
         ~f:(fun f ->
-          if can_unbox_return_value fun_info f
+          if can_unbox_return_value st f
           then
             let s = Var.Map.find f global_flow_info.info_return_vals in
             Var.Hashtbl.replace
