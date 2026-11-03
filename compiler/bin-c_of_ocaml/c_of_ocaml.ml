@@ -32,6 +32,9 @@ let memory () =
       (mb st.heap_words)
       (mb st.top_heap_words)
 
+(* The version of c_of_ocaml, which ocaml-emcc checks *)
+let version = "1.0.0"
+
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
   \       c_of_ocaml [options] program.bc --split DIR\n\
@@ -418,6 +421,12 @@ let () =
       , Arg.Set dynlink
       , " Compile a program which can load plugins: its compilation units are registered \
          by name, and kept whole. A .cmo or .cma file is compiled to a plugin" )
+    ; ( "--version"
+      , Arg.Unit
+          (fun () ->
+            print_endline version;
+            exit 0)
+      , " Print the version and exit" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
     ; "--enable", Arg.String Config.Flag.enable, "OPT Enable the option OPT"
     ; "--disable", Arg.String Config.Flag.disable, "OPT Disable the option OPT"
