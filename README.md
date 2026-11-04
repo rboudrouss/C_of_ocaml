@@ -225,6 +225,29 @@ depth and bounce through a trampoline past a threshold.
 **Callbacks** from C (`caml_callback*`) apply the closure with
 `camlc_applyv`.
 
+**Segmented stack.** The generated functions run on the stack of the wasm
+engine, which browsers keep small (984 KB in V8, 500 KB in Chrome's workers):
+tens of thousands of nested calls, where the bytecode interpreter has a stack
+of its own. When the program is linked with emscripten's JSPI (`-sJSPI`,
+JavaScript Promise Integration), it runs in a context which can suspend, and
+`camlc_runtime.c` uses it to chain stacks: the shadow stack measures the depth,
+and a function whose frame would go below `camlc_segment_limit`, about 2048
+words below the start of the current segment, calls itself again on a new
+stack of the engine (`camlc_segment`): the current one is suspended until it
+returns. Its arguments go through `camlc_seg`, and a thunk per signature
+(`camlc_s_...`) calls it. A frame then stands for the frame of the function on
+the engine's stack: a function which calls functions gets at least a word for
+100 bytes of it (about 80 bytes, and 2 per C variable), and a function without
+frame gets one if it makes one call which may be recursive (the strongly
+connected components of the known calls, and the unknown calls) on a path.
+Functions making several (`fib`) are not measured: the depth of their
+recursion is that of a tree. A function restarts only from its start, or from
+where it allocates its frame if what it did before has no effect; otherwise it
+goes on on the current stack. There is no new segment in a callback from C,
+where JavaScript may be on the stack, which JSPI cannot suspend. Without JSPI
+(node runs compiled programs in a worker thread with a large stack), the limit
+is that of the shadow stack.
+
 **Threads and domains.** Each thread running OCaml code (the systhreads, and
 the domains of OCaml 5) has its own shadow stack and its own state of the
 effect handlers, in a thread-local structure (`camlc_thread`) set up when it
@@ -260,11 +283,17 @@ empty stack.
 - Effects cannot be performed across a callback from C: they raise
   `Effect.Unhandled`, as with js_of_ocaml. `Effect.Deep.get_callstack` is
   empty.
-- Recursion depth is limited by the wasm engine's C stack (about 1 MB in V8),
-  i.e. some tens of thousands of non-tail calls, whereas the bytecode
-  interpreter has its own much larger stack. Exhausting it raises a JavaScript
-  `RangeError` rather than `Stack_overflow`. Under node, ocaml-emcc runs
-  compiled programs in a worker thread with a large stack to mitigate this.
+- Without JSPI, recursion depth is limited by the wasm engine's C stack
+  (about 1 MB in V8), i.e. some tens of thousands of non-tail calls, whereas
+  the bytecode interpreter has its own much larger stack. Exhausting it raises
+  a JavaScript `RangeError` rather than `Stack_overflow`. Under node,
+  ocaml-emcc runs compiled programs in a worker thread with a large stack to
+  mitigate this. With JSPI (see above), only recursions through functions
+  making several calls each, or through callbacks from C, are limited.
+- With JSPI, the program is asynchronous: `main` returns a promise, settled
+  when the program ends. JSPI is in Chrome and Edge since version 137, is
+  announced for Firefox 153, needs `--experimental-wasm-jspi` with node 24,
+  and is not in Safari.
 - Signals and finalisers only run when the runtime polls on its own, and at
   the polls of the programs which use threads or domains.
 
@@ -276,7 +305,8 @@ c_of_ocaml, emcc and node. Its header documents the environment variables
 wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
 (`compiler/tests-c/dynlink`). `tools/c_of_ocaml_threads_test.sh` tests the
 systhreads and the domains (`compiler/tests-c/threads`), natively, with the
-runtime of the OCaml switch. `dune build @compiler/tests-c/runtest` checks
+runtime of the OCaml switch. `tools/c_of_ocaml_segments_test.sh` tests the
+segmented stack (`compiler/tests-c/segments`), with JSPI and node 24. `dune build @compiler/tests-c/runtest` checks
 the primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
 All tests pass on both wasm32 and wasm64, except:
@@ -298,7 +328,8 @@ All tests pass on both wasm32 and wasm64, except:
 - `runtime/c/`: `camlc.h` and `camlc_runtime.c`, the runtime support linked
   with the generated code.
 - `tools/c_of_ocaml_tests.sh`, `tools/c_of_ocaml_dynlink_test.sh`,
-  `tools/c_of_ocaml_threads_test.sh`: the test drivers.
+  `tools/c_of_ocaml_threads_test.sh`, `tools/c_of_ocaml_segments_test.sh`:
+  the test drivers.
 
 Everything else comes from js_of_ocaml.
 
