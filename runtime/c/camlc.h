@@ -238,6 +238,14 @@ value camlc_raise_zero_divide(void);
 value camlc_raise_bound_error(void);
 value camlc_raise_unhandled_effect(void);
 
+/* [r], an exception result: the C compiler then knows that the code raising
+   it leaves the loops, and keeps the values they read in registers */
+static inline value camlc_exception_result(value r)
+{
+  if (!Is_exception_result(r)) __builtin_unreachable();
+  return r;
+}
+
 /* Primitives returning their exceptions */
 value camlc_create_bytes(value len);
 value camlc_compare(value a, value b);
@@ -278,13 +286,13 @@ value camlc_int_of_string(value s);
 
 static inline value camlc_int_div(value a, value b)
 {
-  if (CAMLC_UNLIKELY(b == Val_long(0))) return camlc_raise_zero_divide();
+  if (CAMLC_UNLIKELY(b == Val_long(0))) return camlc_exception_result(camlc_raise_zero_divide());
   return Camlc_int_div_unsafe(a, b);
 }
 
 static inline value camlc_int_mod(value a, value b)
 {
-  if (CAMLC_UNLIKELY(b == Val_long(0))) return camlc_raise_zero_divide();
+  if (CAMLC_UNLIKELY(b == Val_long(0))) return camlc_exception_result(camlc_raise_zero_divide());
   return Camlc_int_mod_unsafe(a, b);
 }
 
@@ -344,14 +352,14 @@ static inline void camlc_modify(volatile value *fp, value v)
 static inline value camlc_check_bound(value a, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Camlc_wosize_val(a)))
-    return camlc_raise_bound_error();
+    return camlc_exception_result(camlc_raise_bound_error());
   return Val_unit;
 }
 
 static inline value camlc_check_bound_float(value a, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Camlc_wosize_val(a) / Double_wosize))
-    return camlc_raise_bound_error();
+    return camlc_exception_result(camlc_raise_bound_error());
   return Val_unit;
 }
 
@@ -365,7 +373,7 @@ static inline mlsize_t camlc_array_length(value a)
 static inline value camlc_check_bound_gen(value a, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= camlc_array_length(a)))
-    return camlc_raise_bound_error();
+    return camlc_exception_result(camlc_raise_bound_error());
   return Val_unit;
 }
 
@@ -386,14 +394,14 @@ static inline mlsize_t camlc_string_length(value s)
 static inline value camlc_string_get(value s, value i)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= camlc_string_length(s)))
-    return camlc_raise_bound_error();
+    return camlc_exception_result(camlc_raise_bound_error());
   return Val_int(Byte_u(s, Long_val(i)));
 }
 
 static inline value camlc_bytes_set(value s, value i, value c)
 {
   if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= camlc_string_length(s)))
-    return camlc_raise_bound_error();
+    return camlc_exception_result(camlc_raise_bound_error());
   Byte_u(s, Long_val(i)) = (unsigned char)Long_val(c);
   return Val_unit;
 }
@@ -406,7 +414,7 @@ static inline value camlc_check_bytes_access(value s, value i, intnat width)
 {
   if (CAMLC_UNLIKELY(Long_val(i) < 0
                      || Long_val(i) > (intnat)camlc_string_length(s) - width))
-    return camlc_raise_bound_error();
+    return camlc_exception_result(camlc_raise_bound_error());
   return Val_unit;
 }
 
