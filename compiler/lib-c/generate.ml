@@ -824,7 +824,7 @@ let primitive out name (args : parg list) =
               | "%int_mod", 2 -> Checked (c_call "camlc_int_mod" args)
               | "caml_int_compare", 2 -> plain (c_call "Camlc_int_compare" args)
               | "%direct_obj_tag", 1 ->
-                  plain (Printf.sprintf "Val_long(Tag_val(%s))" (arg 0))
+                  plain (Printf.sprintf "Val_long(Camlc_tag_val(%s))" (arg 0))
               | ("caml_ml_string_length" | "caml_ml_bytes_length"), 1 ->
                   plain (Printf.sprintf "Val_long(camlc_string_length(%s))" (arg 0))
               | ("caml_string_unsafe_get" | "caml_bytes_unsafe_get"), 2 ->
@@ -1923,9 +1923,10 @@ let translate_instr ctx traps i =
           let args = List.map args ~f:(fun a -> (prim_arg ctx a).get Value) in
           let plain e = define ctx x Value e in
           match p, args with
-          | Vectlength Value, [ a ] -> plain (Printf.sprintf "Val_long(Wosize_val(%s))" a)
+          | Vectlength Value, [ a ] ->
+              plain (Printf.sprintf "Val_long(Camlc_wosize_val(%s))" a)
           | Vectlength Float, [ a ] ->
-              plain (Printf.sprintf "Val_long(Wosize_val(%s) / Double_wosize)" a)
+              plain (Printf.sprintf "Val_long(Camlc_wosize_val(%s) / Double_wosize)" a)
           | Vectlength Generic, [ a ] ->
               plain (Printf.sprintf "Val_long(camlc_array_length(%s))" a)
           | Array_get (Non_float | Immediate | Float), [ a; i ] ->
@@ -3678,7 +3679,7 @@ let f
       Printf.bprintf
         b
         "static value camlc_pap%d(%s) {\n\
-        \  mlsize_t k = Wosize_val(env) - %d;\n\
+        \  mlsize_t k = Camlc_wosize_val(env) - %d;\n\
         \  value *argv = camlc_sp - (k + %d);\n\
         \  value r;\n\
         \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
@@ -3705,7 +3706,7 @@ let f
         Printf.bprintf
           b
           "static value camlc_pap_cps%d(%s) {\n\
-          \  mlsize_t k = Wosize_val(env) - 4;\n\
+          \  mlsize_t k = Camlc_wosize_val(env) - 4;\n\
           \  value *argv = camlc_sp - (k + %d);\n\
           \  value r;\n\
           \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\

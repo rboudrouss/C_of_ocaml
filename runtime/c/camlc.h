@@ -317,6 +317,16 @@ static inline value camlc_store_double_flat(value a, value i, double d)
   return Val_unit;
 }
 
+/* The header, size and tag of a block, read with plain loads: [Hd_val]
+   of OCaml 5 is an atomic load, which WebAssembly with threads makes a
+   sequentially consistent one, which V8 does not optimize as a load, and
+   [Tag_val] a volatile one. The code only reads the size and the tag,
+   which the GC of the other domains does not change (as the code of
+   ocamlopt). */
+#define Camlc_hd_val(v) (((header_t *)(v))[-1])
+#define Camlc_wosize_val(v) Wosize_hd(Camlc_hd_val(v))
+#define Camlc_tag_val(v) Tag_hd(Camlc_hd_val(v))
+
 /* Write barrier: no work for an integer replacing an integer (the major
    GC only cares about the pointers overwritten or written), nor for a
    block of the minor heap */
@@ -333,22 +343,23 @@ static inline void camlc_modify(volatile value *fp, value v)
    the C compiler knows that the array is not an exception result */
 static inline value camlc_check_bound(value a, value i)
 {
-  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Wosize_val(a)))
+  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Camlc_wosize_val(a)))
     return camlc_raise_bound_error();
   return Val_unit;
 }
 
 static inline value camlc_check_bound_float(value a, value i)
 {
-  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Wosize_val(a) / Double_wosize))
+  if (CAMLC_UNLIKELY((uintnat)Long_val(i) >= Camlc_wosize_val(a) / Double_wosize))
     return camlc_raise_bound_error();
   return Val_unit;
 }
 
 static inline mlsize_t camlc_array_length(value a)
 {
-  if (Tag_val(a) == Double_array_tag) return Wosize_val(a) / Double_wosize;
-  return Wosize_val(a);
+  if (Camlc_tag_val(a) == Double_array_tag)
+    return Camlc_wosize_val(a) / Double_wosize;
+  return Camlc_wosize_val(a);
 }
 
 static inline value camlc_check_bound_gen(value a, value i)
@@ -360,7 +371,7 @@ static inline value camlc_check_bound_gen(value a, value i)
 
 static inline value camlc_array_unsafe_get(value a, value i)
 {
-  if (Tag_val(a) == Double_array_tag)
+  if (Camlc_tag_val(a) == Double_array_tag)
     return caml_copy_double(Double_flat_field(a, Long_val(i)));
   return Field(a, Long_val(i));
 }
@@ -368,7 +379,7 @@ static inline value camlc_array_unsafe_get(value a, value i)
 /* [caml_string_length], inline */
 static inline mlsize_t camlc_string_length(value s)
 {
-  mlsize_t last = Bosize_val(s) - 1;
+  mlsize_t last = Bsize_wsize(Camlc_wosize_val(s)) - 1;
   return last - Byte(s, last);
 }
 
@@ -509,7 +520,17 @@ static inline value camlc_alloc_small(mlsize_t wosize, tag_t tag)
 {
   value v;
 #if OCAML_VERSION_MAJOR >= 5
-  Alloc_small(v, wosize, tag, Camlc_alloc_small_GC);
+  /* [Alloc_small], with [young_limit] read with a volatile load rather than
+     an atomic one (see [Camlc_hd_val]): still read at each allocation */
+  caml_domain_state *dom_st = Caml_state;
+  dom_st->young_ptr -= Whsize_wosize(wosize);
+  if (CAMLC_UNLIKELY((uintnat)dom_st->young_ptr
+                     < *(volatile uintnat *)&dom_st->young_limit)) {
+    atomic_thread_fence(memory_order_acquire);
+    camlc_alloc_small_gc(dom_st, wosize);
+  }
+  Hd_hp(dom_st->young_ptr) = Make_header(wosize, tag, 0);
+  v = Val_hp(dom_st->young_ptr);
 #else
 #define Setup_for_gc
 #define Restore_after_gc camlc_reset_young_limit()
