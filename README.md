@@ -215,7 +215,8 @@ Boxed integers are allocated inline, like floats.
 
 **Effect handlers** (OCaml 5) use the double translation of js_of_ocaml
 (`compiler/lib/effects.ml`). Functions that may perform an effect get a second,
-CPS version, whose code pointer follows the closure info in the closure. The
+CPS version, whose code pointer follows the closure info in the closure
+(`camlc_no_cps` for the other functions). The
 rest of the program is unchanged. Running a computation under a handler
 (`caml_resume` in `camlc_runtime.c`, modelled on the CPS runtime of
 wasm_of_ocaml) switches to the CPS versions. Fibers are OCaml blocks. CPS
@@ -269,6 +270,17 @@ location, taken from the debug events, in the runtime's backtrace buffer. The
 call stack itself cannot be walked, so `Printexc.get_callstack` returns an
 empty stack.
 
+**Marshaling closures** (`Marshal.Closures`). The marshaler of OCaml expects
+the closures of native code, with a second code pointer for the functions of
+arity 2 or more. With `Marshal.Closures`, the runtime then marshals the
+values itself, in the same format, which `input_value` reads. A code pointer
+is an index in the table of functions of wasm, written as an offset in a code
+fragment covering the table. Its digest combines the digest of the C code,
+computed by c_of_ocaml, and the indices of some functions: only the same
+program, linked in the same way, reads the closures back. With OCaml 4.14,
+whose marshaler takes the code pointers for naked pointers and the odd ones
+for integers, the runtime marshals all values.
+
 ## Limitations
 
 - Threads and domains need a runtime built with pthreads. The shadow stack
@@ -279,7 +291,6 @@ empty stack.
 - Bytecode loading and shared libraries (`Dynlink`) are not supported: the
   plugins are compiled ahead of time (see above).
 - Whole programs only, apart from plugins: there is no separate compilation.
-- `Marshal.Closures` is not supported.
 - Effects cannot be performed across a callback from C: they raise
   `Effect.Unhandled`, as with js_of_ocaml. `Effect.Deep.get_callstack` is
   empty.
@@ -306,8 +317,10 @@ wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
 (`compiler/tests-c/dynlink`). `tools/c_of_ocaml_threads_test.sh` tests the
 systhreads and the domains (`compiler/tests-c/threads`), natively, with the
 runtime of the OCaml switch. `tools/c_of_ocaml_segments_test.sh` tests the
-segmented stack (`compiler/tests-c/segments`), with JSPI and node 24. `dune build @compiler/tests-c/runtest` checks
-the primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
+segmented stack (`compiler/tests-c/segments`), with JSPI and node 24.
+`tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
+`Marshal.Closures`. `dune build @compiler/tests-c/runtest` checks the
+primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
 All tests pass on both wasm32 and wasm64, except:
 
@@ -317,8 +330,7 @@ All tests pass on both wasm32 and wasm64, except:
 - tests that expect the behaviour of the JavaScript runtime
   (`lib-digest/blake2_long_key`, `lib-obj/new_obj`, `lib-bytes/test_bytes`)
 - deep recursion tests (`misc/gcwords`, `misc/sieve`, `misc/pr7168`), also
-  disabled for js_of_ocaml and wasm_of_ocaml
-- `runtime-objects/Tests`, which marshals closures.
+  disabled for js_of_ocaml and wasm_of_ocaml.
 
 ## Source layout
 
