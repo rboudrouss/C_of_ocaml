@@ -1134,27 +1134,6 @@ let register_typing_primitives () =
   List.iter [ "caml_bytes_set32"; "caml_bytes_set64" ] ~f:(fun name ->
       Typing.register_prim name ~unbox:true (Typing.Int Normalized))
 
-(* Primitives whose arguments are integers *)
-let int_argument_primitives =
-  StringSet.of_list
-    [ "%int_add"
-    ; "%int_sub"
-    ; "%int_mul"
-    ; "%direct_int_mul"
-    ; "%int_neg"
-    ; "%int_and"
-    ; "%int_or"
-    ; "%int_xor"
-    ; "%int_lsl"
-    ; "%int_lsr"
-    ; "%int_asr"
-    ; "%direct_int_div"
-    ; "%direct_int_mod"
-    ; "%int_div"
-    ; "%int_mod"
-    ; "caml_int_compare"
-    ]
-
 (****)
 
 (* Program-wide facts about variables *)
@@ -1169,12 +1148,9 @@ let compute_facts (p : program) closures =
   let is_static = BitSet.create' (Var.count ()) in
   let set_int x = BitSet.set is_int (Var.idx x) in
   let int x = BitSet.mem is_int (Var.idx x) in
-  let int_arg a =
-    match a with
-    | Pv x -> set_int x
-    | Pc _ -> ()
-  in
-  (* Definitions and uses which imply an integer *)
+  (* Definitions which imply an integer. Not the uses: a variable switched
+     on or compared as an integer may be a block on other paths, after the
+     test [IsInt] of a pattern matching *)
   Addr.Map.iter
     (fun _ block ->
       List.iter block.body ~f:(fun i ->
@@ -1190,17 +1166,12 @@ let compute_facts (p : program) closures =
           | Let (x, Block (_, [||], _, _, _)) -> BitSet.set is_static (Var.idx x)
           | Let (x, Field (_, _, Immediate)) -> set_int x
           | Let (x, Prim (Array_get Immediate, _)) -> set_int x
-          | Let (x, Prim ((Vectlength _ | Not | IsInt _ | Eq _ | Neq _), _)) -> set_int x
-          | Let (x, Prim ((Lt | Le | Ult), args)) ->
-              set_int x;
-              List.iter args ~f:int_arg
-          | Let (x, Prim (Extern (name, _), args)) ->
-              if StringSet.mem name int_primitives then set_int x;
-              if StringSet.mem name int_argument_primitives then List.iter args ~f:int_arg
-          | Offset_ref _ | Let _ | Assign _ | Set_field _ | Array_set _ | Event _ -> ());
-      match block.branch with
-      | Switch (x, _) -> set_int x
-      | _ -> ())
+          | Let
+              (x, Prim ((Vectlength _ | Not | IsInt _ | Eq _ | Neq _ | Lt | Le | Ult), _))
+            -> set_int x
+          | Let (x, Prim (Extern (name, _), _)) ->
+              if StringSet.mem name int_primitives then set_int x
+          | Offset_ref _ | Let _ | Assign _ | Set_field _ | Array_set _ | Event _ -> ()))
     p.blocks;
   (* Block parameters and assigned variables all of whose values are
      integers *)
