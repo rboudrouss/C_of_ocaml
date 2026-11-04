@@ -42,8 +42,10 @@
 #include <caml/gc_ctrl.h>
 #include <caml/dynlink.h>
 #include <caml/prims.h>
-#if OCAML_VERSION_MAJOR >= 5
 #include <caml/codefrag.h>
+#include <caml/intext.h>
+#include <caml/md5.h>
+#if OCAML_VERSION_MAJOR >= 5
 #include <caml/runtime_events.h>
 #include <caml/platform.h>
 #include <caml/domain.h>
@@ -763,12 +765,12 @@ value camlc_make_pap(value f, int n, value *args)
   int e = camlc_double_translation ? 3 : 2;
   mlsize_t wosize = e + 1 + n;
   value *fp = camlc_sp - (n + 1);
-  value r, cps = 0;
+  value r, cps = CAMLC_NO_CPS;
   value code = arity <= camlc_curry_max
     ? camlc_curry_code[(arity - 1) * (arity - 2) / 2 + n - 1]
     : camlc_pap_code[arity - n];
   if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
-  if (camlc_double_translation && Field(f, 2) != 0)
+  if (camlc_double_translation && Field(f, 2) != CAMLC_NO_CPS)
     cps = camlc_pap_cps_code[arity - n];
   camlc_sp = fp;
   fp[0] = f;
@@ -882,7 +884,7 @@ static value camlc_cps_call(value f, int n, value *args)
 #define CAMLC_STATIC_CLOSURE(name, code)                                    \
   static value code(value, value);                                         \
   static value name[4] = { Make_header(3, Closure_tag, CAMLC_STATIC_COLOR), \
-                           (value)&code, Make_closinfo(1, 3), 0 }
+                           (value)&code, Make_closinfo(1, 3), CAMLC_NO_CPS }
 #define Static_closure(name) ((value)&name[1])
 
 CAMLC_STATIC_CLOSURE(camlc_identity_closure, camlc_identity_code);
@@ -932,7 +934,7 @@ value camlc_applyv_cps(value f, int n, value *args)
   while (1) {
     int arity = Arity_closinfo(Closinfo_val(fp[0]));
     int remaining = n - i;
-    if (Field(fp[0], 2) != 0) {
+    if (Field(fp[0], 2) != CAMLC_NO_CPS) {
       /* A function with a CPS version */
       if (arity == remaining) {
         r = camlc_call_exact_cps(fp[0], arity, fp + 1 + i);
@@ -952,7 +954,7 @@ value camlc_applyv_cps(value f, int n, value *args)
         r = caml_alloc(4 + m, Closure_tag);
         Field(r, 0) = (value)&camlc_cps_rest_code;
         Field(r, 1) = Make_closinfo(1, 3);
-        Field(r, 2) = 0;
+        Field(r, 2) = CAMLC_NO_CPS;
         caml_modify(&Field(r, 3), fp[1 + n]);
         for (mlsize_t j = 0; j < m; j++)
           caml_modify(&Field(r, 4 + j), fp[1 + i + arity + j]);
@@ -1603,6 +1605,601 @@ code_t caml_next_frame_pointer(value **sp, value **trsp)
 #endif
 
 /****************************************************************/
+/* Marshaling with [Marshal.Closures] (replaces extern.c then).
+
+   The marshaler of OCaml expects the closures of native code, where a
+   function of arity 2 or more has a second code pointer after its closure
+   info. Here, it has one only in a closure of several functions, or a CPS
+   version with effect handlers (see [closure_layout] in generate.ml). The
+   values are then marshaled here, in the format [input_value] reads.
+   Without [Marshal.Closures], the marshaler of OCaml is called, but with
+   OCaml 4 and naked pointers: it takes the closures for blocks, and their
+   code pointers for naked pointers, except the odd ones, which look like
+   integers, so that it would marshal some closures.
+
+   A code pointer is an offset in a code fragment covering the table of
+   functions of wasm but its first entry, null: a code fragment cannot
+   start at 0, hence [CAMLC_NO_CPS] rather than 0 for the CPS code pointer
+   of the functions without CPS version. Its digest combines the one of the
+   program, computed by c_of_ocaml, and the table indices of some
+   functions: only the same program, linked in the same way, can read the
+   closures back. Custom blocks other than boxed integers are marshaled by
+   the marshaler of OCaml. */
+
+CAMLextern value caml_output_value(value, value, value);
+CAMLextern value caml_output_value_to_bytes(value, value);
+CAMLextern value caml_output_value_to_string(value, value);
+CAMLextern value caml_output_value_to_buffer(value, value, value, value,
+                                             value);
+CAMLextern value caml_ml_output_bytes(value, value, value, value);
+
+value camlc_no_cps(void)
+{
+  caml_fatal_error("c_of_ocaml: call of a missing CPS version");
+}
+
+#ifdef __EMSCRIPTEN__
+static unsigned char camlc_code_digest[16];
+
+EM_JS(int, camlc_js_table_size, (void), {
+  return Number(wasmExports['__indirect_function_table'].length);
+});
+
+static void camlc_register_code_fragment(void)
+{
+  struct MD5Context ctx;
+  uintnat indices[] = { (uintnat)&camlc_program, (uintnat)&camlc_applyv,
+                        (uintnat)&camlc_no_cps, (uintnat)&caml_alloc };
+  caml_MD5Init(&ctx);
+  caml_MD5Update(&ctx, (unsigned char *)camlc_program_digest, 16);
+  caml_MD5Update(&ctx, (unsigned char *)indices, sizeof(indices));
+  caml_MD5Final(camlc_code_digest, &ctx);
+  /* The table only: the runtime takes the values on the bytecode stacks
+     which are in a code fragment for code pointers */
+  caml_register_code_fragment((char *)1,
+                              (char *)(uintnat)camlc_js_table_size(),
+                              DIGEST_PROVIDED, camlc_code_digest);
+}
+#endif
+
+#if OCAML_VERSION_MAJOR < 5 && !defined(NO_NAKED_POINTERS)
+#define CAMLC_EXTERN_ALL 1
+#else
+#define CAMLC_EXTERN_ALL 0
+#endif
+
+#define CAMLC_NO_SHARING 1
+#define CAMLC_CLOSURES 2
+#define CAMLC_COMPAT_32 4
+static int camlc_extern_flag_values[] = { CAMLC_NO_SHARING,
+                                                CAMLC_CLOSURES,
+                                                CAMLC_COMPAT_32, 0 };
+
+struct camlc_extern_item { value *v; mlsize_t n; };
+
+struct camlc_extern {
+  int flags;
+  unsigned char *buf;           /* the output, after the header */
+  uintnat len, cap;
+  uintnat obj_counter, size_32, size_64;
+  value *keys;                  /* the blocks seen (open addressing) */
+  uintnat *pos;                 /* and their object numbers */
+  uintnat table_size;
+  struct camlc_extern_item *stack; /* the fields left to marshal */
+  uintnat sp, stack_size;
+};
+
+static void camlc_extern_free(struct camlc_extern *s)
+{
+  free(s->buf);
+  free(s->keys);
+  free(s->pos);
+  free(s->stack);
+}
+
+CAMLnoreturn_start
+static void camlc_extern_failwith(struct camlc_extern *s, const char *msg)
+CAMLnoreturn_end;
+
+static void camlc_extern_failwith(struct camlc_extern *s, const char *msg)
+{
+  camlc_extern_free(s);
+  caml_failwith(msg);
+}
+
+CAMLnoreturn_start
+static void camlc_extern_invalid(struct camlc_extern *s, const char *msg)
+CAMLnoreturn_end;
+
+static void camlc_extern_invalid(struct camlc_extern *s, const char *msg)
+{
+  camlc_extern_free(s);
+  caml_invalid_argument(msg);
+}
+
+CAMLnoreturn_start
+static void camlc_extern_out_of_memory(struct camlc_extern *s)
+CAMLnoreturn_end;
+
+static void camlc_extern_out_of_memory(struct camlc_extern *s)
+{
+  camlc_extern_free(s);
+  caml_raise_out_of_memory();
+}
+
+static unsigned char *camlc_extern_reserve(struct camlc_extern *s,
+                                           uintnat n)
+{
+  if (s->cap - s->len < n) {
+    uintnat cap = s->cap ? s->cap : 256;
+    unsigned char *buf;
+    while (cap - s->len < n) cap *= 2;
+    buf = realloc(s->buf, cap);
+    if (buf == NULL) camlc_extern_out_of_memory(s);
+    s->buf = buf;
+    s->cap = cap;
+  }
+  s->len += n;
+  return s->buf + s->len - n;
+}
+
+static void camlc_extern_byte(struct camlc_extern *s, int c)
+{
+  *camlc_extern_reserve(s, 1) = c;
+}
+
+static void camlc_extern_block(struct camlc_extern *s, const void *p,
+                               uintnat n)
+{
+  memcpy(camlc_extern_reserve(s, n), p, n);
+}
+
+/* [n] in [bytes] bytes, big-endian */
+static void camlc_extern_be(struct camlc_extern *s, int bytes, uint64_t n)
+{
+  unsigned char *p = camlc_extern_reserve(s, bytes);
+  for (int i = bytes - 1; i >= 0; i--, n >>= 8) p[i] = n;
+}
+
+static void camlc_extern_code(struct camlc_extern *s, int code, int bytes,
+                              uint64_t n)
+{
+  camlc_extern_byte(s, code);
+  camlc_extern_be(s, bytes, n);
+}
+
+static void camlc_extern_int(struct camlc_extern *s, intnat n)
+{
+  if (n >= 0 && n < 0x40)
+    camlc_extern_byte(s, PREFIX_SMALL_INT + n);
+  else if (n >= -(1 << 7) && n < (1 << 7))
+    camlc_extern_code(s, CODE_INT8, 1, n);
+  else if (n >= -(1 << 15) && n < (1 << 15))
+    camlc_extern_code(s, CODE_INT16, 2, n);
+#ifdef ARCH_SIXTYFOUR
+  else if (n < -((intnat)1 << 30) || n >= ((intnat)1 << 30)) {
+    if (s->flags & CAMLC_COMPAT_32)
+      camlc_extern_failwith(s, "output_value: integer cannot be read back "
+                            "on 32-bit platform");
+    camlc_extern_code(s, CODE_INT64, 8, n);
+  }
+#endif
+  else
+    camlc_extern_code(s, CODE_INT32, 4, n);
+}
+
+static void camlc_extern_size(struct camlc_extern *s, uintnat n,
+                              int code8, int code32, int code64,
+                              uintnat compat_max, const char *what)
+{
+  if (n < 0x100) camlc_extern_code(s, code8, 1, n);
+#ifdef ARCH_SIXTYFOUR
+  else if (n > compat_max && (s->flags & CAMLC_COMPAT_32)) {
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "output_value: %s cannot be read back on 32-bit platform", what);
+    camlc_extern_failwith(s, msg);
+  } else if (n >= (uintnat)1 << 32) camlc_extern_code(s, code64, 8, n);
+#endif
+  else camlc_extern_code(s, code32, 4, n);
+  (void)code64;
+  (void)compat_max;
+  (void)what;
+}
+
+static void camlc_extern_header(struct camlc_extern *s, mlsize_t sz,
+                                tag_t tag)
+{
+  if (tag < 16 && sz < 8)
+    camlc_extern_byte(s, PREFIX_SMALL_BLOCK + tag + (sz << 4));
+  else {
+    /* The colour of extern.c, ignored by intern.c */
+#if OCAML_VERSION_MAJOR >= 5
+    uintnat hd = Make_header(sz, tag, 3 << HEADER_COLOR_SHIFT);
+#else
+    uintnat hd = Make_header(sz, tag, 0);
+#endif
+#ifdef ARCH_SIXTYFOUR
+    if (sz > 0x3FFFFF && (s->flags & CAMLC_COMPAT_32))
+      camlc_extern_failwith(s, "output_value: array cannot be read back on "
+                            "32-bit platform");
+    if (hd >= (uintnat)1 << 32) {
+      camlc_extern_code(s, CODE_BLOCK64, 8, hd);
+      return;
+    }
+#endif
+    camlc_extern_code(s, CODE_BLOCK32, 4, hd);
+  }
+}
+
+static void camlc_extern_code_pointer(struct camlc_extern *s, value p)
+{
+  struct code_fragment *cf = caml_find_code_fragment_by_pc((char *)p);
+  unsigned char *digest = cf ? caml_digest_of_code_fragment(cf) : NULL;
+  if (digest == NULL)
+    camlc_extern_invalid(s, "output_value: functional value");
+  camlc_extern_code(s, CODE_CODEPOINTER, 4, (char *)p - cf->code_start);
+  camlc_extern_block(s, digest, 16);
+}
+
+/* The fields of a closure before its environment, whose start it returns:
+   for each function, its Infix header (but the first), its code pointer,
+   its closure info, then, in a closure of several functions, the CPS
+   version or a field for the functions of arity 2 or more (unit) */
+static mlsize_t camlc_extern_closure(struct camlc_extern *s, value v)
+{
+  mlsize_t startenv = Start_env_closinfo(Closinfo_val(v)), i = 0;
+  while (1) {
+    value info;
+    if (i > 0) camlc_extern_int(s, Long_val(Field(v, i++)));
+    camlc_extern_code_pointer(s, Field(v, i++));
+    info = Field(v, i++);
+    camlc_extern_int(s, Long_val(info));
+    if (i >= startenv) break;
+    if (startenv - i == 1 || camlc_double_translation
+        || Arity_closinfo(info) >= 2) {
+      value c = Field(v, i++);
+      if (c == Val_unit) camlc_extern_int(s, 0);
+      else camlc_extern_code_pointer(s, c);
+      if (i >= startenv) break;
+    }
+  }
+  return startenv;
+}
+
+/* Custom blocks are marshaled by OCaml */
+static void camlc_extern_custom(struct camlc_extern *s, value v)
+{
+  char *data;
+  intnat len, header_len;
+  const unsigned char *p;
+  const char *id = Custom_ops_val(v)->identifier;
+  if (Custom_ops_val(v)->serialize == NULL)
+    camlc_extern_invalid(s, "output_value: abstract value (Custom)");
+  /* The boxed integers, without the overhead of a call to the marshaler */
+  if (strcmp(id, "_j") == 0) {
+    camlc_extern_block(s, "\x19_j", 4); /* CODE_CUSTOM_FIXED */
+    camlc_extern_be(s, 8, Int64_val(v));
+    s->size_32 += 2 + 2;
+    s->size_64 += 2 + 1;
+    return;
+  }
+  if (strcmp(id, "_i") == 0) {
+    camlc_extern_block(s, "\x19_i", 4);
+    camlc_extern_be(s, 4, (uint32_t)Int32_val(v));
+    s->size_32 += 2 + 1;
+    s->size_64 += 2 + 1;
+    return;
+  }
+  caml_output_value_to_malloc(v, Val_emptylist, &data, &len);
+  p = (const unsigned char *)data;
+  if (((uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3])
+      == Intext_magic_number_small) {
+    header_len = 20;
+    s->size_32 += (uint32_t)p[12] << 24 | p[13] << 16 | p[14] << 8 | p[15];
+    s->size_64 += (uint32_t)p[16] << 24 | p[17] << 16 | p[18] << 8 | p[19];
+  } else {
+    /* The big format (more than 4 GB): no size on 32-bit platforms */
+    uint64_t sz = 0;
+    for (int i = 24; i < 32; i++) sz = sz << 8 | p[i];
+    header_len = 32;
+    s->size_32 += sz;
+    s->size_64 += sz;
+  }
+  camlc_extern_block(s, p + header_len, len - header_len);
+  caml_stat_free(data);
+}
+
+static uintnat camlc_extern_hash(struct camlc_extern *s, value v)
+{
+  return ((uintnat)v >> 2) * (uintnat)0x9E3779B97F4A7C15ULL
+         >> 7 & (s->table_size - 1);
+}
+
+static int camlc_extern_lookup(struct camlc_extern *s, value v,
+                               uintnat *pos)
+{
+  if (s->table_size == 0) return 0;
+  for (uintnat h = camlc_extern_hash(s, v); s->keys[h] != 0;
+       h = (h + 1) & (s->table_size - 1))
+    if (s->keys[h] == v) {
+      *pos = s->pos[h];
+      return 1;
+    }
+  return 0;
+}
+
+static void camlc_extern_record(struct camlc_extern *s, value v)
+{
+  uintnat h;
+  if (s->flags & CAMLC_NO_SHARING) return;
+  if (2 * (s->obj_counter + 1) > s->table_size) {
+    value *keys = s->keys;
+    uintnat *pos = s->pos, old = s->table_size;
+    s->table_size = old ? 2 * old : 256;
+    s->keys = calloc(s->table_size, sizeof(value));
+    s->pos = malloc(s->table_size * sizeof(uintnat));
+    if (s->keys == NULL || s->pos == NULL) {
+      free(keys);
+      free(pos);
+      camlc_extern_out_of_memory(s);
+    }
+    for (uintnat i = 0; i < old; i++)
+      if (keys[i] != 0) {
+        for (h = camlc_extern_hash(s, keys[i]); s->keys[h] != 0;
+             h = (h + 1) & (s->table_size - 1)) {}
+        s->keys[h] = keys[i];
+        s->pos[h] = pos[i];
+      }
+    free(keys);
+    free(pos);
+  }
+  for (h = camlc_extern_hash(s, v); s->keys[h] != 0;
+       h = (h + 1) & (s->table_size - 1)) {}
+  s->keys[h] = v;
+  s->pos[h] = s->obj_counter++;
+}
+
+/* Marshal fields [n] fields at [v] later */
+static void camlc_extern_push(struct camlc_extern *s, value *v, mlsize_t n)
+{
+  if (s->sp == s->stack_size) {
+    uintnat size = s->stack_size ? 2 * s->stack_size : 256;
+    struct camlc_extern_item *stack =
+      realloc(s->stack, size * sizeof(struct camlc_extern_item));
+    if (stack == NULL) camlc_extern_out_of_memory(s);
+    s->stack = stack;
+    s->stack_size = size;
+  }
+  s->stack[s->sp].v = v;
+  s->stack[s->sp].n = n;
+  s->sp++;
+}
+
+/* As [extern_rec] in extern.c */
+static void camlc_extern_rec(struct camlc_extern *s, value v)
+{
+  while (1) {
+    if (Is_long(v)) {
+      camlc_extern_int(s, Long_val(v));
+    } else {
+      header_t hd;
+      tag_t tag;
+      mlsize_t sz;
+      uintnat pos;
+#if CAMLC_EXTERN_ALL
+      if (!Is_in_value_area(v))
+        camlc_extern_invalid(s, "output_value: abstract value (outside "
+                             "heap)");
+#endif
+      hd = Hd_val(v);
+      tag = Tag_hd(hd);
+      sz = Wosize_hd(hd);
+      if (tag == Forward_tag) {
+        value f = Forward_val(v);
+        if (!(Is_block(f)
+              && (Tag_val(f) == Forward_tag || Tag_val(f) == Lazy_tag
+#ifdef Forcing_tag
+                  || Tag_val(f) == Forcing_tag
+#endif
+#ifdef FLAT_FLOAT_ARRAY
+                  || Tag_val(f) == Double_tag
+#endif
+                  ))) {
+          v = f;
+          continue;
+        }
+      }
+      if (sz == 0) {
+        camlc_extern_header(s, 0, tag);
+        goto next;
+      }
+      if (!(s->flags & CAMLC_NO_SHARING) && camlc_extern_lookup(s, v, &pos)) {
+        uintnat d = s->obj_counter - pos;
+        if (d < 0x100) camlc_extern_code(s, CODE_SHARED8, 1, d);
+        else if (d < 0x10000) camlc_extern_code(s, CODE_SHARED16, 2, d);
+#ifdef ARCH_SIXTYFOUR
+        else if (d >= (uintnat)1 << 32)
+          camlc_extern_code(s, CODE_SHARED64, 8, d);
+#endif
+        else camlc_extern_code(s, CODE_SHARED32, 4, d);
+        goto next;
+      }
+      switch (tag) {
+      case String_tag: {
+        mlsize_t len = caml_string_length(v);
+        if (len < 0x20) camlc_extern_byte(s, PREFIX_SMALL_STRING + len);
+        else
+          camlc_extern_size(s, len, CODE_STRING8, CODE_STRING32,
+                            CODE_STRING64, 0xFFFFFB, "string");
+        camlc_extern_block(s, String_val(v), len);
+        s->size_32 += 1 + (len + 4) / 4;
+        s->size_64 += 1 + (len + 8) / 8;
+        camlc_extern_record(s, v);
+        break;
+      }
+      case Double_tag:
+        camlc_extern_byte(s, CODE_DOUBLE_NATIVE);
+        camlc_extern_block(s, (double *)v, 8);
+        s->size_32 += 1 + 2;
+        s->size_64 += 1 + 1;
+        camlc_extern_record(s, v);
+        break;
+      case Double_array_tag: {
+        mlsize_t n = sz / Double_wosize;
+        camlc_extern_size(s, n, CODE_DOUBLE_ARRAY8_NATIVE,
+                          CODE_DOUBLE_ARRAY32_NATIVE,
+                          CODE_DOUBLE_ARRAY64_NATIVE, 0x1FFFFF,
+                          "float array");
+        camlc_extern_block(s, (double *)v, 8 * n);
+        s->size_32 += 1 + 2 * n;
+        s->size_64 += 1 + n;
+        camlc_extern_record(s, v);
+        break;
+      }
+      case Abstract_tag:
+        camlc_extern_invalid(s, "output_value: abstract value (Abstract)");
+      case Infix_tag:
+        if (!(s->flags & CAMLC_CLOSURES))
+          camlc_extern_invalid(s, "output_value: functional value");
+        camlc_extern_code(s, CODE_INFIXPOINTER, 4, Infix_offset_hd(hd));
+        v -= Infix_offset_hd(hd);
+        continue;
+      case Custom_tag:
+        camlc_extern_custom(s, v);
+        camlc_extern_record(s, v);
+        break;
+#ifdef Cont_tag
+      case Cont_tag:
+        camlc_extern_invalid(s, "output_value: continuation value");
+#endif
+      case Closure_tag: {
+        mlsize_t i;
+        if (!(s->flags & CAMLC_CLOSURES))
+          camlc_extern_invalid(s, "output_value: functional value");
+        camlc_extern_header(s, sz, tag);
+        s->size_32 += 1 + sz;
+        s->size_64 += 1 + sz;
+        camlc_extern_record(s, v);
+        i = camlc_extern_closure(s, v);
+        if (i >= sz) goto next;
+        if (i < sz - 1)
+          camlc_extern_push(s, (value *)&Field(v, i + 1), sz - i - 1);
+        v = Field(v, i);
+        continue;
+      }
+      default:
+        camlc_extern_header(s, sz, tag);
+        s->size_32 += 1 + sz;
+        s->size_64 += 1 + sz;
+        camlc_extern_record(s, v);
+        if (sz > 1) camlc_extern_push(s, (value *)&Field(v, 1), sz - 1);
+        v = Field(v, 0);
+        continue;
+      }
+    }
+  next:
+    if (s->sp == 0) return;
+    v = *s->stack[s->sp - 1].v++;
+    if (--s->stack[s->sp - 1].n == 0) s->sp--;
+  }
+}
+
+static void camlc_store(unsigned char *p, int bytes, uint64_t n)
+{
+  for (int i = bytes - 1; i >= 0; i--, n >>= 8) p[i] = n;
+}
+
+/* Marshal [v] to a string, with the header of extern.c */
+static value camlc_extern_value(value v, int flags)
+{
+  struct camlc_extern s = { 0 };
+  unsigned char header[32];
+  int header_len;
+  value res;
+  s.flags = flags;
+  camlc_extern_rec(&s, v);
+#ifdef ARCH_SIXTYFOUR
+  if (s.len >= (uintnat)1 << 32 || s.size_32 >= (uintnat)1 << 32
+      || s.size_64 >= (uintnat)1 << 32) {
+    if (s.flags & CAMLC_COMPAT_32)
+      camlc_extern_failwith(&s, "output_value: object too big to be read "
+                            "back on 32-bit platform");
+    camlc_store(header, 4, Intext_magic_number_big);
+    camlc_store(header + 4, 4, 0);
+    camlc_store(header + 8, 8, s.len);
+    camlc_store(header + 16, 8, s.obj_counter);
+    camlc_store(header + 24, 8, s.size_64);
+    header_len = 32;
+  } else
+#endif
+  {
+    camlc_store(header, 4, Intext_magic_number_small);
+    camlc_store(header + 4, 4, s.len);
+    camlc_store(header + 8, 4, s.obj_counter);
+    camlc_store(header + 12, 4, s.size_32);
+    camlc_store(header + 16, 4, s.size_64);
+    header_len = 20;
+  }
+  res = caml_alloc_string(header_len + s.len);
+  memcpy(Bytes_val(res), header, header_len);
+  if (s.len > 0) memcpy(Bytes_val(res) + header_len, s.buf, s.len);
+  camlc_extern_free(&s);
+  return res;
+}
+
+static int camlc_extern_flags(value flags)
+{
+  return caml_convert_flag_list(flags, camlc_extern_flag_values);
+}
+
+value camlc_output_value(value chan, value v, value flags)
+{
+  CAMLparam1(chan);
+  CAMLlocal1(s);
+  int f = camlc_extern_flags(flags);
+  if (!CAMLC_EXTERN_ALL && !(f & CAMLC_CLOSURES))
+    CAMLreturn(caml_output_value(chan, v, flags));
+  s = camlc_extern_value(v, f);
+  caml_ml_output_bytes(chan, s, Val_long(0),
+                       Val_long(caml_string_length(s)));
+  CAMLreturn(Val_unit);
+}
+
+value camlc_output_value_to_bytes(value v, value flags)
+{
+  int f = camlc_extern_flags(flags);
+  if (!CAMLC_EXTERN_ALL && !(f & CAMLC_CLOSURES))
+    return caml_output_value_to_bytes(v, flags);
+  return camlc_extern_value(v, f);
+}
+
+value camlc_output_value_to_string(value v, value flags)
+{
+  int f = camlc_extern_flags(flags);
+  if (!CAMLC_EXTERN_ALL && !(f & CAMLC_CLOSURES))
+    return caml_output_value_to_string(v, flags);
+  return camlc_extern_value(v, f);
+}
+
+value camlc_output_value_to_buffer(value buf, value ofs, value len, value v,
+                                   value flags)
+{
+  CAMLparam1(buf);
+  CAMLlocal1(s);
+  int f = camlc_extern_flags(flags);
+  mlsize_t n;
+  if (!CAMLC_EXTERN_ALL && !(f & CAMLC_CLOSURES))
+    CAMLreturn(caml_output_value_to_buffer(buf, ofs, len, v, flags));
+  s = camlc_extern_value(v, f);
+  n = caml_string_length(s);
+  if (n > (uintnat)Long_val(len))
+    caml_failwith("Marshal.to_buffer: buffer overflow");
+  memcpy(Bytes_val(buf) + Long_val(ofs), String_val(s), n);
+  CAMLreturn(Val_long(n));
+}
+
+/****************************************************************/
 /* Compilation units and plugins (see camlc.h) */
 
 struct camlc_unit {
@@ -2006,6 +2603,9 @@ int main(int argc, char **argv)
   caml_init_atom_table();
   caml_init_backtrace();
   Caml_state->external_raise = NULL;
+#endif
+#ifdef __EMSCRIPTEN__
+  camlc_register_code_fragment();
 #endif
   camlc_register_data(&camlc_program_data);
   camlc_register_interfaces(camlc_program_interfaces);

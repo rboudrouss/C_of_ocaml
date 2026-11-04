@@ -973,6 +973,17 @@ let primitive out name (args : parg list) =
               | "caml_continuation_use_and_update_handler_noexc", 4
                 when double_translation () ->
                   plain (c_call "camlc_continuation_use_and_update_handler_noexc" args)
+              (* With [Marshal.Closures], marshaled by the runtime *)
+              | ( ( "caml_output_value"
+                  | "caml_output_value_to_bytes"
+                  | "caml_output_value_to_string"
+                  | "caml_output_value_to_buffer" )
+                , _ ) ->
+                  Checked
+                    (c_call
+                       (Printf.sprintf "camlc_ccall%d" n)
+                       (("camlc" ^ String.sub name ~pos:4 ~len:(String.length name - 4))
+                       :: args))
               | _ ->
                   if String.length name > 0 && Char.equal name.[0] '%'
                   then
@@ -1576,7 +1587,7 @@ let closure_prefix out functions =
              code
              @ [ (match Var.Map.find_opt g out.cps_pairs with
                  | Some c -> Printf.sprintf "(value)&%s" (fun_ref out c)
-                 | None -> "0")
+                 | None -> "CAMLC_NO_CPS")
                ]
            else if List.length functions > 1 && arity >= 2
            then code @ [ "Val_unit" ]
@@ -4087,7 +4098,7 @@ let f
            }\n\n\
            static inline value camlc_call_cps%d(value f, %s, value k) {\n\
           \  value c = Field(f, 2);\n\
-          \  if (c) CAMLC_MUSTTAIL return ((%s)c)(%s, k, f);\n\
+          \  if (c != CAMLC_NO_CPS) CAMLC_MUSTTAIL return ((%s)c)(%s, k, f);\n\
           \  CAMLC_MUSTTAIL return camlc_direct_k%d(f, %s, k);\n\
            }\n\n\
            static inline value camlc_apply_cps%d(value f, %s, value k) {\n\
@@ -4159,7 +4170,8 @@ let f
           (if dt
            then
              Printf.sprintf
-               "  Field(r, 2) = Field(fp[0], 2) ? camlc_pap_cps_code[arity - %d] : 0;\n"
+               "  Field(r, 2) = Field(fp[0], 2) != CAMLC_NO_CPS ? \
+                camlc_pap_cps_code[arity - %d] : CAMLC_NO_CPS;\n"
                n
            else "")
           e
@@ -4203,47 +4215,64 @@ let f
         | None -> ());
         Buffer.add_string b d.def_text)
   in
-  if not split
-  then (
-    let b =
-      Buffer.create
-        (Buffer.length out.data
-        + 65536
-        + List.fold_left definitions ~init:0 ~f:(fun n d -> n + d.def_size))
-    in
-    preamble b;
-    prototypes b (List.map functions ~f:(fun (f, _, _) -> f));
-    tables b;
-    String.Hashtbl.fold (fun name _ acc -> name :: acc) out.locations []
-    |> String.Hashtbl.fold (fun name () acc -> name :: acc) out.segment_thunks
-    |> List.sort ~cmp:String.compare
-    |> declare_symbols b;
-    helpers b;
-    add_definitions b definitions;
-    [ Buffer.contents b ])
-  else
-    let main =
-      let b = Buffer.create (Buffer.length out.data + 65536) in
+  let files =
+    if not split
+    then (
+      let b =
+        Buffer.create
+          (Buffer.length out.data
+          + 65536
+          + List.fold_left definitions ~init:0 ~f:(fun n d -> n + d.def_size))
+      in
       preamble b;
-      prototypes b (Var.Set.elements data_refs);
+      prototypes b (List.map functions ~f:(fun (f, _, _) -> f));
       tables b;
-      Buffer.contents b
-    in
-    main
-    :: List.map parts ~f:(fun l ->
-        let b =
-          Buffer.create (List.fold_left l ~init:65536 ~f:(fun n d -> n + d.def_size))
-        in
+      String.Hashtbl.fold (fun name _ acc -> name :: acc) out.locations []
+      |> String.Hashtbl.fold (fun name () acc -> name :: acc) out.segment_thunks
+      |> List.sort ~cmp:String.compare
+      |> declare_symbols b;
+      helpers b;
+      add_definitions b definitions;
+      [ Buffer.contents b ])
+    else
+      let main =
+        let b = Buffer.create (Buffer.length out.data + 65536) in
         preamble b;
-        declare_symbols b (symbols (List.map l ~f:(fun d -> d.def_text)));
-        let used =
-          List.fold_left l ~init:Var.Set.empty ~f:(fun s d ->
-              let s = Var.Set.union s d.def_refs in
-              match d.def_fn with
-              | Some f -> Var.Set.add f s
-              | None -> s)
-        in
-        prototypes b (Var.Set.elements used);
-        helpers b;
-        add_definitions b l;
-        Buffer.contents b)
+        prototypes b (Var.Set.elements data_refs);
+        tables b;
+        Buffer.contents b
+      in
+      main
+      :: List.map parts ~f:(fun l ->
+          let b =
+            Buffer.create (List.fold_left l ~init:65536 ~f:(fun n d -> n + d.def_size))
+          in
+          preamble b;
+          declare_symbols b (symbols (List.map l ~f:(fun d -> d.def_text)));
+          let used =
+            List.fold_left l ~init:Var.Set.empty ~f:(fun s d ->
+                let s = Var.Set.union s d.def_refs in
+                match d.def_fn with
+                | Some f -> Var.Set.add f s
+                | None -> s)
+          in
+          prototypes b (Var.Set.elements used);
+          helpers b;
+          add_definitions b l;
+          Buffer.contents b)
+  in
+  match mode, files with
+  | (`Program | `Dynlink), main :: parts ->
+      (* The digest of the program, for the code pointers of marshaled
+         closures (see camlc_runtime.c) *)
+      let digest =
+        Digest.string (String.concat ~sep:"" (List.map files ~f:Digest.string))
+      in
+      Printf.sprintf
+        "%s\nconst unsigned char camlc_program_digest[16] = { %s };\n"
+        main
+        (String.concat
+           ~sep:", "
+           (List.init ~len:16 ~f:(fun i -> string_of_int (Char.code digest.[i]))))
+      :: parts
+  | _ -> files
