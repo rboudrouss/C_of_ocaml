@@ -86,6 +86,15 @@ let c_type r =
   | Unboxed_int32 -> "int32_t"
   | Unboxed_nativeint -> "intnat"
 
+(* The field of [union camlc_word] holding a number in representation [r] *)
+let repr_letter r =
+  match r with
+  | Value -> 'v'
+  | Double -> 'd'
+  | Unboxed_int64 -> 'l'
+  | Unboxed_int32 -> 'i'
+  | Unboxed_nativeint -> 'n'
+
 let repr_of_type (t : Typing.typ) =
   match t with
   | Number (Float, Unboxed) -> Double
@@ -136,6 +145,11 @@ type output =
         (** The representation of the result of each function *)
   ; debug_info : bool  (** Record backtraces *)
   ; locations : string String.Hashtbl.t  (** The initializer of each location, by name *)
+  ; segment_thunks : unit String.Hashtbl.t
+        (** The thunks calling a function on a new segment of the stack, by name *)
+  ; mutable components : int Var.Hashtbl.t
+        (** The recursive functions, by strongly connected component of the
+            graph of known calls *)
   ; in_cps : Var.Set.t  (** The CPS calls *)
   ; trampolined : Var.Set.t  (** The CPS calls which may bounce *)
   ; cps_pairs : Var.t Var.Map.t
@@ -2611,7 +2625,65 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     propagate
       (roots (fun s -> s.gcs || List.exists s.inner ~f:(fun g -> Var.Set.mem g any)))
       (callers (fun s -> s.outer));
-  out.collecting_on_raise <- Var.Set.diff any out.collecting
+  out.collecting_on_raise <- Var.Set.diff any out.collecting;
+  (* The strongly connected components of the graph of known calls
+     (Tarjan), those with a cycle *)
+  let callees = Var.Hashtbl.create 1024 in
+  List.iter summaries ~f:(fun s -> Var.Hashtbl.replace callees s.fn (s.outer @ s.inner));
+  let index = Var.Hashtbl.create 1024 in
+  let low = Var.Hashtbl.create 1024 in
+  let on_stack = Var.Hashtbl.create 1024 in
+  let stack = ref [] in
+  let next = ref 0 in
+  let components = Var.Hashtbl.create 1024 in
+  let rec visit f =
+    Var.Hashtbl.replace index f !next;
+    Var.Hashtbl.replace low f !next;
+    incr next;
+    stack := f :: !stack;
+    Var.Hashtbl.replace on_stack f ();
+    List.iter
+      (Option.value ~default:[] (Var.Hashtbl.find_opt callees f))
+      ~f:(fun g ->
+        if not (Var.Hashtbl.mem index g)
+        then (
+          visit g;
+          Var.Hashtbl.replace
+            low
+            f
+            (min (Var.Hashtbl.find low f) (Var.Hashtbl.find low g)))
+        else if Var.Hashtbl.mem on_stack g
+        then
+          Var.Hashtbl.replace
+            low
+            f
+            (min (Var.Hashtbl.find low f) (Var.Hashtbl.find index g)));
+    if Var.Hashtbl.find low f = Var.Hashtbl.find index f
+    then
+      let rec pop acc =
+        match !stack with
+        | g :: r ->
+            stack := r;
+            Var.Hashtbl.remove on_stack g;
+            if Var.equal g f then g :: acc else pop (g :: acc)
+        | [] -> assert false
+      in
+      let component = pop [] in
+      let cyclic =
+        match component with
+        | [ g ] ->
+            List.exists
+              (Option.value ~default:[] (Var.Hashtbl.find_opt callees g))
+              ~f:(Var.equal g)
+        | _ -> true
+      in
+      if cyclic
+      then
+        List.iter component ~f:(fun g ->
+            Var.Hashtbl.replace components g (Var.Hashtbl.find index f))
+  in
+  List.iter summaries ~f:(fun s -> if not (Var.Hashtbl.mem index s.fn) then visit s.fn);
+  out.components <- components
 
 let translate_function
     out
@@ -2682,6 +2754,84 @@ let translate_function
   let entry_poll, loop_polls = polls out blocks pc in
   assign_slots ctx pcs ~params ~entry:(pc, args) rooted live_in;
   let frame_size = Var.Hashtbl.fold (fun _ i n -> max n (i + 1)) ctx.slots 0 in
+  (* The shadow stack measures the depth of the stack of the engine (see
+     [camlc_segment_limit]) in the recursions: only the functions making
+     calls which may be recursive (to their strongly connected component
+     of known calls, or unknown) can go on a new segment, the others
+     appearing at most once on the stack. The frame of such a function has
+     at least a word for 100 bytes of its frame on the stack of the engine,
+     which takes about 80 bytes and 2 per C variable (V8's baseline
+     compiler). Without frame, it gets one if it makes one such call on
+     each path: with more, the depth of the recursion is that of a tree
+     (fib), costly to measure *)
+  let non_tail_calls pc =
+    let block = Addr.Map.find pc blocks in
+    let rec calls l =
+      match l with
+      | [] -> []
+      | Let (x, Apply { f; exact; _ }) :: r ->
+          let tail =
+            List.for_all r ~f:(function
+              | Event _ -> true
+              | _ -> false)
+            &&
+            match block.branch with
+            | Return y -> Var.equal x y
+            | _ -> false
+          in
+          if tail then calls r else (x, f, exact) :: calls r
+      | _ :: r -> calls r
+    in
+    calls block.body
+  in
+  let recursive_call (x, f, exact) =
+    match resolve_callee global_flow_info closures x ~f ~exact with
+    | Known g -> (
+        match fn with
+        | Some fn -> (
+            match
+              ( Var.Hashtbl.find_opt out.components fn
+              , Var.Hashtbl.find_opt out.components g )
+            with
+            | Some c, Some c' -> c = c'
+            | _ -> false)
+        | None -> false)
+    | Known_direct _ | Unknown -> true
+  in
+  let calls pc = List.exists (non_tail_calls pc) ~f:recursive_call in
+  (* The largest number of calls which may be recursive on a path through
+     the function (back edges ignored) *)
+  let recursive_calls =
+    let memo = Addr.Hashtbl.create 16 in
+    let rec count pc =
+      match Addr.Hashtbl.find_opt memo pc with
+      | Some n -> n
+      | None ->
+          Addr.Hashtbl.replace memo pc 0;
+          let block = Addr.Map.find pc blocks in
+          let here = List.length (List.filter (non_tail_calls pc) ~f:recursive_call) in
+          let next =
+            match block.branch with
+            | Return _ | Raise _ | Stop -> 0
+            | Branch (pc', _) | Poptrap (pc', _) -> count pc'
+            | Cond (_, (pc1, _), (pc2, _)) | Pushtrap ((pc1, _), _, (pc2, _)) ->
+                max (count pc1) (count pc2)
+            | Switch (_, conts) ->
+                Array.fold_left conts ~init:0 ~f:(fun n (pc', _) -> max n (count pc'))
+          in
+          let n = here + next in
+          Addr.Hashtbl.replace memo pc n;
+          n
+    in
+    count pc
+  in
+  let depth_frame = frame_size = 0 && Option.is_some fn && recursive_calls = 1 in
+  let depth_words =
+    if Option.is_some fn && recursive_calls > 0 && (depth_frame || frame_size > 0)
+    then 1 + (List.length !locals / 50)
+    else 0
+  in
+  let frame_size = max frame_size depth_words in
   (* The first slots, written at the start of the function: those of the
      parameters, allocated first *)
   let initialized =
@@ -2704,7 +2854,8 @@ let translate_function
   in
   let needs pc =
     let block = Addr.Map.find pc blocks in
-    List.exists block.params ~f:slot_var
+    (depth_frame && calls pc)
+    || List.exists block.params ~f:slot_var
     || List.exists block.body ~f:(fun i ->
         (match instr_defs i with
           | Some x -> slot_var x
@@ -2727,6 +2878,58 @@ let translate_function
     | Switch (x, conts) ->
         uses_slots (use ctx x Var.Set.empty) || Array.exists conts ~f:cont_needs
     | Pushtrap _ -> true
+  in
+  let overflow_return =
+    if ctx.raises
+    then "return camlc_stack_overflow();"
+    else "camlc_fatal_stack_overflow();"
+  in
+  let segment_label = ref false in
+  let segment_stmt () =
+    match fn with
+    | Some f ->
+        let reprs = Var.Hashtbl.find out.fun_reprs f in
+        let args =
+          List.mapi params ~f:(fun i x ->
+              let r = List.nth reprs i in
+              ( r
+              , if Var.Hashtbl.mem ctx.slots x
+                then Printf.sprintf "a%d" i
+                else local_name ctx x ))
+          @ if List.is_empty env then [] else [ Value, "env" ]
+        in
+        let thunk =
+          Printf.sprintf
+            "camlc_s_%c_%s"
+            (repr_letter ctx.ret)
+            (String.concat
+               ~sep:""
+               (List.map args ~f:(fun (r, _) -> String.make 1 (repr_letter r))))
+        in
+        String.Hashtbl.replace out.segment_thunks thunk ();
+        Printf.sprintf
+          "if (fp < camlc_stack_limit) %s return %s(%s);"
+          overflow_return
+          thunk
+          (String.concat
+             ~sep:", "
+             (Printf.sprintf "(void *)%s" (fun_name out f)
+             :: "FRAME_SIZE"
+             :: List.map args ~f:snd))
+    | None -> overflow_return
+  in
+  (* When the frame would go below [camlc_segment_limit] but not below
+     [camlc_stack_limit], the function is called again on a new segment
+     of the stack of the wasm engine (see [camlc_segment]), through the
+     thunk of its signature ([camlc_s_...], defined by [declare_symbols]),
+     if nothing was done since its start (out of line, at label [S]);
+     else it goes on on the current segment *)
+  let frame_check ~restartable =
+    if restartable && Option.is_some fn && recursive_calls > 0
+    then (
+      segment_label := true;
+      "if (CAMLC_UNLIKELY(fp < camlc_segment_limit)) goto S;")
+    else Printf.sprintf "if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) %s" overflow_return
   in
   if
     frame_size > 0
@@ -2755,15 +2958,46 @@ let translate_function
     List.iter pcs ~f:(fun pc -> if needs pc then mark pc);
     if not (Addr.Set.mem pc !framed)
     then (
+      (* The function can be restarted where it allocates its frame if
+         what it may do before has no effect: the blocks from which the
+         frame is allocated (a fixpoint) *)
+      let reaches = ref !framed in
+      let changed = ref true in
+      while !changed do
+        changed := false;
+        List.iter pcs ~f:(fun pc ->
+            if not (Addr.Set.mem pc !reaches)
+            then
+              let succ pc' = Addr.Set.mem pc' !reaches in
+              let r =
+                match (Addr.Map.find pc blocks).branch with
+                | Return _ | Raise _ | Stop -> false
+                | Branch (pc', _) | Poptrap (pc', _) -> succ pc'
+                | Cond (_, (pc1, _), (pc2, _)) | Pushtrap ((pc1, _), _, (pc2, _)) ->
+                    succ pc1 || succ pc2
+                | Switch (_, conts) -> Array.exists conts ~f:(fun (pc', _) -> succ pc')
+              in
+              if r
+              then (
+                reaches := Addr.Set.add pc !reaches;
+                changed := true))
+      done;
+      let restartable =
+        List.for_all pcs ~f:(fun pc ->
+            Addr.Set.mem pc !framed
+            || (not (Addr.Set.mem pc !reaches))
+            || List.for_all (Addr.Map.find pc blocks).body ~f:(fun i ->
+                match i with
+                | Let (_, e) -> Pure_fun.pure_expr Pure_fun.empty e
+                | Event _ -> true
+                | Assign _ | Set_field _ | Offset_ref _ | Array_set _ -> false))
+      in
       ctx.framed_blocks <- Some !framed;
       ctx.frame_push <-
         String.concat
           ~sep:" "
           [ "fp = camlc_sp - FRAME_SIZE;"
-          ; "if (CAMLC_UNLIKELY(fp < camlc_stack_limit))"
-          ; (if ctx.raises
-             then "return camlc_stack_overflow();"
-             else "camlc_fatal_stack_overflow();")
+          ; frame_check ~restartable
           ; "camlc_sp = fp;"
           ; "for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;"
           ]));
@@ -2918,15 +3152,14 @@ let translate_function
       fb
       "#define FRAME_SIZE %d\n\
       \  value *fp = camlc_sp - FRAME_SIZE;\n\
-      \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) %s\n\
+      \  %s\n\
       \  camlc_sp = fp;\n\
       \  for (int i = %d; i < FRAME_SIZE; i++) fp[i] = Val_unit;\n"
       frame_size
-      (if ctx.raises
-       then "return camlc_stack_overflow();"
-       else "camlc_fatal_stack_overflow();")
+      (frame_check ~restartable:true)
       initialized;
   Buffer.add_buffer fb ctx.buf;
+  if !segment_label then Printf.bprintf fb " S:;\n  %s\n" (segment_stmt ());
   Buffer.add_string fb "}\n";
   if frame_size > 0 then Buffer.add_string fb "#undef FRAME_SIZE\n";
   Buffer.add_char fb '\n';
@@ -3243,6 +3476,8 @@ let f
     ; fun_returns = Var.Hashtbl.create 1024
     ; debug_info
     ; locations = String.Hashtbl.create 1024
+    ; segment_thunks = String.Hashtbl.create 16
+    ; components = Var.Hashtbl.create 16
     ; in_cps
     ; trampolined = trampolined_calls
     ; cps_pairs
@@ -3465,7 +3700,7 @@ let f
             && Char.equal text.[!i + 7] '_'
             &&
             match text.[!i + 6] with
-            | 'l' | 'k' | 'g' -> true
+            | 'l' | 'k' | 'g' | 's' -> true
             | _ -> false
           then (
             let j = ref (!i + 8) in
@@ -3490,6 +3725,48 @@ let f
               name
               (String.Hashtbl.find out.locations name)
         | 'k' -> Printf.bprintf b "extern value %s[];\n" name
+        | 's' ->
+            (* camlc_s_R_ARGS: calls a function of result R and arguments
+               ARGS (see [repr_letter]) on a new segment, through its
+               thunk, which finds them in [camlc_seg] *)
+            let c_type c =
+              match c with
+              | 'v' -> "value"
+              | 'd' -> "double"
+              | 'l' -> "int64_t"
+              | 'i' -> "int32_t"
+              | _ -> "intnat"
+            in
+            let args = String.sub name ~pos:10 ~len:(String.length name - 10) in
+            let args = List.init ~len:(String.length args) ~f:(fun i -> args.[i]) in
+            let ret = name.[8] in
+            Printf.bprintf
+              b
+              "static void %s_thunk(void) { camlc_seg[0].%c = ((%s \
+               (*)(%s))camlc_seg_fn)(%s); }\n\
+               static __attribute__((noinline)) %s %s(%s) { %s camlc_seg_fn = f; \
+               camlc_segment(%s_thunk, words); return camlc_seg[0].%c; }\n"
+              name
+              ret
+              (c_type ret)
+              (String.concat ~sep:", " (List.map args ~f:c_type))
+              (String.concat
+                 ~sep:", "
+                 (List.mapi args ~f:(fun i c ->
+                      Printf.sprintf "camlc_seg[%d].%c" (i + 1) c)))
+              (c_type ret)
+              name
+              (String.concat
+                 ~sep:", "
+                 ("void *f"
+                 :: "mlsize_t words"
+                 :: List.mapi args ~f:(fun i c -> Printf.sprintf "%s a%d" (c_type c) i)))
+              (String.concat
+                 ~sep:" "
+                 (List.mapi args ~f:(fun i c ->
+                      Printf.sprintf "camlc_seg[%d].%c = a%d;" (i + 1) c i)))
+              name
+              ret
         | _ -> Printf.bprintf b "extern value %s;\n" name);
     Buffer.add_char b '\n'
   in
@@ -3938,6 +4215,7 @@ let f
     prototypes b (List.map functions ~f:(fun (f, _, _) -> f));
     tables b;
     String.Hashtbl.fold (fun name _ acc -> name :: acc) out.locations []
+    |> String.Hashtbl.fold (fun name () acc -> name :: acc) out.segment_thunks
     |> List.sort ~cmp:String.compare
     |> declare_symbols b;
     helpers b;

@@ -89,14 +89,28 @@ extern value caml_global_data;
 #ifndef CAMLC_MAX_BOUNCE_ARGS
 #define CAMLC_MAX_BOUNCE_ARGS 256
 #endif
+/* A number in any representation of the generated code */
+union camlc_word {
+  value v;
+  double d;
+  int64_t l;
+  int32_t i;
+  intnat n;
+};
 struct camlc_thread {
   value *sp;          /* Shadow stack pointer */
   value *stack_limit; /* Overflow below */
+  /* At least [stack_limit]: a frame allocated below goes on a new segment
+     of the stack of the wasm engine (see [camlc_segment]) */
+  value *segment_limit;
   value *stack_base, *stack_top;
   int cps_depth;
   int bounce_n;
   value fiber, bounce_f;
   value bounce_args[CAMLC_MAX_BOUNCE_ARGS];
+  /* A call on a new segment: the function, its result then its arguments */
+  void *seg_fn;
+  union camlc_word seg[CAMLC_MAX_BOUNCE_ARGS + 2];
   /* The threads of the same domain, scanned by the GC */
   int domain;
   struct camlc_thread *next, **prevp;
@@ -106,6 +120,21 @@ extern _Thread_local struct camlc_thread camlc_thread;
 /* Shadow stack */
 #define camlc_sp (camlc_thread.sp)
 #define camlc_stack_limit (camlc_thread.stack_limit)
+#define camlc_segment_limit (camlc_thread.segment_limit)
+#define camlc_seg_fn (camlc_thread.seg_fn)
+#define camlc_seg (camlc_thread.seg)
+
+/* Segmented stack. The generated functions run on the stack of the wasm
+   engine, which browsers keep small (about 1 MB, 500 KB in Chrome's
+   workers): tens of thousands of nested calls. With JSPI (emscripten's
+   -sJSPI), a function whose frame would go below [camlc_segment_limit],
+   about [CAMLC_SEGMENT_WORDS] words of shadow stack below the start of the
+   current segment, is called again on a new stack of the engine: the
+   generated code puts the function in [camlc_seg_fn] and its arguments in
+   [camlc_seg], calls [camlc_segment] with a thunk calling it, and returns
+   the result the thunk left in [camlc_seg[0]]. [words] is the size of the
+   frame of the function. */
+void camlc_segment(void (*thunk)(void), mlsize_t words);
 
 /* The toplevel values stored in globals (roots of the GC), and the blocks
    of static data (from their header), of a program or a plugin: tables

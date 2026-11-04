@@ -29,6 +29,7 @@
 #include <pthread.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten/threading.h>
+#include <emscripten/em_js.h>
 #endif
 #include "camlc.h"
 #include <caml/printexc.h>
@@ -158,6 +159,7 @@ static void camlc_thread_start(mlsize_t words)
   if (base == NULL) caml_fatal_error("c_of_ocaml: cannot allocate the stack");
   t->stack_base = base;
   t->stack_limit = base + CAMLC_STACK_RESERVE;
+  t->segment_limit = t->stack_limit;
   t->stack_top = base + words;
   t->sp = t->stack_top;
   t->cps_depth = 0;
@@ -255,6 +257,85 @@ static void camlc_install_scan_roots_hook(void)
 
 #endif
 
+/****************************************************************/
+/* Segmented stack (see camlc.h) */
+
+/* The shadow stack used on a segment of the stack of the wasm engine: a
+   frame of [k] words stands for at most about [k] times 100 bytes of the
+   engine's stack (c_of_ocaml makes the frames large enough), so a segment
+   uses at most about 200 KB, leaving room for the C code it calls in the
+   500 KB of Chrome's workers */
+#ifndef CAMLC_SEGMENT_WORDS
+#define CAMLC_SEGMENT_WORDS 2048
+#endif
+
+/* The program runs in a context which can switch stacks */
+static int camlc_segments;
+
+/* The segment limit of a segment starting at [start] */
+static void camlc_set_segment_limit(value *start)
+{
+  uintptr_t l = (uintptr_t)start - CAMLC_SEGMENT_WORDS * sizeof(value);
+  camlc_segment_limit =
+    l > (uintptr_t)camlc_stack_limit && l < (uintptr_t)start
+    ? (value *)l : camlc_stack_limit;
+}
+
+#ifdef __EMSCRIPTEN__
+
+/* Emscripten's -sJSPI: the main function runs in a context which can
+   suspend. [camlc_js_segment] suspends it, until [camlc_segment_run]
+   has called the thunk on a new stack, in a new context. The call is
+   delayed to a microtask, so that the JS function returns and its frame
+   does not stay on the stack of the engine. */
+EM_JS(int, camlc_js_segments, (void), {
+  return typeof Asyncify == 'object' &&
+    typeof Asyncify.makeAsyncFunction == 'function' &&
+    typeof WebAssembly.promising == 'function';
+});
+
+EM_ASYNC_JS(void, camlc_js_segment, (void), {
+  await 0;
+  if (!Module.camlcSegmentRun)
+    Module.camlcSegmentRun =
+      WebAssembly.promising(wasmExports['camlc_segment_run']);
+  await Module.camlcSegmentRun();
+});
+
+static _Thread_local void (*camlc_segment_thunk)(void);
+
+EMSCRIPTEN_KEEPALIVE void camlc_segment_run(void)
+{
+  camlc_segment_thunk();
+}
+
+void camlc_segment(void (*thunk)(void), mlsize_t words)
+{
+  value *limit = camlc_segment_limit;
+  camlc_set_segment_limit(camlc_sp - words);
+  camlc_segment_thunk = thunk;
+  camlc_js_segment();
+  camlc_segment_limit = limit;
+}
+
+static void camlc_init_segments(void)
+{
+  camlc_segments = camlc_js_segments();
+  if (camlc_segments) camlc_set_segment_limit(camlc_sp);
+}
+
+#else
+
+void camlc_segment(void (*thunk)(void), mlsize_t words)
+{
+  (void)words;
+  thunk();
+}
+
+static void camlc_init_segments(void) {}
+
+#endif
+
 static void camlc_init_stack(void)
 {
   camlc_threads = calloc(CAMLC_MAX_DOMAINS, sizeof(struct camlc_thread *));
@@ -262,6 +343,7 @@ static void camlc_init_stack(void)
       pthread_key_create(&camlc_thread_key, camlc_thread_end) != 0)
     caml_fatal_error("c_of_ocaml: cannot initialize the threads");
   camlc_thread_start(CAMLC_STACK_WORDS);
+  camlc_init_segments();
   camlc_install_scan_roots_hook();
 }
 
@@ -390,7 +472,7 @@ void camlc_fatal_stack_overflow(void)
 {
   /* The program is ended as by an uncaught exception, with the reserve
      for the [at_exit] functions */
-  camlc_stack_limit = camlc_stack_base;
+  camlc_stack_limit = camlc_segment_limit = camlc_stack_base;
   caml_fatal_uncaught_exception(Field(caml_global_data, STACK_OVERFLOW_EXN));
 }
 
@@ -1177,7 +1259,14 @@ int caml_callback_depth = 0;
 CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
 {
   camlc_thread_check();
-  return camlc_applyv(closure, narg, args);
+  if (!camlc_segments) return camlc_applyv(closure, narg, args);
+  /* No new segment in a callback: C code or JavaScript may be on the
+     stack, which a JSPI context cannot suspend */
+  value *limit = camlc_segment_limit;
+  camlc_segment_limit = camlc_stack_limit;
+  value res = camlc_applyv(closure, narg, args);
+  camlc_segment_limit = limit;
+  return res;
 }
 
 CAMLexport value caml_callback_exn(value closure, value arg1)
