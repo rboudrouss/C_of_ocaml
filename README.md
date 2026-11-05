@@ -294,7 +294,9 @@ Functions making several (`fib`) are not measured: the depth of their
 recursion is that of a tree. A function restarts only from its start, or from
 where it allocates its frame if what it did before has no effect; otherwise it
 goes on on the current stack. There is no new segment in a callback from C,
-where JavaScript may be on the stack, which JSPI cannot suspend. Without JSPI
+where JavaScript may be on the stack, which JSPI cannot suspend, nor in the
+threads other than the one which starts the program (pthreads, in workers
+which do not run in such a context). Without JSPI
 (node runs compiled programs in a worker thread with a large stack), the limit
 is that of the shadow stack. The C stack of emscripten (`__stack_pointer`, in
 the linear memory, `-sSTACK_SIZE`) does not change with the stack of the

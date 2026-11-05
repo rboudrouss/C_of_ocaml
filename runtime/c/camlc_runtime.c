@@ -275,8 +275,10 @@ static void camlc_install_scan_roots_hook(void)
 #define CAMLC_SEGMENT_WORDS 2048
 #endif
 
-/* The program runs in a context which can switch stacks */
-static int camlc_segments;
+/* The thread runs in a context which can switch stacks: the main thread,
+   when the host says so. The others (pthreads, in workers under JSPI) are
+   not in such a context: their frames stay on their stack */
+static _Thread_local int camlc_segments;
 
 /* The segment limit of a segment of [words] words starting at [start] */
 static void camlc_set_segment_limit_words(value *start, uintnat words)
