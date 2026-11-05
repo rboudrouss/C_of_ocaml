@@ -94,7 +94,8 @@ platform is left to the host which compiles and links the C code
 | `--opt {1,2,3}` | Optimization profile (default 1). |
 | `--debug-info`, `--no-debug-info` | Record backtraces, or not. By default, they are recorded when the bytecode has debug events (`ocamlc -g`). |
 | `--word-size {32,64}` | Target wasm32 (31-bit integers, default) or wasm64 (63-bit integers). |
-| `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects (disabled with `--dynlink` and for plugins). |
+| `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects or with `--cps-stack` (disabled with `--dynlink` and for plugins, unless `--cps-stack`). |
+| `--cps-stack` | Deep recursions go on in CPS, on the heap (see below). |
 | `--dynlink` | Compile a program which can load plugins (see below). |
 | `--runtime-files DIR` | Write the C runtime support files to `DIR`. |
 
@@ -333,7 +334,18 @@ go on new stacks with JSPI). This works in all browsers, with a synchronous
 The limit is `CAMLC_SEGMENT_WORDS` (2048 words, about 200 KB of the stack of
 the engine), which can be raised when compiling `camlc_runtime.c` when the
 program runs on the main thread (984 KB in V8): `kb` no longer switches with
-6144.
+6144. The C stack of emscripten (`-sSTACK_SIZE`, in the linear memory, 64 KB
+by default) holds the frames of the functions which take the address of a
+variable (the arguments of an application whose arity differs) up to the
+limit: give it 1 MB (ocaml-emcc gives 8 MB).
+
+With `--dynlink`, the program and its plugins are compiled with `--cps-stack`
+(and so with double translation, which the loader checks). The plugins then
+call `camlc_cps_stack` and `camlc_cps_stack_noexc`, which the program exports
+with the other functions of `camlc_runtime.c`. A plugin compiled without it,
+but with double translation, may still be loaded: its own recursions stay on
+the stack of the engine, but the functions of the program it calls may go
+deep.
 
 **Threads and domains.** Each thread running OCaml code (the systhreads, and
 the domains of OCaml 5) has its own shadow stack and its own state of the
@@ -406,7 +418,8 @@ wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
 systhreads and the domains (`compiler/tests-c/threads`), natively, with the
 runtime of the OCaml switch. `tools/c_of_ocaml_segments_test.sh` tests the
 segmented stack (`compiler/tests-c/segments`), with JSPI and node 24, or
-`MODE=cps` with `--cps-stack`. `COOC_FLAGS=--cps-stack
+`MODE=cps` with `--cps-stack`. `CPS_STACK=1 tools/c_of_ocaml_dynlink_test.sh`
+tests plugins with `--cps-stack`. `COOC_FLAGS=--cps-stack
 tools/c_of_ocaml_tests.sh` runs the tests with `--cps-stack`: the same pass,
 and `misc/sieve` too.
 `tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
