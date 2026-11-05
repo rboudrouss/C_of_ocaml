@@ -985,6 +985,12 @@ let primitive out name (args : parg list) =
                  smaller with double translation (see the runtime) *)
               | "caml_alloc_dummy_function", 2 ->
                   Checked (c_call "camlc_ccall2" ("camlc_alloc_dummy_function" :: args))
+              (* [Gc.ramp_up] (OCaml 5.4) calls its function back from
+                 the runtime's C, which the code calls without JavaScript
+                 in between: the function keeps the segments of the stack
+                 of the caller (see the runtime) *)
+              | "caml_ml_gc_ramp_up", 1 ->
+                  Checked (c_call "camlc_ccall1" ("camlc_ml_gc_ramp_up" :: args))
               (* With [Marshal.Closures], marshaled by the runtime *)
               | ( ( "caml_output_value"
                   | "caml_output_value_to_bytes"

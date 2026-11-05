@@ -7,8 +7,10 @@
 #
 #   tools/c_of_ocaml_segments_test.sh
 #
-# The output and the exit code are compared with segments.expected and 3.
-# Prints PASS, FAIL, or SKIP when node does not support JSPI.
+# The output and the exit code are compared with segments.expected and 3,
+# and with OCaml 5.4 or later, those of ramp_up.ml with ramp_up.expected
+# and 0. Prints PASS or FAIL for each, or SKIP when node does not support
+# JSPI.
 #
 # Environment:
 #   MODE        jspi (the default) or cps
@@ -68,20 +70,33 @@ if [ -z "${WORKDIR:-}" ]; then
 fi
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
-cp "$TEST/segments.ml" .
+# build NAME: NAME.js from $TEST/NAME.ml
+build() {
+  cp "$TEST/$1.ml" .
+  ocamlfind ocamlc "$1.ml" -o "$1.bc"
+  "$C_OF_OCAML" $COOC_FLAGS "$1.bc" -o "$1.c"
+  emcc $CCFLAGS -Wno-everything -c "$1.c" -o "$1.o"
+  emcc $CFLAGS "$1.o" camlc_runtime.o $HOST "$SYSROOT/lib/libcamlrun.a" -lm \
+    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o "$1.js"
+}
+# check NAME CODE: its output and exit code are $TEST/NAME.expected and CODE
+check() {
+  local rc=0
+  timeout 300 "$NODE" $NODE_FLAGS --stack-size="$STACK_KB" "$1.js" \
+    > "$1.txt" 2>&1 || rc=$?
+  if diff "$1.txt" "$TEST/$1.expected" && [ $rc = "$2" ]; then
+    echo "PASS $1"
+  else
+    echo "FAIL $1 (exit code $rc)"
+  fi
+}
 
-ocamlfind ocamlc segments.ml -o segments.bc
-"$C_OF_OCAML" $COOC_FLAGS segments.bc -o segments.c
-emcc $CCFLAGS -Wno-everything -c segments.c -o segments.o
 emcc $CCFLAGS -c "$RT/camlc_runtime.c" -o camlc_runtime.o
 if [ -n "$HOST" ]; then emcc $CCFLAGS -c "$TEST/jspi_host.c" -o "$HOST"; fi
-emcc $CFLAGS segments.o camlc_runtime.o $HOST "$SYSROOT/lib/libcamlrun.a" -lm \
-  -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o segments.js
-rc=0
-timeout 300 "$NODE" $NODE_FLAGS --stack-size="$STACK_KB" segments.js \
-  > segments.txt 2>&1 || rc=$?
-if diff segments.txt "$TEST/segments.expected" && [ $rc = 3 ]; then
-  echo PASS
-else
-  echo "FAIL (exit code $rc)"
+build segments
+check segments 3
+# Gc.ramp_up, OCaml 5.4 or later
+if [ "$(printf '%s\n' 5.4 "$(ocamlfind ocamlc -vnum)" | sort -V | head -1)" = 5.4 ]; then
+  build ramp_up
+  check ramp_up 0
 fi

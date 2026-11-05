@@ -1286,10 +1286,19 @@ void caml_init_callbacks(void) {}
 int caml_callback_depth = 0;
 #endif
 
+/* The next callback is called by C code that the code calls, with no
+   JavaScript in between (see camlc_ml_gc_ramp_up) */
+static _Thread_local int camlc_callback_from_code;
+
 CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
 {
   camlc_thread_check();
   if (!camlc_segments) return camlc_applyv(closure, narg, args);
+  if (camlc_callback_from_code) {
+    /* It goes on on new segments as its caller would */
+    camlc_callback_from_code = 0;
+    return camlc_applyv(closure, narg, args);
+  }
   /* No new segment in a callback: C code or JavaScript may be on the
      stack, which a JSPI context cannot suspend */
   value *limit = camlc_segment_limit;
@@ -1298,6 +1307,21 @@ CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
   camlc_segment_limit = limit;
   return res;
 }
+
+#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 4)
+/* Gc.ramp_up: the runtime calls the function back at once, which runs as
+   if called by the code (Rocq loads its libraries under it) */
+extern value caml_ml_gc_ramp_up(value callback);
+
+value camlc_ml_gc_ramp_up(value callback)
+{
+  value res;
+  camlc_callback_from_code = 1;
+  res = caml_ml_gc_ramp_up(callback);
+  camlc_callback_from_code = 0;
+  return res;
+}
+#endif
 
 CAMLexport value caml_callback_exn(value closure, value arg1)
 {
