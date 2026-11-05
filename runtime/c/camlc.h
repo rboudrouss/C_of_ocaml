@@ -147,6 +147,12 @@ void camlc_segment(void (*thunk)(void), mlsize_t words);
 int camlc_host_new_stacks(void);
 void camlc_host_on_new_stack(void (*f)(void));
 
+/* Starts the runtime and runs the program, with the command line [argv],
+   as caml_main does with bytecode; an uncaught exception ends the
+   program. camlc_runtime.c defines a main function calling it, unless it
+   is compiled with CAMLC_NO_MAIN, so that the host has its own */
+void camlc_main(char **argv);
+
 /* The toplevel values stored in globals (roots of the GC), and the blocks
    of static data (from their header), of a program or a plugin: tables
    ending with 0. Sections with bounds defined by the linker would not work

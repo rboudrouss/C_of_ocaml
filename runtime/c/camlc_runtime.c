@@ -2586,15 +2586,14 @@ CAMLprim value caml_dynlink_get_bytecode_sections(value unit)
 
 static value camlc_run_program(void) { return camlc_program(); }
 
-int main(int argc, char **argv)
+void camlc_main(char **argv)
 {
   char_os *exe_name, *proc_self_exe;
   value res;
-  (void)argc;
 
 #if OCAML_VERSION_MAJOR >= 5
   caml_parse_ocamlrunparam();
-  if (!caml_startup_aux(0)) return 0;
+  if (!caml_startup_aux(0)) return;
   caml_init_codefrag();
   caml_init_locale();
   caml_init_custom_operations();
@@ -2610,7 +2609,7 @@ int main(int argc, char **argv)
   caml_init_domain();
   caml_parse_ocamlrunparam();
   CAML_EVENTLOG_INIT();
-  if (!caml_startup_aux(0)) return 0;
+  if (!caml_startup_aux(0)) return;
   caml_init_locale();
   caml_init_custom_operations();
   proc_self_exe = caml_executable_name();
@@ -2653,6 +2652,16 @@ int main(int argc, char **argv)
   res = camlc_ccall0(camlc_run_program);
   if (Is_exception_result(res))
     caml_fatal_uncaught_exception(Extract_exception(res));
+}
+
+/* The host may start the program from its own main function, compiling
+   this file with CAMLC_NO_MAIN */
+#ifndef CAMLC_NO_MAIN
+int main(int argc, char **argv)
+{
+  (void)argc;
+  camlc_main(argv);
   caml_do_exit(0);
   return 0;
 }
+#endif
