@@ -255,6 +255,19 @@ let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
     | `Exe -> if dynlink then `Dynlink else `Program
     | `Cmo _ | `Cma _ -> `Plugin
   in
+  (* Backtraces with locations by default when the bytecode has debug
+     events (ocamlc -g) *)
+  let debug_info =
+    match debug_info with
+    | Some d -> d
+    | None -> (
+        match input with
+        | `Exe -> Parse_bytecode.has_debug_section ic
+        | `Cmo unit -> unit.Cmo_format.cu_debug <> 0
+        | `Cma lib ->
+            List.exists lib.Cmo_format.lib_units ~f:(fun u -> u.Cmo_format.cu_debug <> 0))
+  in
+  if debug_info then Config.Flag.enable "debuginfo";
   let t = Timer.make () in
   let one =
     match input with
@@ -381,7 +394,7 @@ let () =
   let split_dir = ref None in
   let part_size = ref 2048 in
   let profile = ref Profile.O1 in
-  let debug_info = ref false in
+  let debug_info = ref None in
   let effects = ref None in
   let dynlink = ref false in
   let word_size = ref 32 in
@@ -410,8 +423,12 @@ let () =
       , Arg.String (fun s -> runtime_dir := Some s)
       , "DIR Write the C runtime support of the generated code to DIR" )
     ; ( "--debug-info"
-      , Arg.Set debug_info
-      , " Record backtraces with the locations of the debug events (ocamlc -g)" )
+      , Arg.Unit (fun () -> debug_info := Some true)
+      , " Record backtraces with the locations of the debug events (ocamlc -g): the \
+         default when the bytecode has some" )
+    ; ( "--no-debug-info"
+      , Arg.Unit (fun () -> debug_info := Some false)
+      , " No backtraces, even when the bytecode has debug events" )
     ; ( "--word-size"
       , Arg.Symbol ([ "32"; "64" ], fun s -> word_size := int_of_string s)
       , " Word size of the target, in bits: 32 for wasm32 (31-bit integers, the \
@@ -461,7 +478,6 @@ let () =
       Config.set_target `C;
       if !word_size = 64 then Targetint.set_num_bits 63;
       register_primitives ();
-      if !debug_info then Config.Flag.enable "debuginfo";
       try
         compile
           ~profile:!profile

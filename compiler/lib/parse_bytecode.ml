@@ -3163,6 +3163,12 @@ let read_crcs ic =
   let toc = Toc.read ic in
   Toc.read_crcs toc ic
 
+let has_debug_section ic =
+  let toc = Toc.read ic in
+  match Toc.seek_section toc ic "DBUG" with
+  | _ -> true
+  | exception Not_found -> false
+
 type bytesections =
   { symb : Ocaml_compiler.Symtable.GlobalMap.t
   ; crcs : Ocaml_compiler.Import_info.table

@@ -71,7 +71,7 @@ and `dynlink.c`. `c_of_ocaml --runtime-files DIR` writes `camlc.h` and
 | `--split DIR` | Write the C code to several files (see below). |
 | `--part-size KB` | With `--split`, the size of each part (default 2048). |
 | `--opt {1,2,3}` | Optimization profile (default 1). |
-| `--debug-info` | Record backtraces. The bytecode must be built with `ocamlc -g`. |
+| `--debug-info`, `--no-debug-info` | Record backtraces, or not. By default, they are recorded when the bytecode has debug events (`ocamlc -g`). |
 | `--word-size {32,64}` | Target wasm32 (31-bit integers, default) or wasm64 (63-bit integers). |
 | `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects (disabled with `--dynlink` and for plugins). |
 | `--dynlink` | Compile a program which can load plugins (see below). |
@@ -302,7 +302,7 @@ are saved on the shadow stack around the actions, which may raise. The
 allocations of the generated code also switch to another thread when the
 tick thread asks for it. Without threads nor domains, the code does not poll.
 
-**Backtraces** (`--debug-info`). When backtraces are active, a raise and
+**Backtraces** (with debug events, or `--debug-info`). When backtraces are active, a raise and
 every call an exception passes through record a static description of their
 location, taken from the debug events, in the runtime's backtrace buffer. The
 call stack itself cannot be walked, so `Printexc.get_callstack` returns an

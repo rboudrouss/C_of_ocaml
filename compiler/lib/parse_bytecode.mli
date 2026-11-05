@@ -90,6 +90,9 @@ type bytesections =
 
 val read_crcs : in_channel -> Ocaml_compiler.Import_info.t list
 
+val has_debug_section : in_channel -> bool
+(** Whether a bytecode executable has debug events (ocamlc -g) *)
+
 val link_info :
      symbols:Ocaml_compiler.Symtable.GlobalMap.t
   -> primitives:StringSet.t
