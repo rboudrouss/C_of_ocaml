@@ -237,11 +237,19 @@ static void (*camlc_prev_scan_roots_hook)(scanning_action) = NULL;
 static void camlc_scan_roots(scanning_action action)
 {
   pthread_mutex_lock(&camlc_threads_lock);
-  for (struct camlc_thread *t = camlc_threads[0]; t != NULL; t = t->next)
+  for (struct camlc_thread *t = camlc_threads[0]; t != NULL; t = t->next) {
     for (value *p = t->sp; p < t->stack_top; p++) {
       value v = *p;
       if (Is_block(v)) action(v, p);
     }
+    /* The CPS code of --cps-stack */
+    if (Is_block(t->fiber)) action(t->fiber, &t->fiber);
+    if (Is_block(t->bounce_f)) action(t->bounce_f, &t->bounce_f);
+    for (int i = 0; i < t->bounce_n; i++) {
+      value v = t->bounce_args[i];
+      if (Is_block(v)) action(v, &t->bounce_args[i]);
+    }
+  }
   pthread_mutex_unlock(&camlc_threads_lock);
   for (struct camlc_data_list *l = camlc_data; l != NULL; l = l->next)
     for (value *const *p = l->data->globals; *p != 0; p++) {
@@ -274,13 +282,18 @@ static void camlc_install_scan_roots_hook(void)
 /* The program runs in a context which can switch stacks */
 static int camlc_segments;
 
-/* The segment limit of a segment starting at [start] */
-static void camlc_set_segment_limit(value *start)
+/* The segment limit of a segment of [words] words starting at [start] */
+static void camlc_set_segment_limit_words(value *start, uintnat words)
 {
-  uintptr_t l = (uintptr_t)start - CAMLC_SEGMENT_WORDS * sizeof(value);
+  uintptr_t l = (uintptr_t)start - words * sizeof(value);
   camlc_segment_limit =
     l > (uintptr_t)camlc_stack_limit && l < (uintptr_t)start
     ? (value *)l : camlc_stack_limit;
+}
+
+static void camlc_set_segment_limit(value *start)
+{
+  camlc_set_segment_limit_words(start, CAMLC_SEGMENT_WORDS);
 }
 
 #ifdef __EMSCRIPTEN__
@@ -314,16 +327,24 @@ EMSCRIPTEN_KEEPALIVE void camlc_segment_run(void)
 void camlc_segment(void (*thunk)(void), mlsize_t words)
 {
   value *limit = camlc_segment_limit;
-  camlc_set_segment_limit(camlc_sp - words);
-  camlc_segment_thunk = thunk;
-  camlc_js_segment();
+  if (!camlc_segments) {
+    /* Without JSPI, with --cps-stack, for a function without CPS
+       version: it goes on on the current stack */
+    camlc_segment_limit = camlc_stack_limit;
+    thunk();
+  } else {
+    camlc_set_segment_limit(camlc_sp - words);
+    camlc_segment_thunk = thunk;
+    camlc_js_segment();
+  }
   camlc_segment_limit = limit;
 }
 
 static void camlc_init_segments(void)
 {
   camlc_segments = camlc_js_segments();
-  if (camlc_segments) camlc_set_segment_limit(camlc_sp);
+  if (camlc_segments || camlc_cps_stack_enabled)
+    camlc_set_segment_limit(camlc_sp);
 }
 
 #else
@@ -334,7 +355,10 @@ void camlc_segment(void (*thunk)(void), mlsize_t words)
   thunk();
 }
 
-static void camlc_init_segments(void) {}
+static void camlc_init_segments(void)
+{
+  if (camlc_cps_stack_enabled) camlc_set_segment_limit(camlc_sp);
+}
 
 #endif
 
@@ -837,8 +861,6 @@ value camlc_applyv(value f, int n, value *args)
    running fiber. A continuation is a block holding the first fiber of the
    stack of fibers it resumes (unit once resumed) and the last one. */
 
-#if OCAML_VERSION_MAJOR >= 5
-
 #ifndef CAMLC_CPS_DEPTH
 #define CAMLC_CPS_DEPTH 200
 #endif
@@ -1089,8 +1111,12 @@ value camlc_raise_unhandled(value eff)
   const value *u = caml_named_value("Effect.Unhandled");
   if (u == NULL) {
     /* Module Effect not linked: a constant exception of the same name */
+    value id = caml_fresh_oo_id(Val_unit), b;
     exn = caml_copy_string("Effect.Unhandled");
-    exn = caml_alloc_2(Object_tag, exn, caml_fresh_oo_id(Val_unit));
+    b = caml_alloc_small(2, Object_tag);
+    Field(b, 0) = exn;
+    Field(b, 1) = id;
+    exn = b;
   } else {
     exn = caml_alloc_small(2, 0);
     Field(exn, 0) = *u;
@@ -1233,21 +1259,46 @@ value camlc_resume(value f, value arg, value stack, value last)
   return r;
 }
 
-#else
-
-value camlc_cps_bounce(value f, int n)
-{
-  (void)f; (void)n;
-  caml_fatal_error("c_of_ocaml: effects are not supported");
-}
-
-value camlc_applyv_cps(value f, int n, value *args)
-{
-  (void)f; (void)n; (void)args;
-  caml_fatal_error("c_of_ocaml: effects are not supported");
-}
-
+/* c_of_ocaml --cps-stack: the frame of a function which may recurse would
+   go below the segment limit, it is applied to [args] in CPS, on a fresh
+   fiber, as [camlc_resume] does, then the CPS calls of the recursion
+   bounce on the trampoline [camlc_cps_run] rather than growing the stack
+   of the engine. The functions without CPS version which they call get a
+   new, smaller segment. */
+#ifndef CAMLC_CPS_STACK_SEGMENT_WORDS
+#define CAMLC_CPS_STACK_SEGMENT_WORDS (CAMLC_SEGMENT_WORDS / 4)
 #endif
+
+value camlc_cps_stack(value f, int n, value *args)
+{
+  value *fp = camlc_sp - (n + 3), *limit = camlc_segment_limit, r;
+  int depth = camlc_cps_depth;
+  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
+  camlc_sp = fp;
+  fp[0] = f;
+  for (int i = 0; i < n; i++) fp[1 + i] = args[i];
+  fp[n + 1] = Static_closure(camlc_identity_closure);
+  fp[n + 2] = camlc_fiber;
+  r = caml_alloc_small(6, 0);
+  for (int i = 0; i < 6; i++) Field(r, i) = Val_unit;
+  camlc_fiber = r;
+  camlc_set_segment_limit_words(fp, CAMLC_CPS_STACK_SEGMENT_WORDS);
+  camlc_cps_depth = CAMLC_CPS_DEPTH;
+  r = camlc_cps_run(camlc_applyv_cps(fp[0], n, fp + 1));
+  camlc_fiber = fp[n + 2];
+  camlc_cps_depth = depth;
+  camlc_segment_limit = limit;
+  camlc_sp = fp + n + 3;
+  return r;
+}
+
+/* For the functions which do not raise */
+value camlc_cps_stack_noexc(value r)
+{
+  if (CAMLC_UNLIKELY(Is_exception_result(r)))
+    caml_fatal_uncaught_exception(Extract_exception(r));
+  return r;
+}
 
 /* The dummy block of a function of a [let rec] (OCaml < 5.2), which
    [caml_update_dummy] fills with the closure: [size] is the size of the

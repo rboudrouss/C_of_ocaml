@@ -27,6 +27,20 @@ let rec catch_in_middle n =
   then try catch_in_middle (n - 1) with Bottom k -> k + 1
   else 1 + catch_in_middle (n - 1)
 
+(* A value used after the call, which does not allocate: with --cps-stack,
+   it may switch to CPS, and allocate *)
+let rec sum_list = function
+  | [] -> 0
+  | x :: r -> x + sum_list r
+
+(* A function of a [let rec] with a value: a dummy block before OCaml 5.2,
+   which must hold the closure *)
+let rec rec_fun =
+  let k = Sys.opaque_identity 1 in
+  fun n -> if n = 0 then List.length rec_value else k + rec_fun (n - 1)
+
+and rec_value = [ rec_fun; rec_fun ]
+
 (* Calls to unknown functions *)
 let next = ref (fun _ -> 0)
 
@@ -52,9 +66,13 @@ let rec args a b c d e f g h n =
 let rec up_down k = if k = 0 then 0 else count 10_000 + up_down (k - 1)
 
 let () =
+  (* Frequent minor collections *)
+  Gc.set { (Gc.get ()) with minor_heap_size = 4096 };
   let l = List.init n Fun.id in
   Printf.printf "map %d\n" (List.length (map succ l));
   Printf.printf "count %d\n" (count n);
+  Printf.printf "sum_list %d\n" (sum_list (List.init n (fun _ -> 1)));
+  Printf.printf "rec_fun %d\n" (rec_fun n);
   Printf.printf "handlers %d\n" (handlers n);
   (try ignore (raise_at_bottom n) with Bottom k -> Printf.printf "bottom %d\n" k);
   Printf.printf "middle %d\n" (catch_in_middle n);

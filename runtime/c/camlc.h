@@ -231,6 +231,11 @@ value camlc_applyv_cps(value f, int n, value *args);
    [n], with [args] (the arguments then the continuation) */
 value camlc_call_exact_cps(value f, int n, value *args);
 extern const value camlc_pap_cps_code[];
+/* c_of_ocaml --cps-stack (see camlc_runtime.c): apply the CPS version of
+   [f] to the [n] arguments [args], from direct-style code */
+extern const int camlc_cps_stack_enabled;
+value camlc_cps_stack(value f, int n, value *args);
+value camlc_cps_stack_noexc(value r);
 /* The CPS code pointer of the functions without CPS version: a code
    pointer rather than 0, for [Marshal.Closures] (see camlc_runtime.c) */
 value camlc_no_cps(void);

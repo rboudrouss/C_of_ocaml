@@ -315,9 +315,19 @@ let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
      compaction, the next phase would grow the heap further *)
   Gc.compact ();
   memory ();
+  (if Config.Flag.cps_recursions ()
+   then
+     match effects, mode with
+     | (None | Some `Double_translation), `Program -> ()
+     | _, (`Dynlink | `Plugin) ->
+         failwith
+           "c_of_ocaml: --cps-stack is not supported with --dynlink and for plugins"
+     | Some _, `Program ->
+         failwith "c_of_ocaml: --cps-stack needs --effects=double-translation");
   Config.set_effects_backend
     (match effects, mode with
     | Some e, _ -> e
+    | None, `Program when Config.Flag.cps_recursions () -> `Double_translation
     | None, (`Dynlink | `Plugin) ->
         (* The program and its plugins must agree *)
         `Disabled
@@ -417,6 +427,11 @@ let () =
                   | _ -> `Double_translation) )
       , " Support of effect handlers (default: double-translation if the program \
          performs effects, disabled with --dynlink and for plugins)" )
+    ; ( "--cps-stack"
+      , Arg.Unit (fun () -> Config.Flag.enable "cps-recursions")
+      , " Deep recursions go on in CPS, on the heap, past a depth: the functions which \
+         may recurse get a CPS version (double translation), as with effect handlers. \
+         Larger code, but no limit of the stack of the wasm engine nor JSPI" )
     ; ( "--dynlink"
       , Arg.Set dynlink
       , " Compile a program which can load plugins: its compilation units are registered \

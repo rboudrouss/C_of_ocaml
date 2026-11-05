@@ -150,6 +150,8 @@ type output =
   ; mutable components : int Var.Hashtbl.t
         (** The recursive functions, by strongly connected component of the
             graph of known calls *)
+  ; mutable cps_fallback : Var.Set.t
+        (** With --cps-stack, the functions which may go on in their CPS version *)
   ; in_cps : Var.Set.t  (** The CPS calls *)
   ; trampolined : Var.Set.t  (** The CPS calls which may bounce *)
   ; cps_pairs : Var.t Var.Map.t
@@ -2500,6 +2502,70 @@ type summary =
   ; inner : Var.t list  (** The functions called inside a handler *)
   }
 
+let non_tail_calls blocks pc =
+  let block = Addr.Map.find pc blocks in
+  let rec calls l =
+    match l with
+    | [] -> []
+    | Let (x, Apply { f; exact; _ }) :: r ->
+        let tail =
+          List.for_all r ~f:(function
+            | Event _ -> true
+            | _ -> false)
+          &&
+          match block.branch with
+          | Return y -> Var.equal x y
+          | _ -> false
+        in
+        if tail then calls r else (x, f, exact) :: calls r
+    | _ :: r -> calls r
+  in
+  calls block.body
+
+let recursive_call out global_flow_info closures ~fn (x, f, exact) =
+  match resolve_callee global_flow_info closures x ~f ~exact with
+  | Known g -> (
+      match fn with
+      | Some fn -> (
+          match
+            Var.Hashtbl.find_opt out.components fn, Var.Hashtbl.find_opt out.components g
+          with
+          | Some c, Some c' -> c = c'
+          | _ -> false)
+      | None -> false)
+  | Known_direct _ | Unknown -> true
+
+(* The largest number of calls which may be recursive on a path through
+   the function starting at [pc] (back edges ignored) *)
+let recursive_calls out global_flow_info closures blocks ~fn pc =
+  let memo = Addr.Hashtbl.create 16 in
+  let rec count pc =
+    match Addr.Hashtbl.find_opt memo pc with
+    | Some n -> n
+    | None ->
+        Addr.Hashtbl.replace memo pc 0;
+        let block = Addr.Map.find pc blocks in
+        let here =
+          List.length
+            (List.filter
+               (non_tail_calls blocks pc)
+               ~f:(recursive_call out global_flow_info closures ~fn))
+        in
+        let next =
+          match block.branch with
+          | Return _ | Raise _ | Stop -> 0
+          | Branch (pc', _) | Poptrap (pc', _) -> count pc'
+          | Cond (_, (pc1, _), (pc2, _)) | Pushtrap ((pc1, _), _, (pc2, _)) ->
+              max (count pc1) (count pc2)
+          | Switch (_, conts) ->
+              Array.fold_left conts ~init:0 ~f:(fun n (pc', _) -> max n (count pc'))
+        in
+        let n = here + next in
+        Addr.Hashtbl.replace memo pc n;
+        n
+  in
+  count pc
+
 let analyze_functions out facts global_flow_info closures blocks functions =
   let ctx =
     { out
@@ -2634,14 +2700,22 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   (* The functions which may trigger a GC in any way, then those which may
      return after one: a call inside a handler is in the second case if
      the function called may trigger a GC in any way *)
-  let any =
-    propagate (roots (fun s -> s.any_gcs)) (callers (fun s -> s.outer @ s.inner))
+  let set_collecting fallback =
+    let any =
+      propagate
+        (roots (fun s -> s.any_gcs || Var.Set.mem s.fn fallback))
+        (callers (fun s -> s.outer @ s.inner))
+    in
+    out.collecting <-
+      propagate
+        (roots (fun s ->
+             s.gcs
+             || Var.Set.mem s.fn fallback
+             || List.exists s.inner ~f:(fun g -> Var.Set.mem g any)))
+        (callers (fun s -> s.outer));
+    out.collecting_on_raise <- Var.Set.diff any out.collecting
   in
-  out.collecting <-
-    propagate
-      (roots (fun s -> s.gcs || List.exists s.inner ~f:(fun g -> Var.Set.mem g any)))
-      (callers (fun s -> s.outer));
-  out.collecting_on_raise <- Var.Set.diff any out.collecting;
+  set_collecting Var.Set.empty;
   (* The strongly connected components of the graph of known calls
      (Tarjan), those with a cycle *)
   let callees = Var.Hashtbl.create 1024 in
@@ -2699,7 +2773,26 @@ let analyze_functions out facts global_flow_info closures blocks functions =
             Var.Hashtbl.replace components g (Var.Hashtbl.find index f))
   in
   List.iter summaries ~f:(fun s -> if not (Var.Hashtbl.mem index s.fn) then visit s.fn);
-  out.components <- components
+  out.components <- components;
+  (* With --cps-stack, the recursive functions with a CPS version may go on
+     in it, which allocates (see [camlc_cps_stack]): the linear recursions
+     (one call which may be recursive on each path), and the others which
+     may trigger a GC anyway, which then have a frame measuring their depth
+     (that of a recursion without frame, such as [fib], is not measured) *)
+  if Config.Flag.cps_recursions ()
+  then (
+    out.cps_fallback <-
+      List.fold_left functions ~init:Var.Set.empty ~f:(fun acc (f, _, (pc, _)) ->
+          if Var.Map.mem f out.cps_pairs
+          then
+            match
+              recursive_calls out global_flow_info closures blocks ~fn:(Some f) pc
+            with
+            | 0 -> acc
+            | 1 -> Var.Set.add f acc
+            | _ -> if Var.Set.mem f out.collecting then Var.Set.add f acc else acc
+          else acc);
+    set_collecting out.cps_fallback)
 
 let translate_function
     out
@@ -2780,67 +2873,10 @@ let translate_function
      compiler). Without frame, it gets one if it makes one such call on
      each path: with more, the depth of the recursion is that of a tree
      (fib), costly to measure *)
-  let non_tail_calls pc =
-    let block = Addr.Map.find pc blocks in
-    let rec calls l =
-      match l with
-      | [] -> []
-      | Let (x, Apply { f; exact; _ }) :: r ->
-          let tail =
-            List.for_all r ~f:(function
-              | Event _ -> true
-              | _ -> false)
-            &&
-            match block.branch with
-            | Return y -> Var.equal x y
-            | _ -> false
-          in
-          if tail then calls r else (x, f, exact) :: calls r
-      | _ :: r -> calls r
-    in
-    calls block.body
-  in
-  let recursive_call (x, f, exact) =
-    match resolve_callee global_flow_info closures x ~f ~exact with
-    | Known g -> (
-        match fn with
-        | Some fn -> (
-            match
-              ( Var.Hashtbl.find_opt out.components fn
-              , Var.Hashtbl.find_opt out.components g )
-            with
-            | Some c, Some c' -> c = c'
-            | _ -> false)
-        | None -> false)
-    | Known_direct _ | Unknown -> true
-  in
+  let non_tail_calls pc = non_tail_calls blocks pc in
+  let recursive_call = recursive_call out global_flow_info closures ~fn in
   let calls pc = List.exists (non_tail_calls pc) ~f:recursive_call in
-  (* The largest number of calls which may be recursive on a path through
-     the function (back edges ignored) *)
-  let recursive_calls =
-    let memo = Addr.Hashtbl.create 16 in
-    let rec count pc =
-      match Addr.Hashtbl.find_opt memo pc with
-      | Some n -> n
-      | None ->
-          Addr.Hashtbl.replace memo pc 0;
-          let block = Addr.Map.find pc blocks in
-          let here = List.length (List.filter (non_tail_calls pc) ~f:recursive_call) in
-          let next =
-            match block.branch with
-            | Return _ | Raise _ | Stop -> 0
-            | Branch (pc', _) | Poptrap (pc', _) -> count pc'
-            | Cond (_, (pc1, _), (pc2, _)) | Pushtrap ((pc1, _), _, (pc2, _)) ->
-                max (count pc1) (count pc2)
-            | Switch (_, conts) ->
-                Array.fold_left conts ~init:0 ~f:(fun n (pc', _) -> max n (count pc'))
-          in
-          let n = here + next in
-          Addr.Hashtbl.replace memo pc n;
-          n
-    in
-    count pc
-  in
+  let recursive_calls = recursive_calls out global_flow_info closures blocks ~fn pc in
   let depth_frame = frame_size = 0 && Option.is_some fn && recursive_calls = 1 in
   let depth_words =
     if Option.is_some fn && recursive_calls > 0 && (depth_frame || frame_size > 0)
@@ -2903,6 +2939,33 @@ let translate_function
   let segment_label = ref false in
   let segment_stmt () =
     match fn with
+    | Some f
+      when Var.Set.mem f out.cps_fallback
+           && repr_equal ctx.ret Value
+           && List.for_all (Var.Hashtbl.find out.fun_reprs f) ~f:(fun r ->
+               repr_equal r Value) ->
+        (* With --cps-stack, the call goes on in the CPS version of the
+           function (see [camlc_cps_stack]) *)
+        let args =
+          List.mapi params ~f:(fun i x ->
+              if Var.Hashtbl.mem ctx.slots x
+              then Printf.sprintf "a%d" i
+              else local_name ctx x)
+        in
+        let helper = Printf.sprintf "camlc_c_%d" (List.length args) in
+        String.Hashtbl.replace out.segment_thunks helper ();
+        Printf.sprintf
+          "if (fp < camlc_stack_limit) %s %s"
+          overflow_return
+          (let call =
+             Printf.sprintf
+               "%s(%s)"
+               helper
+               (String.concat ~sep:", " (as_value ctx f :: args))
+           in
+           if ctx.raises
+           then Printf.sprintf "return %s;" call
+           else Printf.sprintf "return camlc_cps_stack_noexc(%s);" call)
     | Some f ->
         let reprs = Var.Hashtbl.find out.fun_reprs f in
         let args =
@@ -3493,6 +3556,7 @@ let f
     ; debug_info
     ; locations = String.Hashtbl.create 1024
     ; segment_thunks = String.Hashtbl.create 16
+    ; cps_fallback = Var.Set.empty
     ; components = Var.Hashtbl.create 16
     ; in_cps
     ; trampolined = trampolined_calls
@@ -3716,7 +3780,7 @@ let f
             && Char.equal text.[!i + 7] '_'
             &&
             match text.[!i + 6] with
-            | 'l' | 'k' | 'g' | 's' -> true
+            | 'l' | 'k' | 'g' | 's' | 'c' -> true
             | _ -> false
           then (
             let j = ref (!i + 8) in
@@ -3741,6 +3805,24 @@ let f
               name
               (String.Hashtbl.find out.locations name)
         | 'k' -> Printf.bprintf b "extern value %s[];\n" name
+        | 'c' ->
+            (* camlc_c_N: applies the CPS version of a function of arity N
+               (see [camlc_cps_stack]). Not inlined: the array of the
+               arguments would take room on emscripten's stack in each frame
+               of the function *)
+            let n =
+              int_of_string (String.sub name ~pos:8 ~len:(String.length name - 8))
+            in
+            let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
+            Printf.bprintf
+              b
+              "static __attribute__((noinline)) value %s(value f, %s) { value args[%d] = \
+               { %s }; return camlc_cps_stack(f, %d, args); }\n"
+              name
+              (String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)))
+              n
+              (String.concat ~sep:", " args)
+              n
         | 's' ->
             (* camlc_s_R_ARGS: calls a function of result R and arguments
                ARGS (see [repr_letter]) on a new segment, through its
@@ -3893,6 +3975,10 @@ let f
                        Printf.sprintf "(value)&camlc_curry%d_%d" a (n + 1))))
            @ [ "0" ]));
       Printf.bprintf b "const int camlc_double_translation = %d;\n" (if dt then 1 else 0);
+      Printf.bprintf
+        b
+        "const int camlc_cps_stack_enabled = %d;\n"
+        (if dt && Config.Flag.cps_recursions () then 1 else 0);
       Printf.bprintf
         b
         "const value camlc_pap_cps_code[] = { 0%s };\n"

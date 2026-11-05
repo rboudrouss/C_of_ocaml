@@ -1,5 +1,7 @@
 map 1000000
 count 1000000
+sum_list 1000000
+rec_fun 1000002
 handlers 1000000
 bottom 42
 middle 500001

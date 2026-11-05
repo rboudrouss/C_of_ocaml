@@ -771,6 +771,22 @@ let f ?(cps_calls = Var.Set.empty) ~fast p =
     }
   in
   program_deps st p;
+  (* c_of_ocaml --cps-stack: the runtime may call the CPS version of a
+     function with the arguments of its direct-style version and another
+     continuation *)
+  if Config.Flag.cps_recursions ()
+  then
+    Var.Hashtbl.iter
+      (fun _ (_, c) ->
+        match st.defs.(Var.idx c) with
+        | Expr (Closure (params, _, _)) ->
+            List.iter params ~f:(fun y ->
+                match st.defs.(Var.idx y) with
+                | Phi { known; _ } ->
+                    st.defs.(Var.idx y) <- Phi { known; others = true; unit = false }
+                | Expr _ -> ())
+        | _ -> ())
+      st.cps_closures;
   if times ()
   then Format.eprintf "    global flow analysis (initialize): %a@." Timer.print t1;
   let t2 = Timer.make () in

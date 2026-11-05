@@ -20,6 +20,7 @@
 #               removed at the end)
 #   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
 #               SPLIT kilobytes
+#   COOC_FLAGS  more flags for c_of_ocaml (--cps-stack for instance)
 #
 # emcc, node and ocamlfind must be in PATH (node >= 24 for wasm64).
 
@@ -33,11 +34,11 @@ JOBS=${JOBS:-$(nproc)}
 RT=$ROOT/runtime/c
 CFLAGS="-O1 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
   -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
-COOC_FLAGS=
+COOC_FLAGS=${COOC_FLAGS:-}
 LDFLAGS=
 if [ "$WORD_SIZE" = 64 ]; then
   CFLAGS="$CFLAGS -m64"
-  COOC_FLAGS="--word-size 64"
+  COOC_FLAGS="$COOC_FLAGS --word-size 64"
   LDFLAGS="-sMAXIMUM_MEMORY=16GB"
 fi
 # The C code is compiled as the runtime of the sysroot, with -pthread if it

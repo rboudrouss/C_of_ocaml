@@ -97,6 +97,8 @@ module Flag : sig
 
   val split_toplevel : unit -> bool
 
+  val cps_recursions : unit -> bool
+
   val enable : string -> unit
 
   val disable : string -> unit

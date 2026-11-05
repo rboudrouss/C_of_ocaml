@@ -239,6 +239,93 @@ let find_mutually_recursive_calls tail_deps =
     ~init:Var.Set.empty
     scc
 
+(* With double translation and [cps_recursions] (c_of_ocaml --cps-stack),
+   the functions which may recurse, and their calls which may be
+   recursive, are in CPS too, so that a deep recursion can go on in CPS,
+   bouncing on a trampoline rather than growing the stack (see
+   [camlc_cps_stack]): the functions in a cycle of known calls or making
+   unknown calls, and their calls to unknown functions or to such
+   functions. Their callers are not: the switch to CPS happens in the
+   recursion. *)
+let recursive_functions p info =
+  let calls = ref Var.Map.empty in
+  fold_closures
+    p
+    (fun fun_name _ (pc, _) _ () ->
+      match fun_name with
+      | None -> ()
+      | Some g ->
+          traverse
+            { fold = Code.fold_children }
+            (fun pc () ->
+              List.iter (Addr.Map.find pc p.blocks).body ~f:(fun i ->
+                  match i with
+                  | Let (x, Apply { f; _ }) ->
+                      let callees =
+                        match Var.Tbl.get info.Global_flow.info_approximation f with
+                        | Top -> None
+                        | Values { known; others } -> if others then None else Some known
+                      in
+                      calls :=
+                        Var.Map.update
+                          g
+                          (fun l -> Some ((x, callees) :: Option.value ~default:[] l))
+                          !calls
+                  | _ -> ()))
+            pc
+            p.blocks
+            ())
+    ();
+  let graph =
+    Var.Map.fold
+      (fun g l graph ->
+        let callees =
+          List.fold_left l ~init:Var.Set.empty ~f:(fun s (_, callees) ->
+              match callees with
+              | Some known -> Var.Set.union s known
+              | None -> s)
+        in
+        let graph =
+          Var.Set.fold
+            (fun h graph ->
+              if Var.Map.mem h graph then graph else Var.Map.add h Var.Set.empty graph)
+            callees
+            graph
+        in
+        Var.Map.add g callees graph)
+      !calls
+      Var.Map.empty
+  in
+  let recursive =
+    Array.fold_left (SCC.component_graph graph) ~init:Var.Set.empty ~f:(fun s (c, _) ->
+        match c with
+        | SCC.No_loop _ -> s
+        | Has_loop l -> List.fold_left l ~init:s ~f:(fun s x -> Var.Set.add x s))
+  in
+  let recursive =
+    Var.Map.fold
+      (fun g l s ->
+        if List.exists l ~f:(fun (_, callees) -> Option.is_none callees)
+        then Var.Set.add g s
+        else s)
+      !calls
+      recursive
+  in
+  Var.Map.fold
+    (fun g l s ->
+      if Var.Set.mem g recursive
+      then
+        List.fold_left l ~init:s ~f:(fun s (x, callees) ->
+            match callees with
+            | None -> Var.Set.add x s
+            | Some known ->
+                if Var.Set.exists (fun h -> Var.Set.mem h recursive) known
+                then Var.Set.add x s
+                else s)
+      else s)
+    !calls
+    recursive
+
 let annot st xi =
   match (xi : Print.xinstr) with
   | Instr (Let (x, _)) when Var.Set.mem x st -> "*"
@@ -274,5 +361,7 @@ let f p info =
   if times () then Format.eprintf "      fun analysis (solve): %a@." Timer.print t3;
   let s = ref Var.Set.empty in
   Var.Tbl.iter (fun x v -> if v then s := Var.Set.add x !s) res;
+  if double_translate () && Config.Flag.cps_recursions ()
+  then s := Var.Set.union !s (recursive_functions p info);
   if times () then Format.eprintf "    fun analysis: %a@." Timer.print t;
   !s

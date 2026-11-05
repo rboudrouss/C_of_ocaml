@@ -134,6 +134,8 @@ module Flag = struct
   let wasi = o ~name:"wasi" ~default:false
 
   let split_toplevel = o ~name:"split-toplevel" ~default:true
+
+  let cps_recursions = o ~name:"cps-recursions" ~default:false
 end
 
 module Param = struct
