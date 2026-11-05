@@ -1668,12 +1668,19 @@ value camlc_no_cps(void)
   caml_fatal_error("c_of_ocaml: call of a missing CPS version");
 }
 
-#ifdef __EMSCRIPTEN__
+#ifdef __wasm__
 static unsigned char camlc_code_digest[16];
 
-EM_JS(int, camlc_js_table_size, (void), {
-  return Number(wasmExports['__indirect_function_table'].length);
-});
+/* The size of the table of the functions whose address is taken */
+static uintnat camlc_table_size(void)
+{
+  uintnat n;
+  __asm__(".tabletype __indirect_function_table, funcref\n"
+          "table.size __indirect_function_table\n"
+          "local.set %0"
+          : "=r"(n));
+  return n;
+}
 
 static void camlc_register_code_fragment(void)
 {
@@ -1687,7 +1694,7 @@ static void camlc_register_code_fragment(void)
   /* The table only: the runtime takes the values on the bytecode stacks
      which are in a code fragment for code pointers */
   caml_register_code_fragment((char *)1,
-                              (char *)(uintnat)camlc_js_table_size(),
+                              (char *)camlc_table_size(),
                               DIGEST_PROVIDED, camlc_code_digest);
 }
 #endif
@@ -2634,7 +2641,7 @@ int main(int argc, char **argv)
   caml_init_backtrace();
   Caml_state->external_raise = NULL;
 #endif
-#ifdef __EMSCRIPTEN__
+#ifdef __wasm__
   camlc_register_code_fragment();
 #endif
   camlc_register_data(&camlc_program_data);
