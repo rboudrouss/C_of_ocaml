@@ -20,6 +20,17 @@
 #   CPS_STACK   if set, the program and the plugins are compiled with
 #               --cps-stack (and so with double translation), and plugins
 #               with deep recursions are tested, one compiled without it
+#   JSPI        if set, the program is linked with JSPI (-sJSPI), its
+#               segmented stack given by compiler/tests-c/segments/jspi_host.c,
+#               and plugins with deep recursions are tested (SKIP if node
+#               does not support JSPI)
+#   DOMAINS     if set (OCaml 5, a runtime with threads, wasm32), a plugin
+#               starting a domain is tested, which waits for it in a loop of
+#               the program (which polls: it links Domain). Not with JSPI:
+#               emscripten loads the plugins in a new thread asynchronously
+#               (_emscripten_dlsync_self), outside a context which can
+#               suspend. With wasm64, the dlopen of emscripten fails in the
+#               main thread of the program, a pthread (-sPROXY_TO_PTHREAD)
 #   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
 #               SPLIT kilobytes
 #   WORKDIR     where the test is built (default: a temporary directory,
@@ -29,6 +40,18 @@
 # emcc, node and ocamlc must be in PATH (node >= 24 for wasm64).
 
 set -eu
+
+if [ -n "${JSPI:-}" ] && ! node --experimental-wasm-jspi -e \
+  'process.exit(typeof WebAssembly.Suspending == "function" ? 0 : 1)' 2>/dev/null
+then
+  echo SKIP
+  exit 0
+fi
+
+if [ -n "${DOMAINS:-}" ] && [ "${JSPI:-}${WORD_SIZE:-32}" != 32 ]; then
+  echo "DOMAINS: wasm32, without JSPI"
+  exit 2
+fi
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEST=$ROOT/compiler/tests-c/dynlink
@@ -49,7 +72,8 @@ if [ "$WORD_SIZE" = 64 ]; then
 fi
 if [ -n "${EFFECTS:-}" ]; then COOC_FLAGS="$COOC_FLAGS --effects $EFFECTS"; fi
 # The flags of the plugin compiled without --cps-stack
-PLAIN_FLAGS="$COOC_FLAGS --effects double-translation"
+PLAIN_FLAGS=$COOC_FLAGS
+if [ -n "${CPS_STACK:-}" ]; then PLAIN_FLAGS="$COOC_FLAGS --effects double-translation"; fi
 PEFFECT=
 if [ "${EFFECTS:-}" = double-translation ]; then PEFFECT=1; fi
 if [ -n "${CPS_STACK:-}" ]; then
@@ -106,10 +130,28 @@ if [ -n "$PEFFECT" ]; then
   ocamlc -c peffect.ml
   plugins="$plugins peffect.cmo"
 fi
-if [ -n "${CPS_STACK:-}" ]; then
+DEEP=${CPS_STACK:-}${JSPI:-}
+NODE_FLAGS=
+EXTRA_OBJS=
+if [ -n "${JSPI:-}" ]; then
+  LDFLAGS="$LDFLAGS -sJSPI"
+  NODE_FLAGS=--experimental-wasm-jspi
+  EXTRA_OBJS=jspi_host.o
+fi
+if [ -n "$DEEP" ]; then
   ocamlc -c pdeep.ml
   ocamlc -c pplain.ml
   plugins="$plugins pdeep.cmo pplain.cmo"
+fi
+if [ -n "${DOMAINS:-}" ]; then
+  # main in a pthread, as ocaml-emcc links programs with threads: the main
+  # thread of JavaScript stays free to run the system calls of the others
+  LDFLAGS="$LDFLAGS -sPROXY_TO_PTHREAD"
+  # 2 domains (the runtime of ocaml-emcc reserves the minor heap of each)
+  echo 'int caml_emcc_max_domains = 2;' > domains.c
+  EXTRA_OBJS="$EXTRA_OBJS domains.o"
+  ocamlc -c pdomain.ml
+  plugins="$plugins pdomain.cmo"
 fi
 main_objs=$(DYNLINK=--dynlink compile main.bc main)
 for p in $plugins; do
@@ -122,6 +164,10 @@ for p in $plugins; do
 done
 emcc $CFLAGS -c "$ROOT/runtime/c/camlc_runtime.c" -o camlc_runtime.o
 emcc $CFLAGS -c stub.c -o stub.o
+if [ -n "${JSPI:-}" ]; then
+  emcc $CFLAGS -c "$ROOT/compiler/tests-c/segments/jspi_host.c" -o jspi_host.o
+fi
+if [ -n "${DOMAINS:-}" ]; then emcc $CFLAGS -c domains.c -o domains.o; fi
 # The program exports the symbols imported by the plugins
 exports=_main
 for s in $(for p in $plugins; do "$WASM_DIS" "${p%.*}.so"; done \
@@ -132,24 +178,28 @@ done
 # The C stack of emscripten (in the linear memory, not that of the engine):
 # 1 MB, as a host gives (ocaml-emcc: 8 MB), rather than 64 KB, and checked,
 # so that an overflow aborts rather than corrupting the memory.
-emcc $CFLAGS $main_objs camlc_runtime.o stub.o "$SYSROOT/lib/libcamlrun.a" -lm \
+emcc $CFLAGS $main_objs camlc_runtime.o stub.o $EXTRA_OBJS "$SYSROOT/lib/libcamlrun.a" -lm \
   -sMAIN_MODULE=2 -sEXPORTED_FUNCTIONS="$exports" -sNODERAWFS=1 \
   -sSTACK_SIZE=1MB -sSTACK_OVERFLOW_CHECK=2 \
   -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o main.js
 
 result=PASS
-node main.js plugin.so pcrc.so p4uses.so p2.so p4uses.so p3.so shared.so p2.so \
+node $NODE_FLAGS main.js plugin.so pcrc.so p4uses.so p2.so p4uses.so p3.so shared.so p2.so \
   > out.txt 2>&1 \
   || true
 if ! diff out.txt "$TEST/dynlink.expected"; then result=FAIL; fi
 if [ -n "$PEFFECT" ]; then
-  node main.js peffect.so > effect.txt 2>&1 || true
+  node $NODE_FLAGS main.js peffect.so > effect.txt 2>&1 || true
   grep -q '^peffect: 42$' effect.txt || { cat effect.txt; result=FAIL; }
 fi
-if [ -n "${CPS_STACK:-}" ]; then
-  node main.js pdeep.so pplain.so > deep.txt 2>&1 || true
+if [ -n "$DEEP" ]; then
+  node $NODE_FLAGS main.js pdeep.so pplain.so > deep.txt 2>&1 || true
   printf 'main\npdeep: 1000000 1000000 1000000\nloaded pdeep.so\n%s\n%s\n%s\n' \
     'pplain: 1000 1000000' 'loaded pplain.so' 'counter = 0, hooks: ' > deep.expected
   diff deep.txt deep.expected || result=FAIL
+fi
+if [ -n "${DOMAINS:-}" ]; then
+  timeout 120 node $NODE_FLAGS main.js pdomain.so > domain.txt 2>&1 || true
+  grep -q '^pdomain: 1$' domain.txt || { cat domain.txt; result=FAIL; }
 fi
 echo $result

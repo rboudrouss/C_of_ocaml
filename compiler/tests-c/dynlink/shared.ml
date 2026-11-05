@@ -32,3 +32,10 @@ exception Plugin_error of string
 let rec count n = if n = 0 then 0 else 1 + count (n - 1)
 
 let down f n = if n = 0 then 0 else 1 + f (n - 1)
+
+(* A loop of the program which does not allocate, while a domain of a plugin
+   runs *)
+let wait flag =
+  while not (Atomic.get flag) do
+    ()
+  done

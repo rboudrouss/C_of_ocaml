@@ -351,7 +351,8 @@ call `camlc_cps_stack` and `camlc_cps_stack_noexc`, which the program exports
 with the other functions of `camlc_runtime.c`. A plugin compiled without it,
 but with double translation, may still be loaded: its own recursions stay on
 the stack of the engine, but the functions of the program it calls may go
-deep.
+deep. With JSPI, the code of the plugins goes on new segments too, whatever
+their flags.
 
 **Threads and domains.** Each thread running OCaml code (the systhreads, and
 the domains of OCaml 5) has its own shadow stack and its own state of the
@@ -390,8 +391,14 @@ for integers, the runtime marshals all values.
 - Threads and domains need a runtime built with pthreads. The shadow stack
   of the threads other than the main one is smaller (1M words,
   `-DCAMLC_THREAD_STACK_WORDS=` when compiling `camlc_runtime.c`).
-- A plugin which starts threads in a program which does not use them: the
-  code of the program does not poll.
+- The code of a program polls when it links `Thread` or `Domain`, as does
+  a program loading plugins with OCaml 5 (with `-linkall`, it links
+  `Domain`). Otherwise, threads which a plugin would start could not run
+  while the program loops without allocating.
+- With emscripten, a program loading plugins and linked with JSPI cannot
+  start threads (nor domains) once it has loaded one: emscripten loads the
+  plugins in the new thread asynchronously, outside a context which can
+  suspend.
 - Bytecode loading and shared libraries (`Dynlink`) are not supported: the
   plugins are compiled ahead of time (see above).
 - Whole programs only, apart from plugins: there is no separate compilation.
@@ -425,7 +432,9 @@ systhreads and the domains (`compiler/tests-c/threads`), natively, with the
 runtime of the OCaml switch. `tools/c_of_ocaml_segments_test.sh` tests the
 segmented stack (`compiler/tests-c/segments`), with JSPI and node 24, or
 `MODE=cps` with `--cps-stack`. `CPS_STACK=1 tools/c_of_ocaml_dynlink_test.sh`
-tests plugins with `--cps-stack`. `COOC_FLAGS=--cps-stack
+tests plugins with `--cps-stack`, `JSPI=1` (node 24) with JSPI and the
+segmented stack, `DOMAINS=1` a plugin starting a domain (linked with
+`-sPROXY_TO_PTHREAD`). `COOC_FLAGS=--cps-stack
 tools/c_of_ocaml_tests.sh` runs the tests with `--cps-stack`: the same pass,
 and `misc/sieve` too.
 `tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
