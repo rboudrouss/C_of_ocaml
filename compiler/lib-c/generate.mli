@@ -27,6 +27,14 @@ type mode =
         program or of other plugins by name *)
   ]
 
+type result =
+  { files : string list  (** The C files *)
+  ; primitives : (string * int) list
+        (** The C primitives the code calls, with the number of arguments of
+            their calls, or -1 for those called with an array of arguments
+            and its length (more than 5 arguments), sorted by name *)
+  }
+
 val f :
      Code.program
   -> ?mode:mode
@@ -38,7 +46,7 @@ val f :
   -> trampolined_calls:Effects.trampolined_calls
   -> ?part_size:int
   -> Closure_conversion.closure Code.Var.Map.t
-  -> string list
+  -> result
 (** [f p ~global_flow_data ~deadcode_sentinel ~debug_info ~in_cps
      ~trampolined_calls closures] is the C translation of the whole program [p],
     whose closures are [closures] (see {!Closure_conversion.f}): a single C

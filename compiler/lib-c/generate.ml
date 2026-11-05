@@ -3394,6 +3394,11 @@ type mode =
   | `Plugin
   ]
 
+type result =
+  { files : string list
+  ; primitives : (string * int) list
+  }
+
 (* The maximal arity of the functions of the plugins of a program compiled
    with --dynlink (the runtime handles their partial applications with the
    tables of the program) *)
@@ -4352,18 +4357,29 @@ let f
           add_definitions b l;
           Buffer.contents b)
   in
-  match mode, files with
-  | (`Program | `Dynlink), main :: parts ->
-      (* The digest of the program, for the code pointers of marshaled
-         closures (see camlc_runtime.c) *)
-      let digest =
-        Digest.string (String.concat ~sep:"" (List.map files ~f:Digest.string))
-      in
-      Printf.sprintf
-        "%s\nconst unsigned char camlc_program_digest[16] = { %s };\n"
-        main
-        (String.concat
-           ~sep:", "
-           (List.init ~len:16 ~f:(fun i -> string_of_int (Char.code digest.[i]))))
-      :: parts
-  | _ -> files
+  let files =
+    match mode, files with
+    | (`Program | `Dynlink), main :: parts ->
+        (* The digest of the program, for the code pointers of marshaled
+           closures (see camlc_runtime.c) *)
+        let digest =
+          Digest.string (String.concat ~sep:"" (List.map files ~f:Digest.string))
+        in
+        Printf.sprintf
+          "%s\nconst unsigned char camlc_program_digest[16] = { %s };\n"
+          main
+          (String.concat
+             ~sep:", "
+             (List.init ~len:16 ~f:(fun i -> string_of_int (Char.code digest.[i]))))
+        :: parts
+    | _ -> files
+  in
+  { files
+  ; primitives =
+      List.sort
+        ~cmp:(fun (a, _) (b, _) -> String.compare a b)
+        (String.Hashtbl.fold
+           (fun name n l -> (name, if n <= 5 then n else -1) :: l)
+           out.primitives
+           [])
+  }

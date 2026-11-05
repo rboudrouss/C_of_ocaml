@@ -70,6 +70,7 @@ and `dynlink.c`. `c_of_ocaml --runtime-files DIR` writes `camlc.h` and
 | `-o FILE` | Write the C code to `FILE`. |
 | `--split DIR` | Write the C code to several files (see below). |
 | `--part-size KB` | With `--split`, the size of each part (default 2048). |
+| `--manifest FILE` | Write the manifest of the C code to `FILE` (with `--split`, always written to `DIR/manifest`). |
 | `--opt {1,2,3}` | Optimization profile (default 1). |
 | `--debug-info`, `--no-debug-info` | Record backtraces, or not. By default, they are recorded when the bytecode has debug events (`ocamlc -g`). |
 | `--word-size {32,64}` | Target wasm32 (31-bit integers, default) or wasm64 (63-bit integers). |
@@ -94,6 +95,32 @@ The generated C names do not depend on the rest of the program: functions are
 named after their source location, constants after their contents. After an
 edit, only `part0.c` and the parts whose code changed differ, and unchanged
 files are not rewritten, so a build system only recompiles what changed.
+
+### Manifest
+
+With `--split DIR` (or `--manifest FILE`), c_of_ocaml writes the facts about
+the C code its host needs to compile and link it, so that the host never reads
+the C code. One `KEY VALUE` per line:
+
+```
+format 1
+word_size 32
+mode program
+effects disabled
+debug_info false
+primitive caml_array_make 2
+primitive caml_ml_open_descriptor_in 1
+...
+```
+
+`mode` is `program`, `dynlink` or `plugin`. `effects` is `disabled` or
+`double-translation`: the plugins of a `--dynlink` program must be compiled
+with the same. `primitive NAME ARITY` lists the C primitives the code calls,
+with the number of arguments of their calls, or `-1` for those called with an
+array of arguments and its length (`value *argv, int argc`, more than 5
+arguments). A host uses them to adapt stubs whose C signature differs, or to
+provide the missing ones. More keys may be added; unknown ones should be
+ignored.
 
 ### C stubs
 

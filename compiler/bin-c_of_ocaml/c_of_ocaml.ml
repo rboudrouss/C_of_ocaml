@@ -59,6 +59,48 @@ let read_file name =
   close_in ic;
   s
 
+(* The manifest of the C code: what its host needs to know to compile and
+   link it, without reading it. Lines "KEY VALUE":
+   - [format 1]: the version of this format
+   - [word_size 32|64]
+   - [mode program|dynlink|plugin]
+   - [effects disabled|double-translation]: the effect handlers of the
+     program (with [dynlink], its plugins must have the same)
+   - [debug_info true|false]: backtraces are recorded
+   - [primitive NAME ARITY], for each C primitive the code calls, sorted:
+     the number of [value] arguments of its calls, or -1 for the calls
+     with an array of arguments and its length ([value *, int]) *)
+let manifest ~word_size ~mode ~debug_info primitives =
+  let b = Buffer.create 4096 in
+  Printf.bprintf b "format 1\n";
+  Printf.bprintf b "word_size %d\n" word_size;
+  Printf.bprintf
+    b
+    "mode %s\n"
+    (match mode with
+    | `Program -> "program"
+    | `Dynlink -> "dynlink"
+    | `Plugin -> "plugin");
+  Printf.bprintf
+    b
+    "effects %s\n"
+    (match Config.effects () with
+    | `Double_translation -> "double-translation"
+    | `Disabled -> "disabled"
+    | `Cps | `Jspi | `Native -> assert false);
+  Printf.bprintf b "debug_info %b\n" debug_info;
+  List.iter primitives ~f:(fun (name, arity) ->
+      Printf.bprintf b "primitive %s %d\n" name arity);
+  Buffer.contents b
+
+(* Writes [contents] to the file [name], unless it has them already *)
+let write_if_changed name contents =
+  if not (Sys.file_exists name && String.equal (read_file name) contents)
+  then (
+    let oc = open_out_bin name in
+    output_string oc contents;
+    close_out oc)
+
 (* DIR/part0.c, DIR/part1.c, ...: the files left unchanged are not
    rewritten, and those of a previous, larger output are removed *)
 let write_parts dir parts =
@@ -68,13 +110,7 @@ let write_parts dir parts =
       match part_index name with
       | Some i when i >= n -> Sys.remove (Filename.concat dir name)
       | Some _ | None -> ());
-  List.iteri parts ~f:(fun i contents ->
-      let name = part_file dir i in
-      if not (Sys.file_exists name && String.equal (read_file name) contents)
-      then (
-        let oc = open_out_bin name in
-        output_string oc contents;
-        close_out oc))
+  List.iteri parts ~f:(fun i contents -> write_if_changed (part_file dir i) contents)
 
 (* Write the runtime support (camlc.h, camlc_runtime.c) to [dir] *)
 let write_runtime_files dir =
@@ -247,7 +283,15 @@ let uses_effects (p : Code.program) =
     p.blocks
     false
 
-let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
+let compile
+    ~profile
+    ~effects
+    ~dynlink
+    ~debug_info
+    ~word_size
+    ~input_file
+    ~output
+    ~manifest_file =
   let ic = open_in_bin input_file in
   let input = Parse_bytecode.from_channel ic in
   let mode =
@@ -379,19 +423,28 @@ let compile ~profile ~effects ~dynlink ~debug_info ~input_file ~output =
   in
   if times () then Format.eprintf "  code generation: %a@." Timer.print t;
   memory ();
-  match output, c with
+  (match output, c.files with
   | `File name, [ c ] ->
       let oc = open_out_bin name in
       output_string oc c;
       close_out oc
   | `Split (dir, _), parts -> write_parts dir parts
-  | `File _, _ -> assert false
+  | `File _, _ -> assert false);
+  let manifest_file =
+    match manifest_file, output with
+    | Some f, _ -> Some f
+    | None, `Split (dir, _) -> Some (Filename.concat dir "manifest")
+    | None, `File _ -> None
+  in
+  Option.iter manifest_file ~f:(fun f ->
+      write_if_changed f (manifest ~word_size ~mode ~debug_info c.primitives))
 
 let () =
   let input_file = ref None in
   let runtime_dir = ref None in
   let output_file = ref None in
   let split_dir = ref None in
+  let manifest_file = ref None in
   let part_size = ref 2048 in
   let profile = ref Profile.O1 in
   let debug_info = ref None in
@@ -405,6 +458,11 @@ let () =
       , "DIR Write the C code to several files, which can be compiled separately: \
          DIR/part0.c (the static data and the tables), DIR/part1.c, ... (the functions). \
          The files left unchanged are not rewritten" )
+    ; ( "--manifest"
+      , Arg.String (fun s -> manifest_file := Some s)
+      , "FILE Write the manifest of the C code to FILE: what its host needs to know to \
+         compile and link it, as the primitives it calls (default with --split: \
+         DIR/manifest)" )
     ; ( "--part-size"
       , Arg.Int
           (fun n ->
@@ -484,6 +542,8 @@ let () =
           ~effects:!effects
           ~dynlink:!dynlink
           ~debug_info:!debug_info
+          ~word_size:!word_size
+          ~manifest_file:!manifest_file
           ~input_file
           ~output
       with Failure msg ->
