@@ -464,6 +464,11 @@ let float_functions =
   ; "caml_trunc_float", "trunc"
   ]
 
+(* The functions of the C library the generated code may call (beyond the
+   primitives and the runtime): those of [float_functions], and those of
+   camlc.h *)
+let plugin_c_functions = List.map float_functions ~f:snd @ [ "memcpy" ]
+
 (* The boxed integers, with the C type of their unboxed representation *)
 let boxed_ints =
   [ "int64", Unboxed_int64; "int32", Unboxed_int32; "nativeint", Unboxed_nativeint ]
@@ -3994,6 +3999,18 @@ let f
              (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
                   Printf.sprintf ", (value)&camlc_pap_cps%d" (i + 1)))
          else ""));
+    (match mode with
+    | `Dynlink ->
+        (* The functions of the C library which the code of the plugins
+           calls directly: the program links them, for its plugins *)
+        Printf.bprintf
+          b
+          "__attribute__((used)) static void (*const camlc_plugin_c_functions[])(void) = \
+           { %s };\n"
+          (String.concat
+             ~sep:", "
+             (List.map plugin_c_functions ~f:(Printf.sprintf "(void (*)(void))&%s")))
+    | `Program | `Plugin -> ());
     Buffer.add_char b '\n';
     Buffer.add_buffer b out.data;
     Buffer.add_char b '\n';
