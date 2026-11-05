@@ -64,6 +64,10 @@
 #include <caml/bigarray.h>
 #pragma clang diagnostic pop
 
+#if OCAML_VERSION < 41400
+#error "c_of_ocaml: the runtime of OCaml 4.14 or later is needed"
+#endif
+
 /* Tail calls, with the tail call extension of WebAssembly (-mtail-call):
    the caller and the callee must have the same signature. Without it
    (asyncify does not support it), tail calls are plain calls. */
