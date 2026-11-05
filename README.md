@@ -296,7 +296,14 @@ where it allocates its frame if what it did before has no effect; otherwise it
 goes on on the current stack. There is no new segment in a callback from C,
 where JavaScript may be on the stack, which JSPI cannot suspend. Without JSPI
 (node runs compiled programs in a worker thread with a large stack), the limit
-is that of the shadow stack.
+is that of the shadow stack. The C stack of emscripten (`__stack_pointer`, in
+the linear memory, `-sSTACK_SIZE`) does not change with the stack of the
+engine. The generated functions take the address of none of their variables,
+so they have no frame there: the slow paths of the applications, which put
+the arguments in an array, are functions of their own (`camlc_applyN_slow`).
+A recursion makes it grow only through the applications of a function to
+more arguments than its arity, and through C functions. Give it 1 MB at least
+(ocaml-emcc gives 8 MB).
 
 **CPS stack** (`c_of_ocaml --cps-stack`). Without JSPI, deep recursions can go
 on in continuation-passing style, on the heap. The functions which may recurse
@@ -334,10 +341,7 @@ go on new stacks with JSPI). This works in all browsers, with a synchronous
 The limit is `CAMLC_SEGMENT_WORDS` (2048 words, about 200 KB of the stack of
 the engine), which can be raised when compiling `camlc_runtime.c` when the
 program runs on the main thread (984 KB in V8): `kb` no longer switches with
-6144. The C stack of emscripten (`-sSTACK_SIZE`, in the linear memory, 64 KB
-by default) holds the frames of the functions which take the address of a
-variable (the arguments of an application whose arity differs) up to the
-limit: give it 1 MB (ocaml-emcc gives 8 MB).
+6144.
 
 With `--dynlink`, the program and its plugins are compiled with `--cps-stack`
 (and so with double translation, which the loader checks). The plugins then
