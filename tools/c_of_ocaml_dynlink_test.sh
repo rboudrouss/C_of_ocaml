@@ -129,11 +129,9 @@ for s in $(for p in $plugins; do "$WASM_DIS" "${p%.*}.so"; done \
              | awk '{print $3}' | tr -d '"' | grep -v '^__\|^memory$' | sort -u); do
   exports=$exports,_$s
 done
-# A C stack of emscripten (in the linear memory, not that of the engine) of
-# 1 MB, as a host gives (ocaml-emcc: 8 MB), rather than 64 KB: the functions
-# with a frame there (the arguments of an application whose arity differs)
-# use it up to the segment limit, and with --cps-stack, two of them alternate
-# up to it. An overflow aborts rather than corrupting the memory.
+# The C stack of emscripten (in the linear memory, not that of the engine):
+# 1 MB, as a host gives (ocaml-emcc: 8 MB), rather than 64 KB, and checked,
+# so that an overflow aborts rather than corrupting the memory.
 emcc $CFLAGS $main_objs camlc_runtime.o stub.o "$SYSROOT/lib/libcamlrun.a" -lm \
   -sMAIN_MODULE=2 -sEXPORTED_FUNCTIONS="$exports" -sNODERAWFS=1 \
   -sSTACK_SIZE=1MB -sSTACK_OVERFLOW_CHECK=2 \

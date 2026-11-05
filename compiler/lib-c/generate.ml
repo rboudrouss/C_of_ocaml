@@ -4214,11 +4214,15 @@ let f
           \  if (c != CAMLC_NO_CPS) CAMLC_MUSTTAIL return ((%s)c)(%s, k, f);\n\
           \  CAMLC_MUSTTAIL return camlc_direct_k%d(f, %s, k);\n\
            }\n\n\
+           static __attribute__((noinline)) value camlc_apply_cps%d_slow(value f, %s, \
+           value k) {\n\
+          \  value args[%d] = { %s, k };\n\
+          \  return camlc_applyv_cps(f, %d, args);\n\
+           }\n\n\
            static inline value camlc_apply_cps%d(value f, %s, value k) {\n\
           \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
           \    CAMLC_MUSTTAIL return camlc_call_cps%d(f, %s, k);\n\
-          \  value args[%d] = { %s, k };\n\
-          \  return camlc_applyv_cps(f, %d, args);\n\
+          \  CAMLC_MUSTTAIL return camlc_apply_cps%d_slow(f, %s, k);\n\
            }\n\n"
           n
           params
@@ -4232,12 +4236,16 @@ let f
           (String.concat ~sep:", " args)
           m
           params
+          m
+          (String.concat ~sep:", " args)
+          n
+          m
+          params
           n
           m
           (String.concat ~sep:", " args)
           m
-          (String.concat ~sep:", " args)
-          n)
+          (String.concat ~sep:", " args))
       out.cps_apply_arities;
     (* The partial applications of unknown functions to [n] arguments, as
        [camlc_make_pap]; not in plugins, which do not see the tables of the
@@ -4297,28 +4305,40 @@ let f
     IntSet.iter
       (fun n ->
         let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
+        let params = String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)) in
+        let args = String.concat ~sep:", " args in
+        (* The array of the arguments, whose address is taken, is in a
+           function of its own: inlined, it would give the caller a frame on
+           the C stack of the linear memory, which the segmented stack does
+           not measure nor switch *)
         Printf.bprintf
           b
-          "static inline value camlc_apply%d(value f, %s) {\n\
-          \  int arity = Arity_closinfo(Closinfo_val(f));\n\
-          \  if (arity == %d)\n\
-          \    CAMLC_MUSTTAIL return ((%s)Field(f, 0))(%s, f);\n\
+          "static __attribute__((noinline)) value camlc_apply%d_slow(value f, %s) {\n\
           \  value args[%d] = { %s };\n\
-          \  if (arity > %d) return %s;\n\
+          \  if (Arity_closinfo(Closinfo_val(f)) > %d) return %s;\n\
           \  return camlc_applyv(f, %d, args);\n\
+           }\n\n\
+           static inline value camlc_apply%d(value f, %s) {\n\
+          \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
+          \    CAMLC_MUSTTAIL return ((%s)Field(f, 0))(%s, f);\n\
+          \  CAMLC_MUSTTAIL return camlc_apply%d_slow(f, %s);\n\
            }\n\n"
           n
-          (String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)))
+          params
           n
-          (fun_type n)
-          (String.concat ~sep:", " args)
-          n
-          (String.concat ~sep:", " args)
+          args
           n
           (if n <= partial_max
-           then Printf.sprintf "camlc_partial%d(f, %s)" n (String.concat ~sep:", " args)
+           then Printf.sprintf "camlc_partial%d(f, %s)" n args
            else Printf.sprintf "camlc_make_pap(f, %d, args)" n)
-          n)
+          n
+          n
+          params
+          n
+          (fun_type n)
+          args
+          n
+          args)
       out.apply_arities
   in
   let add_definitions b l =
