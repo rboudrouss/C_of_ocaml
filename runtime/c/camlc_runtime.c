@@ -1249,6 +1249,20 @@ value camlc_applyv_cps(value f, int n, value *args)
 
 #endif
 
+/* The dummy block of a function of a [let rec] (OCaml < 5.2), which
+   [caml_update_dummy] fills with the closure: [size] is the size of the
+   closure in the bytecode (code pointer, closure info, environment), whereas
+   with double translation, the closure also holds the CPS code pointer, and
+   the environments of c_of_ocaml may differ. The fields after the closure
+   stay unit. */
+CAMLextern value caml_alloc_dummy(value);
+
+value camlc_alloc_dummy_function(value size, value arity)
+{
+  (void)arity;
+  return caml_alloc_dummy(Val_long(2 * Long_val(size) + 1));
+}
+
 /****************************************************************/
 /* Callbacks from C (replaces the bytecode runtime's callback.c) */
 

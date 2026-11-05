@@ -257,6 +257,7 @@ value camlc_output_value_to_string(value v, value flags);
 value camlc_output_value_to_buffer(value buf, value ofs, value len, value v,
                                    value flags);
 extern const unsigned char camlc_program_digest[16];
+value camlc_alloc_dummy_function(value size, value arity);
 
 /* Wrappers for C primitives, which may raise with longjmp */
 typedef value (*camlc_prim0)(void);

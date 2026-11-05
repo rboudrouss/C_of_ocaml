@@ -973,6 +973,11 @@ let primitive out name (args : parg list) =
               | "caml_continuation_use_and_update_handler_noexc", 4
                 when double_translation () ->
                   plain (c_call "camlc_continuation_use_and_update_handler_noexc" args)
+              (* A dummy closure for a [let rec] (before OCaml 5.2): its
+                 size is that of the closure of the bytecode, which is
+                 smaller with double translation (see the runtime) *)
+              | "caml_alloc_dummy_function", 2 ->
+                  Checked (c_call "camlc_ccall2" ("camlc_alloc_dummy_function" :: args))
               (* With [Marshal.Closures], marshaled by the runtime *)
               | ( ( "caml_output_value"
                   | "caml_output_value_to_bytes"
