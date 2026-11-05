@@ -63,6 +63,26 @@ node main.js
 and `dynlink.c`. `c_of_ocaml --runtime-files DIR` writes `camlc.h` and
 `camlc_runtime.c` to `DIR`, for use outside this tree.
 
+### The host
+
+c_of_ocaml translates bytecode to C, and its runtime support only depends on
+the OCaml runtime and on wasm, not on emscripten. What depends on the
+platform is left to the host which compiles and links the C code
+(ocaml-emcc):
+
+- The host may start the program from its own `main`: `camlc_main(argv)`
+  starts the runtime and runs the program, and `camlc_runtime.c` compiled
+  with `-DCAMLC_NO_MAIN` has no `main`.
+- The host may run functions on new stacks of the engine, for the segmented
+  stack (see below), by defining `camlc_host_new_stacks` and
+  `camlc_host_on_new_stack` (`camlc.h`; `camlc_runtime.c` has weak definitions
+  which do not). `compiler/tests-c/segments/jspi_host.c` does it with
+  emscripten's JSPI.
+- The settings of the OCaml runtime are the host's: the default number of
+  domains, for instance, which OCaml 5.3 sets to 128 (ocaml-emcc's runtime
+  defaults to 1 without threads).
+- The manifest (see below) gives what the host needs to know about the C code.
+
 ### Options
 
 | Option | Effect |
@@ -256,8 +276,9 @@ depth and bounce through a trampoline past a threshold.
 **Segmented stack.** The generated functions run on the stack of the wasm
 engine, which browsers keep small (984 KB in V8, 500 KB in Chrome's workers):
 tens of thousands of nested calls, where the bytecode interpreter has a stack
-of its own. When the program is linked with emscripten's JSPI (`-sJSPI`,
-JavaScript Promise Integration), it runs in a context which can suspend, and
+of its own. When the host can run a function on a new stack of the engine
+(`camlc_host_on_new_stack`; with emscripten's JSPI, `-sJSPI`, JavaScript
+Promise Integration, the program runs in a context which can suspend),
 `camlc_runtime.c` uses it to chain stacks: the shadow stack measures the depth,
 and a function whose frame would go below `camlc_segment_limit`, about 2048
 words below the start of the current segment, calls itself again on a new
