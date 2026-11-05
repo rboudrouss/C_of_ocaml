@@ -374,17 +374,14 @@ let compile
   memory ();
   (if Config.Flag.cps_recursions ()
    then
-     match effects, mode with
-     | (None | Some `Double_translation), `Program -> ()
-     | _, (`Dynlink | `Plugin) ->
-         failwith
-           "c_of_ocaml: --cps-stack is not supported with --dynlink and for plugins"
-     | Some _, `Program ->
-         failwith "c_of_ocaml: --cps-stack needs --effects=double-translation");
+     match effects with
+     | None | Some `Double_translation -> ()
+     | Some _ -> failwith "c_of_ocaml: --cps-stack needs --effects=double-translation");
   Config.set_effects_backend
     (match effects, mode with
     | Some e, _ -> e
-    | None, `Program when Config.Flag.cps_recursions () -> `Double_translation
+    | None, (`Program | `Dynlink | `Plugin) when Config.Flag.cps_recursions () ->
+        `Double_translation
     | None, (`Dynlink | `Plugin) ->
         (* The program and its plugins must agree *)
         `Disabled

@@ -17,6 +17,9 @@
 #   C_OF_OCAML  the compiler (default: the one built by dune in this tree)
 #   EFFECTS     if set, the effects option of c_of_ocaml (double-translation
 #               also tests a plugin performing effects)
+#   CPS_STACK   if set, the program and the plugins are compiled with
+#               --cps-stack (and so with double translation), and plugins
+#               with deep recursions are tested, one compiled without it
 #   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
 #               SPLIT kilobytes
 #   WORKDIR     where the test is built (default: a temporary directory,
@@ -45,6 +48,15 @@ if [ "$WORD_SIZE" = 64 ]; then
   LDFLAGS="-sMAXIMUM_MEMORY=16GB"
 fi
 if [ -n "${EFFECTS:-}" ]; then COOC_FLAGS="$COOC_FLAGS --effects $EFFECTS"; fi
+# The flags of the plugin compiled without --cps-stack
+PLAIN_FLAGS="$COOC_FLAGS --effects double-translation"
+PEFFECT=
+if [ "${EFFECTS:-}" = double-translation ]; then PEFFECT=1; fi
+if [ -n "${CPS_STACK:-}" ]; then
+  COOC_FLAGS="$COOC_FLAGS --cps-stack"
+  # The effects of peffect.ml: OCaml 5
+  case $(ocamlc -version) in 4.*) ;; *) PEFFECT=1 ;; esac
+fi
 # A runtime built with -pthread (its thread-local variables): so is the C
 # code, and the program and the plugins are linked with threads, emscripten
 # then relocating the thread-local variables of the plugins
@@ -90,13 +102,22 @@ echo "let extra = 0" >> v2/shared.ml
 (cd v2 && ocamlc -c shared.ml && ocamlc -c pcrc.ml)
 cp v2/pcrc.cmo .
 plugins="plugin.cmo p2.cma p3.cmo p4uses.cmo shared.cmo pcrc.cmo"
-if [ "${EFFECTS:-}" = double-translation ]; then
+if [ -n "$PEFFECT" ]; then
   ocamlc -c peffect.ml
   plugins="$plugins peffect.cmo"
 fi
+if [ -n "${CPS_STACK:-}" ]; then
+  ocamlc -c pdeep.ml
+  ocamlc -c pplain.ml
+  plugins="$plugins pdeep.cmo pplain.cmo"
+fi
 main_objs=$(DYNLINK=--dynlink compile main.bc main)
 for p in $plugins; do
-  objs=$(compile "$p" "${p%.*}" -fPIC)
+  if [ "$p" = pplain.cmo ]; then
+    objs=$(COOC_FLAGS=$PLAIN_FLAGS compile "$p" "${p%.*}" -fPIC)
+  else
+    objs=$(compile "$p" "${p%.*}" -fPIC)
+  fi
   emcc $CFLAGS -sSIDE_MODULE=1 $objs -o "${p%.*}.so"
 done
 emcc $CFLAGS -c "$ROOT/runtime/c/camlc_runtime.c" -o camlc_runtime.o
@@ -108,8 +129,14 @@ for s in $(for p in $plugins; do "$WASM_DIS" "${p%.*}.so"; done \
              | awk '{print $3}' | tr -d '"' | grep -v '^__\|^memory$' | sort -u); do
   exports=$exports,_$s
 done
+# A C stack of emscripten (in the linear memory, not that of the engine) of
+# 1 MB, as a host gives (ocaml-emcc: 8 MB), rather than 64 KB: the functions
+# with a frame there (the arguments of an application whose arity differs)
+# use it up to the segment limit, and with --cps-stack, two of them alternate
+# up to it. An overflow aborts rather than corrupting the memory.
 emcc $CFLAGS $main_objs camlc_runtime.o stub.o "$SYSROOT/lib/libcamlrun.a" -lm \
   -sMAIN_MODULE=2 -sEXPORTED_FUNCTIONS="$exports" -sNODERAWFS=1 \
+  -sSTACK_SIZE=1MB -sSTACK_OVERFLOW_CHECK=2 \
   -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o main.js
 
 result=PASS
@@ -117,8 +144,14 @@ node main.js plugin.so pcrc.so p4uses.so p2.so p4uses.so p3.so shared.so p2.so \
   > out.txt 2>&1 \
   || true
 if ! diff out.txt "$TEST/dynlink.expected"; then result=FAIL; fi
-if [ "${EFFECTS:-}" = double-translation ]; then
+if [ -n "$PEFFECT" ]; then
   node main.js peffect.so > effect.txt 2>&1 || true
   grep -q '^peffect: 42$' effect.txt || { cat effect.txt; result=FAIL; }
+fi
+if [ -n "${CPS_STACK:-}" ]; then
+  node main.js pdeep.so pplain.so > deep.txt 2>&1 || true
+  printf 'main\npdeep: 1000000 1000000 1000000\nloaded pdeep.so\n%s\n%s\n%s\n' \
+    'pplain: 1000 1000000' 'loaded pplain.so' 'counter = 0, hooks: ' > deep.expected
+  diff deep.txt deep.expected || result=FAIL
 fi
 echo $result

@@ -27,3 +27,8 @@ let register f = hooks := f :: !hooks
 let run x = List.map (fun f -> f x) (List.rev !hooks)
 
 exception Plugin_error of string
+
+(* Recursions which the plugins make deep (c_of_ocaml --cps-stack) *)
+let rec count n = if n = 0 then 0 else 1 + count (n - 1)
+
+let down f n = if n = 0 then 0 else 1 + f (n - 1)
