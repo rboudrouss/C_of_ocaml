@@ -737,7 +737,19 @@ let box_numbers ~boxed p st types =
                         | Eq { int_only = true }
                         | Neq { int_only = true }
                         | Lt | Le | Ult )
-                      , _ )
+                      , args ) ->
+                      (* The C code reads values: a number only gets there
+                         through Obj ([Obj.size (Obj.repr 1.0)], Rocq's
+                         CObj), and is boxed *)
+                      List.iter
+                        ~f:(fun a ->
+                          match a with
+                          | Pv y -> (
+                              match Var.Tbl.get types y with
+                              | Number (_, Unboxed) -> box y
+                              | _ -> ())
+                          | Pc _ -> ())
+                        args
                   | Field _ | Closure _ | Constant _ | Special _ -> ())
               | Set_field (_, _, (Non_float | Immediate), y) | Array_set (_, _, y) ->
                   box y

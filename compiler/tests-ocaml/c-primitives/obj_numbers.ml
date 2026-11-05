@@ -1,0 +1,18 @@
+(* Numbers given to the primitives reading values through Obj: they are
+   boxed (Rocq's CObj computes [Obj.size (Obj.repr 1.0)]) *)
+
+let size_of_double = Obj.size (Obj.repr 1.0)
+
+let is_int = Obj.is_int (Obj.repr 2.5)
+
+let f x = Obj.size (Obj.repr (x +. 1.0))
+
+let g x = Obj.is_int (Obj.repr (Int64.add x 1L))
+
+let () =
+  Printf.printf
+    "%d %b %d %b\n"
+    size_of_double
+    is_int
+    (f (float_of_string "3"))
+    (g (Int64.of_string "4"))
