@@ -249,6 +249,44 @@ where JavaScript may be on the stack, which JSPI cannot suspend. Without JSPI
 (node runs compiled programs in a worker thread with a large stack), the limit
 is that of the shadow stack.
 
+**CPS stack** (`c_of_ocaml --cps-stack`). Without JSPI, deep recursions can go
+on in continuation-passing style, on the heap. The functions which may recurse
+(in a cycle of known calls, or making unknown calls) get a CPS version, as with
+effect handlers (the double translation, which this option turns on), and so do
+their calls which may be recursive (`recursive_functions` in
+`compiler/lib/partial_cps_analysis.ml`), but not their callers. Past the
+segment limit, such a function calls its CPS version rather than itself on a
+new stack (`camlc_cps_stack`, through `camlc_c_N`): on a fresh fiber, with a
+continuation returning the result, whose CPS calls are tail calls or bounce on
+the trampoline. The stack of the engine no longer grows, and the continuations
+are closures on the heap. This allocates: the linear recursions (one call
+which may be recursive on each path) then count as triggering a GC, and the
+others switch only if they trigger one anyway, having a frame which measures
+their depth. The functions it calls without CPS version run in direct style,
+with a new segment of a quarter of the size; the recursions through functions
+with unboxed arguments or results, or making several recursive calls without
+frame (`fib`), or through callbacks from C, stay on the stack of the engine (or
+go on new stacks with JSPI). This works in all browsers, with a synchronous
+`main`, and with OCaml 4.14. The price:
+
+- the code is larger: wasm +0 to +10% for small numeric programs, +50% for the
+  programs using `Printf` or `Format` (24 benchmarks of the Ocsigen suite), +56%
+  for camlboy, +61% for MOPSA (22 to 36 MB), against +4% with JSPI. The
+  closures are a word larger (double translation);
+- the code which does not go deep is as fast (23 benchmarks out of 24: within
+  4%), but not that of the programs whose recursions often cross the limit
+  (`kb`: 39,200 times, ×2): the code past it runs in CPS, about 2 to 3 times
+  slower than direct style when it does not allocate (a recursion of depth
+  1,000,000: 0.45 s against 0.10 s on a large stack and 0.25 s with JSPI), but
+  faster when it does, the GC scanning a short shadow stack;
+- an infinite recursion exhausts the memory rather than raising
+  `Stack_overflow`.
+
+The limit is `CAMLC_SEGMENT_WORDS` (2048 words, about 200 KB of the stack of
+the engine), which can be raised when compiling `camlc_runtime.c` when the
+program runs on the main thread (984 KB in V8): `kb` no longer switches with
+6144.
+
 **Threads and domains.** Each thread running OCaml code (the systhreads, and
 the domains of OCaml 5) has its own shadow stack and its own state of the
 effect handlers, in a thread-local structure (`camlc_thread`) set up when it
@@ -294,13 +332,15 @@ for integers, the runtime marshals all values.
 - Effects cannot be performed across a callback from C: they raise
   `Effect.Unhandled`, as with js_of_ocaml. `Effect.Deep.get_callstack` is
   empty.
-- Without JSPI, recursion depth is limited by the wasm engine's C stack
-  (about 1 MB in V8), i.e. some tens of thousands of non-tail calls, whereas
-  the bytecode interpreter has its own much larger stack. Exhausting it raises
-  a JavaScript `RangeError` rather than `Stack_overflow`. Under node,
-  ocaml-emcc runs compiled programs in a worker thread with a large stack to
-  mitigate this. With JSPI (see above), only recursions through functions
-  making several calls each, or through callbacks from C, are limited.
+- Without JSPI nor `--cps-stack`, recursion depth is limited by the wasm
+  engine's C stack (about 1 MB in V8), i.e. some tens of thousands of non-tail
+  calls, whereas the bytecode interpreter has its own much larger stack.
+  Exhausting it raises a JavaScript `RangeError` rather than `Stack_overflow`.
+  Under node, ocaml-emcc runs compiled programs in a worker thread with a large
+  stack to mitigate this. With JSPI or `--cps-stack` (see above), only
+  recursions through functions making several calls each, or through
+  callbacks from C, are limited (and with `--cps-stack`, through functions with
+  unboxed arguments or results).
 - With JSPI, the program is asynchronous: `main` returns a promise, settled
   when the program ends. JSPI is in Chrome and Edge since version 137, is
   announced for Firefox 153, needs `--experimental-wasm-jspi` with node 24,
@@ -317,7 +357,10 @@ wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
 (`compiler/tests-c/dynlink`). `tools/c_of_ocaml_threads_test.sh` tests the
 systhreads and the domains (`compiler/tests-c/threads`), natively, with the
 runtime of the OCaml switch. `tools/c_of_ocaml_segments_test.sh` tests the
-segmented stack (`compiler/tests-c/segments`), with JSPI and node 24.
+segmented stack (`compiler/tests-c/segments`), with JSPI and node 24, or
+`MODE=cps` with `--cps-stack`. `COOC_FLAGS=--cps-stack
+tools/c_of_ocaml_tests.sh` runs the tests with `--cps-stack`: the same pass,
+and `misc/sieve` too.
 `tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
 `Marshal.Closures`. `dune build @compiler/tests-c/runtest` checks the
 primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
