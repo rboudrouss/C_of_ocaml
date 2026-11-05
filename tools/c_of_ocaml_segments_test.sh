@@ -1,6 +1,7 @@
 #!/bin/bash
 # Test the segmented stack (compiler/tests-c/segments): deep recursions,
-# compiled by c_of_ocaml and emscripten with JSPI (-sJSPI), or with
+# compiled by c_of_ocaml and emscripten with JSPI (-sJSPI, the new stacks
+# given by jspi_host.c, as a host of the generated code does), or with
 # c_of_ocaml --cps-stack (MODE=cps), run by node on its main thread, whose
 # stack (984 KB) holds tens of thousands of nested calls only.
 #
@@ -46,8 +47,9 @@ CFLAGS="-O2 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
 COOC_FLAGS=
 LDFLAGS=
 NODE_FLAGS=
+HOST=
 case $MODE in
-  jspi) LDFLAGS=-sJSPI; NODE_FLAGS=--experimental-wasm-jspi ;;
+  jspi) LDFLAGS=-sJSPI; NODE_FLAGS=--experimental-wasm-jspi; HOST=jspi_host.o ;;
   cps) COOC_FLAGS=--cps-stack ;;
   *) echo "MODE: jspi or cps"; exit 2 ;;
 esac
@@ -72,7 +74,8 @@ ocamlfind ocamlc segments.ml -o segments.bc
 "$C_OF_OCAML" $COOC_FLAGS segments.bc -o segments.c
 emcc $CCFLAGS -Wno-everything -c segments.c -o segments.o
 emcc $CCFLAGS -c "$RT/camlc_runtime.c" -o camlc_runtime.o
-emcc $CFLAGS segments.o camlc_runtime.o "$SYSROOT/lib/libcamlrun.a" -lm \
+if [ -n "$HOST" ]; then emcc $CCFLAGS -c "$TEST/jspi_host.c" -o "$HOST"; fi
+emcc $CFLAGS segments.o camlc_runtime.o $HOST "$SYSROOT/lib/libcamlrun.a" -lm \
   -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o segments.js
 rc=0
 timeout 300 "$NODE" $NODE_FLAGS --stack-size="$STACK_KB" segments.js \

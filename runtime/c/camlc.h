@@ -126,8 +126,9 @@ extern _Thread_local struct camlc_thread camlc_thread;
 
 /* Segmented stack. The generated functions run on the stack of the wasm
    engine, which browsers keep small (about 1 MB, 500 KB in Chrome's
-   workers): tens of thousands of nested calls. With JSPI (emscripten's
-   -sJSPI), a function whose frame would go below [camlc_segment_limit],
+   workers): tens of thousands of nested calls. When the host can run a
+   function on a new stack (JSPI for instance, see [camlc_host_new_stacks]),
+   a function whose frame would go below [camlc_segment_limit],
    about [CAMLC_SEGMENT_WORDS] words of shadow stack below the start of the
    current segment, is called again on a new stack of the engine: the
    generated code puts the function in [camlc_seg_fn] and its arguments in
@@ -135,6 +136,16 @@ extern _Thread_local struct camlc_thread camlc_thread;
    the result the thunk left in [camlc_seg[0]]. [words] is the size of the
    frame of the function. */
 void camlc_segment(void (*thunk)(void), mlsize_t words);
+
+/* Provided by the host, which may define them (camlc_runtime.c has weak
+   definitions: no new stacks). [camlc_host_new_stacks] returns nonzero if
+   the host can switch stacks; it is called once, at startup.
+   [camlc_host_on_new_stack] then calls [f] on a new stack of the engine,
+   and returns once [f] has returned. With emscripten's JSPI (-sJSPI), it
+   can suspend the current context, then call [f] from a new one
+   (WebAssembly.promising) in a microtask. */
+int camlc_host_new_stacks(void);
+void camlc_host_on_new_stack(void (*f)(void));
 
 /* The toplevel values stored in globals (roots of the GC), and the blocks
    of static data (from their header), of a program or a plugin: tables

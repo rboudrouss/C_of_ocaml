@@ -296,71 +296,36 @@ static void camlc_set_segment_limit(value *start)
   camlc_set_segment_limit_words(start, CAMLC_SEGMENT_WORDS);
 }
 
-#ifdef __EMSCRIPTEN__
+/* The host cannot switch stacks unless it says so (see camlc.h): weak
+   definitions, which those of the host replace */
+__attribute__((weak)) int camlc_host_new_stacks(void) { return 0; }
 
-/* Emscripten's -sJSPI: the main function runs in a context which can
-   suspend. [camlc_js_segment] suspends it, until [camlc_segment_run]
-   has called the thunk on a new stack, in a new context. The call is
-   delayed to a microtask, so that the JS function returns and its frame
-   does not stay on the stack of the engine. */
-EM_JS(int, camlc_js_segments, (void), {
-  return typeof Asyncify == 'object' &&
-    typeof Asyncify.makeAsyncFunction == 'function' &&
-    typeof WebAssembly.promising == 'function';
-});
-
-EM_ASYNC_JS(void, camlc_js_segment, (void), {
-  await 0;
-  if (!Module.camlcSegmentRun)
-    Module.camlcSegmentRun =
-      WebAssembly.promising(wasmExports['camlc_segment_run']);
-  await Module.camlcSegmentRun();
-});
-
-static _Thread_local void (*camlc_segment_thunk)(void);
-
-EMSCRIPTEN_KEEPALIVE void camlc_segment_run(void)
+__attribute__((weak)) void camlc_host_on_new_stack(void (*f)(void))
 {
-  camlc_segment_thunk();
+  f();
 }
 
 void camlc_segment(void (*thunk)(void), mlsize_t words)
 {
   value *limit = camlc_segment_limit;
   if (!camlc_segments) {
-    /* Without JSPI, with --cps-stack, for a function without CPS
-       version: it goes on on the current stack */
+    /* With --cps-stack, for a function without CPS version: it goes on
+       on the current stack */
     camlc_segment_limit = camlc_stack_limit;
     thunk();
   } else {
     camlc_set_segment_limit(camlc_sp - words);
-    camlc_segment_thunk = thunk;
-    camlc_js_segment();
+    camlc_host_on_new_stack(thunk);
   }
   camlc_segment_limit = limit;
 }
 
 static void camlc_init_segments(void)
 {
-  camlc_segments = camlc_js_segments();
+  camlc_segments = camlc_host_new_stacks();
   if (camlc_segments || camlc_cps_stack_enabled)
     camlc_set_segment_limit(camlc_sp);
 }
-
-#else
-
-void camlc_segment(void (*thunk)(void), mlsize_t words)
-{
-  (void)words;
-  thunk();
-}
-
-static void camlc_init_segments(void)
-{
-  if (camlc_cps_stack_enabled) camlc_set_segment_limit(camlc_sp);
-}
-
-#endif
 
 static void camlc_init_stack(void)
 {
