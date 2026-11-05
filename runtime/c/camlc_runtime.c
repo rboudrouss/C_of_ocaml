@@ -27,10 +27,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
-#ifdef __EMSCRIPTEN__
-#include <emscripten/threading.h>
-#include <emscripten/em_js.h>
-#endif
 #include "camlc.h"
 #include <caml/printexc.h>
 #include <caml/backtrace.h>
@@ -2598,16 +2594,6 @@ int main(int argc, char **argv)
 
 #if OCAML_VERSION_MAJOR >= 5
   caml_parse_ocamlrunparam();
-#if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 3
-#ifdef __EMSCRIPTEN__
-  /* Without threads, a single domain: the runtime reserves a minor heap
-     for each possible domain, which emscripten's mmap allocates and
-     clears */
-  if (!emscripten_has_threading_support()
-      && caml_params->max_domains == Max_domains_def)
-    ((struct caml_params *)caml_params)->max_domains = 1;
-#endif
-#endif
   if (!caml_startup_aux(0)) return 0;
   caml_init_codefrag();
   caml_init_locale();
