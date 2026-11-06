@@ -118,6 +118,10 @@ struct camlc_thread {
   /* The threads of the same domain, scanned by the GC */
   int domain;
   struct camlc_thread *next, **prevp;
+  /* An exception raised by an asynchronous action which an allocation
+     ran (see [camlc_alloc_small_gc]), raised at the next poll or call of a
+     C function which may raise; [Val_unit] if none */
+  value async_exn;
 };
 extern _Thread_local struct camlc_thread camlc_thread;
 
@@ -597,7 +601,8 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize);
 #endif
 
 #if OCAML_VERSION_MAJOR < 5
-/* After the slow path of an allocation */
+/* Before and after the slow path of an allocation */
+void camlc_alloc_setup(mlsize_t wosize);
 void camlc_reset_young_limit(void);
 #endif
 
@@ -621,7 +626,7 @@ static inline value camlc_alloc_small(mlsize_t wosize, tag_t tag)
   Hd_hp(dom_st->young_ptr) = Make_header(wosize, tag, 0);
   v = Val_hp(dom_st->young_ptr);
 #else
-#define Setup_for_gc
+#define Setup_for_gc camlc_alloc_setup(wosize)
 #define Restore_after_gc camlc_reset_young_limit()
   Alloc_small(v, wosize, tag);
 #undef Setup_for_gc

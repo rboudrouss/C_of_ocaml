@@ -163,6 +163,7 @@ static void camlc_thread_start(mlsize_t words)
   t->cps_depth = 0;
   t->bounce_n = 0;
   t->fiber = Val_unit;
+  t->async_exn = Val_unit;
   t->bounce_f = Val_unit;
 #if OCAML_VERSION_MAJOR >= 5
   t->domain = Caml_state->id;
@@ -201,6 +202,7 @@ static void camlc_scan_roots(scanning_action action,
       if (Is_block(v)) action(fdata, v, p);
     }
     if (Is_block(t->fiber)) action(fdata, t->fiber, &t->fiber);
+    if (Is_block(t->async_exn)) action(fdata, t->async_exn, &t->async_exn);
     if (Is_block(t->bounce_f)) action(fdata, t->bounce_f, &t->bounce_f);
     for (int i = 0; i < t->bounce_n; i++) {
       value v = t->bounce_args[i];
@@ -240,6 +242,7 @@ static void camlc_scan_roots(scanning_action action)
     }
     /* The CPS code of --cps-stack */
     if (Is_block(t->fiber)) action(t->fiber, &t->fiber);
+    if (Is_block(t->async_exn)) action(t->async_exn, &t->async_exn);
     if (Is_block(t->bounce_f)) action(t->bounce_f, &t->bounce_f);
     for (int i = 0; i < t->bounce_n; i++) {
       value v = t->bounce_args[i];
@@ -339,14 +342,28 @@ static void camlc_init_stack(void)
 /****************************************************************/
 /* Asynchronous actions (see camlc.h) */
 
+/* The exception of an asynchronous action run by an allocation */
+static value camlc_take_async_exn(void)
+{
+  value exn = camlc_thread.async_exn;
+  camlc_thread.async_exn = Val_unit;
+  return Make_exception_result(exn);
+}
+
 value camlc_poll(void)
 {
 #if OCAML_VERSION_MAJOR >= 5
   caml_result r = caml_process_pending_actions_res();
   if (caml_result_is_exception(r)) return Make_exception_result(r.data);
+  if (CAMLC_UNLIKELY(camlc_thread.async_exn != Val_unit))
+    return camlc_take_async_exn();
   return Val_unit;
 #else
-  return caml_process_pending_actions_exn();
+  value r = caml_process_pending_actions_exn();
+  if (Is_exception_result(r)) return r;
+  if (CAMLC_UNLIKELY(camlc_thread.async_exn != Val_unit))
+    return camlc_take_async_exn();
+  return Val_unit;
 #endif
 }
 
@@ -360,8 +377,32 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
     dom_st->young_ptr -= Whsize_wosize(wosize);
     if (!Caml_check_gc_interrupt(dom_st)) return;
   }
+  /* The asynchronous actions (the callbacks of Gc.Memprof, finalisers,
+     signal handlers...), the allocation undone, as for the allocations
+     of OCaml code: the live values are in the frames. The generated code
+     does not expect an exception from an allocation: one they raise is
+     kept, raised at the next poll or call of a C function which may
+     raise. When Gc.Memprof samples this allocation, the actions are run at
+     the next one: the callbacks would draw the next sample again, from
+     before this allocation, which would then seldom be sampled */
+  int later = 0;
+  if (camlc_thread.async_exn == Val_unit && caml_check_pending_actions()) {
+    if (dom_st->young_ptr < dom_st->memprof_young_trigger)
+      later = 1;
+    else {
+      caml_result r;
+      dom_st->young_ptr += Whsize_wosize(wosize);
+      r = caml_process_pending_actions_res();
+      dom_st->young_ptr -= Whsize_wosize(wosize);
+      if (caml_result_is_exception(r)) camlc_thread.async_exn = r.data;
+    }
+  }
   caml_alloc_small_dispatch(dom_st, wosize, CAML_DO_TRACK | CAML_FROM_C, 1,
                             NULL);
+  /* young_limit at its maximum (which the dispatch resets): the next
+     allocation or poll runs the actions or raises the exception */
+  if (CAMLC_UNLIKELY(later || camlc_thread.async_exn != Val_unit))
+    caml_interrupt_self();
 }
 #else
 /* [caml_alloc_small_dispatch] asks the C code to poll for the
@@ -369,8 +410,35 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
    until then: all the allocations of the generated code would take the
    slow path. The limit is reset, the actions staying pending, unless a
    signal is (a switch to another thread, at the next poll). */
+/* The actions to run at the next allocation (see [camlc_alloc_setup]) */
+static _Thread_local int camlc_actions_later;
+
+/* Before the slow path of an allocation, done: the asynchronous actions,
+   as with OCaml 5 (see [camlc_alloc_small_gc]) */
+void camlc_alloc_setup(mlsize_t wosize)
+{
+  value r;
+  if (camlc_thread.async_exn != Val_unit || !caml_check_pending_actions())
+    return;
+  if (Caml_state->young_ptr < caml_memprof_young_trigger) {
+    camlc_actions_later = 1;
+    return;
+  }
+  Caml_state->young_ptr += Whsize_wosize(wosize);
+  r = caml_process_pending_actions_exn();
+  Caml_state->young_ptr -= Whsize_wosize(wosize);
+  if (Is_exception_result(r)) camlc_thread.async_exn = Extract_exception(r);
+}
+
 void camlc_reset_young_limit(void)
 {
+  /* The limit at the end of the minor heap: the next allocation or poll
+     runs the actions or raises the exception */
+  if (camlc_actions_later || camlc_thread.async_exn != Val_unit) {
+    camlc_actions_later = 0;
+    caml_set_action_pending();
+    return;
+  }
   for (int i = 0; i < NSIG; i++)
     if (caml_pending_signals[i]) return;
   Caml_state->young_limit = caml_memprof_young_trigger < Caml_state->young_trigger
@@ -386,6 +454,8 @@ void camlc_reset_young_limit(void)
    exception result */
 #if OCAML_VERSION_MAJOR >= 5
 #define CAMLC_CCALL(call)                                               \
+  if (CAMLC_UNLIKELY(camlc_thread.async_exn != Val_unit))               \
+    return camlc_take_async_exn();                                      \
   struct longjmp_buffer buf;                                            \
   volatile value exn = Val_unit;                                        \
   struct caml_exception_context ctx;                                    \
@@ -408,6 +478,8 @@ void camlc_reset_young_limit(void)
 /* The handler restores the local roots, and finds the exception in
    [Caml_state->exn_bucket] */
 #define CAMLC_CCALL(call)                                               \
+  if (CAMLC_UNLIKELY(camlc_thread.async_exn != Val_unit))               \
+    return camlc_take_async_exn();                                      \
   struct longjmp_buffer buf;                                            \
   struct longjmp_buffer *saved = Caml_state->external_raise;            \
   struct caml__roots_block *volatile roots = Caml_state->local_roots;   \

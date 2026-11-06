@@ -167,7 +167,11 @@ type output =
             variables *)
   ; split : bool  (** The code is split into several files *)
   ; polling : bool
-        (** The program uses threads or domains: the code polls (see [polls]) *)
+        (** The program uses threads or domains, or [Gc.Memprof]: the code
+            polls (see [polls]) *)
+  ; memprof : bool
+        (** The program uses [Gc.Memprof]: an allocation does not poll (see
+            [polls]) *)
   ; mutable raising : Var.Set.t  (** The functions which may raise *)
   ; mutable collecting : Var.Set.t
         (** The functions which may trigger a garbage collection and return *)
@@ -2319,16 +2323,20 @@ and handler_live ctx live_in pc =
    part in the collections of the other domains, even when it does not
    allocate. A function polls at the start of its loops, and at its start
    if it makes a tail call, which may loop as well. With OCaml 5, an
-   allocation of the minor heap polls already (but for the signal handlers
-   and the finalisers): there is no poll at the start of a loop or of a
-   function whose first block allocates. Returns whether it polls at its
-   start, and the start of its loops. *)
+   allocation of the minor heap polls already, but for the exceptions of
+   the asynchronous actions it runs, raised at the next poll (see
+   [camlc_alloc_small_gc] in camlc_runtime.c): there is no poll at the start
+   of a loop or of a function whose first block allocates, unless the
+   program uses [Gc.Memprof], whose callbacks may raise to interrupt a
+   computation. Returns whether it polls at its start, and the start of its
+   loops. *)
 let polls out blocks pc =
   if not out.polling
   then false, Addr.Set.empty
   else
     let allocates pc =
       Ocaml_version.compare Ocaml_version.current [ 5; 0 ] >= 0
+      && (not out.memprof)
       && List.exists (Addr.Map.find pc blocks).body ~f:(fun i ->
           match i with
           | Let (_, Block (_, a, _, _, _)) ->
@@ -2354,6 +2362,20 @@ let polls out blocks pc =
     in
     visit pc;
     !tail_call && not (allocates pc), !headers
+
+(* The program samples its allocations ([Gc.Memprof]): the exceptions of
+   the callbacks, which an allocation runs, are raised at the polls (see
+   [camlc_alloc_small_gc] in camlc_runtime.c) *)
+let uses_memprof (p : program) =
+  Addr.Map.fold
+    (fun _ block acc ->
+      acc
+      || List.exists block.body ~f:(fun i ->
+          match i with
+          | Let (_, Prim (Extern ("caml_memprof_start", _), _)) -> true
+          | _ -> false))
+    p.blocks
+    false
 
 let uses_threads (p : program) =
   Addr.Map.fold
@@ -3643,7 +3665,8 @@ let f
     ; globals
     ; statics = Var.Hashtbl.create 1024
     ; split = Option.is_some part_size
-    ; polling = uses_threads p
+    ; polling = uses_threads p || uses_memprof p
+    ; memprof = uses_memprof p
     ; raising = Var.Set.empty
     ; collecting = Var.Set.empty
     ; collecting_on_raise = Var.Set.empty

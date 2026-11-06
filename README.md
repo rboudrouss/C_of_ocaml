@@ -378,8 +378,14 @@ poll compares the allocation pointer with its limit, and runs the pending
 actions (the stop-the-world collections of the other domains, a switch to
 another thread, signal handlers, finalisers). The values held in C variables
 are saved on the shadow stack around the actions, which may raise. The
-allocations of the generated code also switch to another thread when the
-tick thread asks for it. Without threads nor domains, the code does not poll.
+allocations of the generated code also run the pending actions in their
+slow path (the callbacks of `Gc.Memprof` too, at the allocation after the
+one sampled): an exception they raise is kept, and raised at the next poll
+or call of a C function which may raise. Without threads, domains nor
+`Gc.Memprof`, the code does not poll. With OCaml 5, the loops whose first
+block allocates do not poll either, but in the programs which use
+`Gc.Memprof`, whose callbacks may raise to interrupt a computation
+(memprof-limits).
 
 **Backtraces** (with debug events, or `--debug-info`). When backtraces are active, a raise and
 every call an exception passes through record a static description of their
@@ -430,8 +436,11 @@ for integers, the runtime marshals all values.
   when the program ends. JSPI is in Chrome and Edge since version 137, is
   announced for Firefox 153, needs `--experimental-wasm-jspi` with node 24,
   and is not in Safari.
-- Signals and finalisers only run when the runtime polls on its own, and at
-  the polls of the programs which use threads or domains.
+- The exceptions of the signal handlers, finalisers and callbacks of
+  `Gc.Memprof` are raised at the next poll or call of a C function which may
+  raise, not at the allocation which ran them.
+- An allocation whose result is not used is removed, even under
+  `Sys.opaque_identity`, which the bytecode does not keep.
 
 ## Testing
 
@@ -450,7 +459,8 @@ segmented stack, `DOMAINS=1` a plugin starting a domain (linked with
 tools/c_of_ocaml_tests.sh` runs the tests with `--cps-stack`: the same pass,
 and `misc/sieve` too.
 `tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
-`Marshal.Closures`. `tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml`
+`Marshal.Closures`. `tools/c_of_ocaml_tests.sh compiler/tests-c/gc/*.ml` tests `Gc.Memprof`
+and `Gc.create_alarm`. `tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml`
 tests tail calls between functions of different signatures. `dune build @compiler/tests-c/runtest` checks the
 primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
