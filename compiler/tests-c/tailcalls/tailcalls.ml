@@ -54,9 +54,29 @@ let u a b c = if a = 0 then h b + c else !k (a - 1) (h b + 1)
 
 let () = k := fun a b -> u a b 0
 
+(* Applications of an unknown function to more arguments than its arity
+   (camlc_applyN_slow), whose last one is a tail call *)
+let over = ref (fun _ x -> x)
+
+let () =
+  over :=
+    fun n ->
+      if n = 0
+      then fun x -> x
+      else
+        let m = Sys.opaque_identity (n - 1) in
+        fun x -> !over m (x + 1)
+
 (* Unboxed floats *)
 let rec x a (s : float) = if a = 0 then s else y (a - 1) (s +. 1.) (float_of_int (h a))
 
 and y a s z = if a = 0 then s else x (a - 1) (s +. Float.min z 1.)
 
-let () = Printf.printf "%d %d %d %.0f\n" (f n 0 0 0 0) (g n 0 0 0) (u n 0 0) (x n 0.)
+let () =
+  Printf.printf
+    "%d %d %d %.0f %d\n"
+    (f n 0 0 0 0)
+    (g n 0 0 0)
+    (u n 0 0)
+    (x n 0.)
+    (!over n 0)

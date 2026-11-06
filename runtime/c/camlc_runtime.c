@@ -782,16 +782,27 @@ value camlc_make_pap(value f, int n, value *args)
   return r;
 }
 
-value camlc_applyv(value f, int n, value *args)
+int camlc_apply_prefix(value *fp, int n)
 {
-  value *fp = camlc_sp - (n + 1);
+  int i = 0;
+  while (1) {
+    int arity = Arity_closinfo(Closinfo_val(fp[0]));
+    value r;
+    if (arity >= n - i) return i;
+    r = camlc_call_exact(fp[0], arity, fp + 1 + i);
+    if (Is_exception_result(r)) {
+      fp[0] = Extract_exception(r);
+      return -1;
+    }
+    fp[0] = r;
+    i += arity;
+  }
+}
+
+static value camlc_apply_frame(value *fp, int n)
+{
   value r;
   int i = 0;
-  if (Arity_closinfo(Closinfo_val(f)) > n) return camlc_make_pap(f, n, args);
-  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
-  camlc_sp = fp;
-  fp[0] = f;
-  for (int j = 0; j < n; j++) fp[1 + j] = args[j];
   while (1) {
     int arity = Arity_closinfo(Closinfo_val(fp[0]));
     int remaining = n - i;
@@ -808,6 +819,19 @@ value camlc_applyv(value f, int n, value *args)
     fp[0] = r;
     i += arity;
   }
+  return r;
+}
+
+value camlc_applyv(value f, int n, value *args)
+{
+  value *fp = camlc_sp - (n + 1);
+  value r;
+  if (Arity_closinfo(Closinfo_val(f)) > n) return camlc_make_pap(f, n, args);
+  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();
+  camlc_sp = fp;
+  fp[0] = f;
+  for (int j = 0; j < n; j++) fp[1 + j] = args[j];
+  r = camlc_apply_frame(fp, n);
   camlc_sp = fp + n + 1;
   return r;
 }
@@ -1210,11 +1234,12 @@ value camlc_resume(value f, value arg, value stack, value last)
   camlc_fiber = r;
   r = camlc_resume_stack(fp[2], fp[3], Static_closure(camlc_identity_closure));
   if (!Is_exception_result(r)) {
-    value a[2];
-    a[0] = fp[1];
-    a[1] = r;
+    /* The argument, then the continuation, on the shadow stack (fp[2] is
+       free): an array on emscripten's C stack would stay there during the
+       whole computation */
+    fp[2] = r;
     camlc_cps_depth = CAMLC_CPS_DEPTH;
-    r = camlc_cps_run(camlc_applyv_cps(fp[0], 1, a));
+    r = camlc_cps_run(camlc_applyv_cps(fp[0], 1, fp + 1));
   }
   camlc_fiber = fp[4];
   camlc_cps_depth = depth;

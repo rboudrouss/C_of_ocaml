@@ -3884,21 +3884,27 @@ let f
         | 'k' -> Printf.bprintf b "extern value %s[];\n" name
         | 'c' ->
             (* camlc_c_N: applies the CPS version of a function of arity N
-               (see [camlc_cps_stack]). Not inlined: the array of the
-               arguments would take room on emscripten's stack in each frame
-               of the function *)
+               (see [camlc_cps_stack]). Not inlined, its arguments in an
+               array on the shadow stack: an array in a C variable would
+               take room on emscripten's stack, which the segmented stack
+               does not measure nor switch *)
             let n =
               int_of_string (String.sub name ~pos:8 ~len:(String.length name - 8))
             in
             let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
             Printf.bprintf
               b
-              "static __attribute__((noinline)) value %s(value f, %s) { value args[%d] = \
-               { %s }; return camlc_cps_stack(f, %d, args); }\n"
+              "static __attribute__((noinline)) value %s(value f, %s) { value *args = \
+               camlc_sp - %d, r; if (CAMLC_UNLIKELY(args < camlc_stack_limit)) return \
+               camlc_stack_overflow(); camlc_sp = args; %s r = camlc_cps_stack(f, %d, \
+               args); camlc_sp = args + %d; return r; }\n"
               name
               (String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)))
               n
-              (String.concat ~sep:", " args)
+              (String.concat
+                 ~sep:" "
+                 (List.mapi args ~f:(fun i a -> Printf.sprintf "args[%d] = %s;" i a)))
+              n
               n
         | 's' ->
             (* camlc_s_R_ARGS: calls a function of result R and arguments
@@ -4259,10 +4265,17 @@ let f
     done;
     if program
     then (
-      (* Exact calls with the arguments in an array *)
+      (* Exact calls with the arguments in an array. The error is in a
+         function of its own: the arguments of a variadic call are on the C
+         stack of the linear memory, which would give [camlc_call_exact] a
+         frame there, during the call *)
       Printf.bprintf
         b
-        "value camlc_call_exact(value f, int n, value *args) {\n  switch (n) {\n";
+        "static __attribute__((noinline, noreturn)) void camlc_arity_error(int n) {\n\
+        \  caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n\
+         }\n\n\
+         value camlc_call_exact(value f, int n, value *args) {\n\
+        \  switch (n) {\n";
       for n = 1 to out.max_arity do
         Printf.bprintf
           b
@@ -4273,9 +4286,7 @@ let f
              ~sep:", "
              (List.init ~len:n ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
       done;
-      Printf.bprintf
-        b
-        "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n";
+      Printf.bprintf b "  default: camlc_arity_error(n);\n  }\n}\n\n";
       (* Same, for the CPS versions, the last argument being the continuation *)
       Printf.bprintf
         b
@@ -4292,9 +4303,7 @@ let f
                ~sep:", "
                (List.init ~len:(n + 1) ~f:(fun i -> Printf.sprintf "args[%d]" i) @ [ "f" ]))
         done;
-      Printf.bprintf
-        b
-        "  default: caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n  }\n}\n\n")
+      Printf.bprintf b "  default: camlc_arity_error(n);\n  }\n}\n\n")
   in
   (* The application functions, in each part which may use them *)
   let helpers b =
@@ -4323,8 +4332,13 @@ let f
            }\n\n\
            static __attribute__((noinline)) value camlc_apply_cps%d_slow(value f, %s, \
            value k) {\n\
-          \  value args[%d] = { %s, k };\n\
-          \  return camlc_applyv_cps(f, %d, args);\n\
+          \  value *args = camlc_sp - %d, r;\n\
+          \  if (CAMLC_UNLIKELY(args < camlc_stack_limit)) return camlc_stack_overflow();\n\
+          \  camlc_sp = args;\n\
+          \  %s args[%d] = k;\n\
+          \  r = camlc_applyv_cps(f, %d, args);\n\
+          \  camlc_sp = args + %d;\n\
+          \  return r;\n\
            }\n\n\
            static inline value camlc_apply_cps%d(value f, %s, value k) {\n\
           \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
@@ -4344,8 +4358,12 @@ let f
           m
           params
           m
-          (String.concat ~sep:", " args)
+          (String.concat
+             ~sep:" "
+             (List.mapi args ~f:(fun i a -> Printf.sprintf "args[%d] = %s;" i a)))
           n
+          n
+          m
           m
           params
           n
@@ -4414,16 +4432,52 @@ let f
         let args = List.init ~len:n ~f:(fun i -> Printf.sprintf "a%d" i) in
         let params = String.concat ~sep:", " (List.map args ~f:(fun a -> "value " ^ a)) in
         let args = String.concat ~sep:", " args in
-        (* The array of the arguments, whose address is taken, is in a
-           function of its own: inlined, it would give the caller a frame on
-           the C stack of the linear memory, which the segmented stack does
-           not measure nor switch *)
+        (* The application to more arguments than the arity: the function
+           and its arguments are on the shadow stack (see
+           [camlc_apply_prefix]), in a function of its own: in an array of C,
+           or inlined, they would take room on the C stack of the linear
+           memory, during the whole call, which the segmented stack does not
+           measure nor switch. The last application is a tail call, as in
+           OCaml, through [camlc_lastN_K], of the signature of
+           [camlc_applyN_slow]: a loop through such applications runs in
+           constant space *)
+        for k = 1 to n - 1 do
+          Printf.bprintf
+            b
+            "static __attribute__((noinline)) value camlc_last%d_%d(value f, %s) {\n\
+            \  return ((%s)Field(f, 0))(%s, f);\n\
+             }\n\n"
+            n
+            k
+            params
+            (fun_type k)
+            (String.concat
+               ~sep:", "
+               (List.init ~len:k ~f:(fun i -> Printf.sprintf "a%d" i)))
+        done;
         Printf.bprintf
           b
           "static __attribute__((noinline)) value camlc_apply%d_slow(value f, %s) {\n\
-          \  value args[%d] = { %s };\n\
-          \  if (Arity_closinfo(Closinfo_val(f)) > %d) return %s;\n\
-          \  return camlc_applyv(f, %d, args);\n\
+          \  value *fp, r;\n\
+          \  int i;\n\
+           %s  fp = camlc_sp - %d;\n\
+          \  if (CAMLC_UNLIKELY(fp < camlc_stack_limit)) return camlc_stack_overflow();\n\
+          \  camlc_sp = fp;\n\
+          \  fp[0] = f; %s\n\
+           %s  i = camlc_apply_prefix(fp, %d);\n\
+          \  if (CAMLC_UNLIKELY(i < 0)) {\n\
+          \    camlc_sp = fp + %d;\n\
+          \    return Make_exception_result(fp[0]);\n\
+          \  }\n\
+          \  if (Arity_closinfo(Closinfo_val(fp[0])) > %d - i) {\n\
+          \    r = camlc_make_pap(fp[0], %d - i, fp + 1 + i);\n\
+          \    camlc_sp = fp + %d;\n\
+          \    return r;\n\
+          \  }\n\
+          \  camlc_sp = fp + %d;\n\
+          \  switch (%d - i) {\n\
+           %s  default: __builtin_trap();\n\
+          \  }\n\
            }\n\n\
            static inline value camlc_apply%d(value f, %s) {\n\
           \  if (Arity_closinfo(Closinfo_val(f)) == %d)\n\
@@ -4432,13 +4486,52 @@ let f
            }\n\n"
           n
           params
-          n
-          args
-          n
           (if n <= partial_max
-           then Printf.sprintf "camlc_partial%d(f, %s)" n args
-           else Printf.sprintf "camlc_make_pap(f, %d, args)" n)
+           then
+             Printf.sprintf
+               "  if (Arity_closinfo(Closinfo_val(f)) > %d) return camlc_partial%d(f, %s);\n"
+               n
+               n
+               args
+           else "")
+          (n + 1)
+          (String.concat
+             ~sep:" "
+             (List.init ~len:n ~f:(fun i -> Printf.sprintf "fp[%d] = a%d;" (i + 1) i)))
+          (if n <= partial_max
+           then ""
+           else
+             Printf.sprintf
+               "  if (Arity_closinfo(Closinfo_val(f)) > %d) {\n\
+               \    r = camlc_make_pap(f, %d, fp + 1);\n\
+               \    camlc_sp = fp + %d;\n\
+               \    return r;\n\
+               \  }\n"
+               n
+               n
+               (n + 1))
           n
+          (n + 1)
+          n
+          n
+          (n + 1)
+          (n + 1)
+          n
+          (String.concat
+             ~sep:""
+             (List.init ~len:(n - 1) ~f:(fun j ->
+                  let k = j + 1 in
+                  Printf.sprintf
+                    "  case %d: CAMLC_MUSTTAIL return camlc_last%d_%d(fp[0], %s);\n"
+                    k
+                    n
+                    k
+                    (String.concat
+                       ~sep:", "
+                       (List.init ~len:n ~f:(fun l ->
+                            if l < k
+                            then Printf.sprintf "fp[%d + i]" (l + 1)
+                            else "Val_unit"))))))
           n
           params
           n

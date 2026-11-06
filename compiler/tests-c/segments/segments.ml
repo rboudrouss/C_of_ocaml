@@ -62,6 +62,20 @@ and odd n = if n = 0 then [] else -n :: even (n - 1)
 let rec args a b c d e f g h n =
   if n = 0 then a + b + c + d + e + f + g + h else 1 + args b c d e f g h a (n - 1)
 
+(* Applications of an unknown function to more arguments than its arity:
+   through camlc_applyN_slow and camlc_apply_frame, without frames on the C
+   stack of the linear memory *)
+let over = ref (fun _ x -> x)
+
+let () =
+  over :=
+    fun n ->
+      if n = 0
+      then fun x -> x
+      else
+        let m = Sys.opaque_identity (n - 1) in
+        fun x -> 1 + !over m x
+
 (* Deep, then shallow again, many times: the segments are released *)
 let rec up_down k = if k = 0 then 0 else count 10_000 + up_down (k - 1)
 
@@ -80,6 +94,7 @@ let () =
   Printf.printf "sum %.0f\n" (sum (List.map float l));
   Printf.printf "even %d\n" (List.length (even n));
   Printf.printf "args %d\n" (args 1 2 3 4 5 6 7 8 n);
+  Printf.printf "over %d\n" (!over n 0);
   Printf.printf "up_down %d\n" (up_down 1000);
   Gc.compact ();
   (* Exiting at the bottom of a deep recursion *)

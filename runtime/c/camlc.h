@@ -210,6 +210,14 @@ CAMLnoreturn_start void camlc_fatal_stack_overflow(void) CAMLnoreturn_end;
 
 /* Generic application: apply [f] to the [n] arguments [args] */
 value camlc_applyv(value f, int n, value *args);
+/* Applies [fp[0]] to the first of the [n] arguments [fp[1 .. n]] (a frame
+   of the shadow stack, which the caller allocates and releases), then the
+   result to the next ones, while the arity of the function is lower than
+   the number of the arguments left. Returns the number of the arguments
+   applied, [fp[0]] then holding the function to apply to the others, or -1
+   if an application raised, [fp[0]] then holding the exception. The caller
+   makes the last application, in tail position, as OCaml does */
+int camlc_apply_prefix(value *fp, int n);
 
 /* Defined by the generated code: call [f] of arity [n] with [args] */
 value camlc_call_exact(value f, int n, value *args);

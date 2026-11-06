@@ -228,7 +228,10 @@ arguments in `camlc_seg` and calls it in tail position: clang would
 otherwise make it a plain call, as soon as the caller has another return (an
 exception), and mutually recursive functions of different signatures would
 grow the stack of the engine. The other calls end, and clang may inline
-them.
+them. An application of a function to more arguments than its arity
+applies it, then its results, to the first ones (`camlc_apply_prefix`), and
+makes the last application in tail position (`camlc_lastN_K`), as OCaml
+does.
 
 **GC roots.** Variables that are live across a point where the GC may run (an
 allocation or a call) are stored in the function's frame on a shadow stack,
@@ -309,11 +312,12 @@ which do not run in such a context). Without JSPI
 is that of the shadow stack. The C stack of emscripten (`__stack_pointer`, in
 the linear memory, `-sSTACK_SIZE`) does not change with the stack of the
 engine. The generated functions take the address of none of their variables,
-so they have no frame there: the slow paths of the applications, which put
-the arguments in an array, are functions of their own (`camlc_applyN_slow`).
-A recursion makes it grow only through the applications of a function to
-more arguments than its arity, and through C functions. Give it 1 MB at least
-(ocaml-emcc gives 8 MB).
+and make no variadic call, so they have no frame there: the slow paths of the
+applications put the function and its arguments on the shadow stack
+(`camlc_applyN_slow`, `camlc_apply_frame`). A recursion makes it grow only
+through C functions (callbacks). Give it 1 MB at least (ocaml-emcc gives
+8 MB). An overflow of it is silent unless the program is linked with
+`-sSTACK_OVERFLOW_CHECK`.
 
 **CPS stack** (`c_of_ocaml --cps-stack`). Without JSPI, deep recursions can go
 on in continuation-passing style, on the heap. The functions which may recurse

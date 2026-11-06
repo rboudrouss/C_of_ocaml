@@ -76,8 +76,11 @@ build() {
   ocamlfind ocamlc "$1.ml" -o "$1.bc"
   "$C_OF_OCAML" $COOC_FLAGS "$1.bc" -o "$1.c"
   emcc $CCFLAGS -Wno-everything -c "$1.c" -o "$1.o"
+  # The C stack of emscripten (in the linear memory): its default size,
+  # 64 KB, checked, as the deep recursions must not grow it
   emcc $CFLAGS "$1.o" camlc_runtime.o $HOST "$SYSROOT/lib/libcamlrun.a" -lm \
-    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o "$1.js"
+    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=64KB \
+    -sSTACK_OVERFLOW_CHECK=2 $LDFLAGS -o "$1.js"
 }
 # check NAME CODE: its output and exit code are $TEST/NAME.expected and CODE
 check() {
