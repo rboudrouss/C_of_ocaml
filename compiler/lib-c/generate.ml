@@ -1290,6 +1290,7 @@ type fctx =
   ; blocks : block Addr.Map.t
   ; closures : Closure_conversion.closure Var.Map.t
   ; env_var : Var.t  (** Stands for the closure of the function *)
+  ; fn : Var.t option  (** The function, [None] for the toplevel code *)
   ; arity : repr list option
         (** The representation of the parameters of the function, not the toplevel *)
   ; static_env : bool  (** The closure is static data *)
@@ -1753,9 +1754,35 @@ let boxing_prelude ctx traps x ~f ~args ~exact =
     line ctx "%s" (reload ctx (f :: args)));
   k
 
+(* Whether a call of [fn] may be recursive: an unknown call, or a call of a
+   function of its strongly connected component *)
+let recursive_call out global_flow_info closures ~fn (x, f, exact) =
+  match resolve_callee global_flow_info closures x ~f ~exact with
+  | Known g -> (
+      match fn with
+      | Some fn -> (
+          match
+            Var.Hashtbl.find_opt out.components fn, Var.Hashtbl.find_opt out.components g
+          with
+          | Some c, Some c' -> c = c'
+          | _ -> false)
+      | None -> false)
+  | Known_direct _ | Unknown -> true
+
 (* An application whose result is returned: the frame is released before
    the call, which is a tail call when the callee has the signature of the
-   function (as required by [musttail]).
+   function (as required by [musttail]). Otherwise, it would be a tail call
+   only if the function had no other return: clang merges the returns, and
+   the backend of wasm does not split them again for the call. With
+   [CAMLC_TAIL_CALLS], the call then goes through a function of the
+   signature of the caller ([camlc_t_...], defined by [declare_symbols]),
+   called with [musttail], which finds the callee and its arguments in
+   [camlc_seg] and makes the call, its only return: a tail call as well.
+   Mutually recursive functions of different signatures then loop in
+   constant space, as in OCaml, rather than growing the stack of the
+   engine, out of reach of the frame checks (see [camlc_segment]). Only
+   for the calls which may be recursive (see [recursive_call]): the others
+   end, and the C compiler may inline them.
 
    A CPS call which may bounce, unless it is a tail call (with
    [CAMLC_TAIL_CALLS]), first decrements
@@ -1840,12 +1867,57 @@ let translate_tail_call ctx x ~f ~args ~exact =
         call
   | Known _ | Unknown ->
       let call = c_call callee (List.mapi args ~f:(fun i _ -> t i)) in
+      let through =
+        match ctx.arity with
+        | Some reprs'
+          when (not musttail)
+               && repr_equal ret ctx.ret
+               && recursive_call
+                    ctx.out
+                    ctx.global_flow_info
+                    ctx.closures
+                    ~fn:ctx.fn
+                    (x, f, exact) ->
+            let callee_reprs =
+              match kind with
+              | Known _ -> reprs @ [ Value ]
+              | Known_direct _ | Unknown -> List.map args ~f:(fun _ -> Value)
+            in
+            let caller_reprs = reprs' @ [ Value ] in
+            let letters l =
+              String.concat
+                ~sep:""
+                (List.map l ~f:(fun r -> String.make 1 (repr_letter r)))
+            in
+            let name =
+              Printf.sprintf
+                "camlc_t_%c_%s_%s"
+                (repr_letter ret)
+                (letters caller_reprs)
+                (letters callee_reprs)
+            in
+            String.Hashtbl.replace ctx.out.segment_thunks name ();
+            Printf.sprintf
+              " if (CAMLC_TAIL_CALLS) { camlc_seg_fn = (void *)%s; %s CAMLC_MUSTTAIL \
+               return %s(%s); }"
+              callee
+              (String.concat
+                 ~sep:" "
+                 (List.mapi callee_reprs ~f:(fun i r ->
+                      Printf.sprintf "camlc_seg[%d].%c = t%d;" i (repr_letter r) i)))
+              name
+              (String.concat
+                 ~sep:", "
+                 (List.map caller_reprs ~f:(fun r -> Printf.sprintf "(%s)0" (c_type r))))
+        | _ -> ""
+      in
       line
         ctx
-        "{ %s%s%s %sreturn %s; }"
+        "{ %s%s%s%s %sreturn %s; }"
         (String.concat ~sep:" " temps)
         pop
         bounce
+        through
         (if musttail then "CAMLC_MUSTTAIL " else "")
         (if repr_equal ret ctx.ret then call else unbox ctx.ret call)
 
@@ -2533,19 +2605,6 @@ let non_tail_calls blocks pc =
   in
   calls block.body
 
-let recursive_call out global_flow_info closures ~fn (x, f, exact) =
-  match resolve_callee global_flow_info closures x ~f ~exact with
-  | Known g -> (
-      match fn with
-      | Some fn -> (
-          match
-            Var.Hashtbl.find_opt out.components fn, Var.Hashtbl.find_opt out.components g
-          with
-          | Some c, Some c' -> c = c'
-          | _ -> false)
-      | None -> false)
-  | Known_direct _ | Unknown -> true
-
 (* The largest number of calls which may be recursive on a path through
    the function starting at [pc] (back edges ignored) *)
 let recursive_calls out global_flow_info closures blocks ~fn pc =
@@ -2585,6 +2644,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     ; blocks
     ; closures
     ; env_var = Var.fresh ()
+    ; fn = None
     ; arity = None
     ; static_env = true
     ; locations = Var.Hashtbl.create 1
@@ -2828,6 +2888,7 @@ let translate_function
     ; blocks
     ; closures
     ; env_var = Var.fresh ()
+    ; fn
     ; arity = None
     ; static_env
     ; locations = Var.Hashtbl.create 64
@@ -3796,7 +3857,7 @@ let f
             && Char.equal text.[!i + 7] '_'
             &&
             match text.[!i + 6] with
-            | 'l' | 'k' | 'g' | 's' | 'c' -> true
+            | 'l' | 'k' | 'g' | 's' | 'c' | 't' -> true
             | _ -> false
           then (
             let j = ref (!i + 8) in
@@ -3881,6 +3942,46 @@ let f
                       Printf.sprintf "camlc_seg[%d].%c = a%d;" (i + 1) c i)))
               name
               ret
+        | 't' ->
+            (* camlc_t_R_CALLER_CALLEE: a function of the signature of a
+               caller (result R and arguments CALLER, see [repr_letter])
+               which calls [camlc_seg_fn] with arguments CALLEE found in
+               [camlc_seg] (see [translate_tail_call]) *)
+            let c_type c =
+              match c with
+              | 'v' -> "value"
+              | 'd' -> "double"
+              | 'l' -> "int64_t"
+              | 'i' -> "int32_t"
+              | _ -> "intnat"
+            in
+            let ret = name.[8] in
+            let caller, callee =
+              match
+                String.split_on_char
+                  ~sep:'_'
+                  (String.sub name ~pos:10 ~len:(String.length name - 10))
+              with
+              | [ a; b ] -> a, b
+              | _ -> assert false
+            in
+            let chars s = List.init ~len:(String.length s) ~f:(fun i -> s.[i]) in
+            Printf.bprintf
+              b
+              "static __attribute__((noinline)) %s %s(%s) { return ((%s \
+               (*)(%s))camlc_seg_fn)(%s); }\n"
+              (c_type ret)
+              name
+              (String.concat
+                 ~sep:", "
+                 (List.mapi (chars caller) ~f:(fun i c ->
+                      Printf.sprintf "%s a%d" (c_type c) i)))
+              (c_type ret)
+              (String.concat ~sep:", " (List.map (chars callee) ~f:c_type))
+              (String.concat
+                 ~sep:", "
+                 (List.mapi (chars callee) ~f:(fun i c ->
+                      Printf.sprintf "camlc_seg[%d].%c" i c)))
         | _ -> Printf.bprintf b "extern value %s;\n" name);
     Buffer.add_char b '\n'
   in
