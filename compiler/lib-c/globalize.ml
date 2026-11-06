@@ -24,6 +24,12 @@ or by a closure, is stored into a global instead of a local. The goals are the f
 - Turn a large number of closures into constant closures, which has a
   significant impact on performance
 - Reduce the frame of the toplevel function on the shadow stack.
+
+A global is a root until the end of the program: the values given to a
+finaliser ([Gc.finalise], and so [Gc.create_alarm], inlined) or as keys of
+an ephemeron or of a weak array are not stored into globals for these
+goals, so that they can still be collected (unless a toplevel closure
+retains them anyway).
 *)
 
 open Stdlib
@@ -35,6 +41,9 @@ type st =
   ; closures : Closure_conversion.closure Code.Var.Map.t
   ; constants : Code.Var.Set.t
   ; in_loop : bool
+  ; weak : Code.Var.Set.t
+        (* The values given to a finaliser, or as keys of an ephemeron or
+           of a weak array *)
   ; pairs : Code.Var.t Code.Var.Map.t
         (* Double translation: the variable bound to the shared closure of a
            function with two versions maps to the direct-style version
@@ -68,7 +77,10 @@ and globalize_closure st x =
 
 let use x st =
   match Code.Var.Map.find x st.visited_variables with
-  | pos -> if st.pos > pos + threshold then globalize st x else st
+  | pos ->
+      if st.pos > pos + threshold && not (Code.Var.Set.mem x st.weak)
+      then globalize st x
+      else st
   | exception Not_found -> st
 
 let declare x st =
@@ -141,7 +153,8 @@ let available x st = Code.Var.Set.mem x st.globals || Code.Var.Set.mem x st.cons
 
 let propagate_instruction st i =
   match i with
-  | Code.Let (x, Block (_, a, _, _, _)) when not (Code.Var.Set.mem x st.globals) ->
+  | Code.Let (x, Block (_, a, _, _, _))
+    when not (Code.Var.Set.mem x st.globals || Code.Var.Set.mem x st.weak) ->
       (* Globalize a block when most of its fields are available
          (global or constant). Available fields go into the global's
          initializer; the rest are patched via [array.set] in the
@@ -153,7 +166,8 @@ let propagate_instruction st i =
         Array.fold_right ~f:(fun v n -> if available v st then n else n + 1) a ~init:0
       in
       if 3 * non_available <= Array.length a + 1 then globalize st x else st
-  | Code.Let (x, Closure _) when not (Code.Var.Set.mem x st.globals) -> (
+  | Code.Let (x, Closure _)
+    when not (Code.Var.Set.mem x st.globals || Code.Var.Set.mem x st.weak) -> (
       match Code.Var.Map.find x st.closures with
       | { free_variables; _ } ->
           if List.for_all ~f:(fun v -> available v st) free_variables
@@ -170,9 +184,41 @@ let propagate_block p st pc =
   let b = Code.Addr.Map.find pc p.Code.blocks in
   List.fold_left ~f:(fun st i -> propagate_instruction st i) ~init:st b.Code.body
 
+(* The values given to a finaliser, or as keys of an ephemeron or of a weak
+   array *)
+let weak_values p l =
+  List.fold_left
+    ~f:(fun s pc ->
+      List.fold_left
+        ~f:(fun s i ->
+          match i with
+          | Code.Let
+              ( _
+              , Prim
+                  ( Extern
+                      ( ( "caml_final_register"
+                        | "caml_final_register_called_without_value"
+                        | "caml_ephe_set_key"
+                        | "caml_weak_set" )
+                      , _ )
+                  , args ) ) ->
+              List.fold_left
+                ~f:(fun s a ->
+                  match a with
+                  | Code.Pv x -> Code.Var.Set.add x s
+                  | Pc _ -> s)
+                ~init:s
+                args
+          | _ -> s)
+        ~init:s
+        (Code.Addr.Map.find pc p.Code.blocks).Code.body)
+    ~init:Code.Var.Set.empty
+    l
+
 let f p g closures =
   let l = Structure.blocks_in_reverse_post_order g in
   let in_loop = Freevars.find_loops_in_closure p p.Code.start in
+  let weak = weak_values p l in
   let st =
     List.fold_left
       ~f:(fun st pc -> traverse_block p in_loop st pc)
@@ -183,6 +229,7 @@ let f p g closures =
         ; closures
         ; constants = Code.Var.Set.empty
         ; in_loop = false
+        ; weak
         ; pairs = Code.Var.Map.empty
         }
       l
