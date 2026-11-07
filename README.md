@@ -99,6 +99,7 @@ platform is left to the host which compiles and links the C code
 | `--cps-stack` | Deep recursions go on in CPS, on the heap (see below). |
 | `--dynlink` | Compile a program which can load plugins (see below). |
 | `--runtime-files DIR` | Write the C runtime support files to `DIR`. |
+| `--disable small-functions` | No small functions for V8's inlining budget (see Design). |
 
 ### wasm64
 
@@ -415,6 +416,18 @@ computed by c_of_ocaml, and the indices of some functions: only the same
 program, linked in the same way, reads the closures back. With OCaml 4.14,
 whose marshaler takes the code pointers for naked pointers and the odd ones
 for integers, the runtime marshals all values.
+
+**Inlining by V8.** V8 gives a wasm module a tenth of its inlining budget when
+less than a quarter of its functions are small (under 50 bytes), and all of
+it above half; few compiled functions are that small (a sixth of those of
+ocamlc). The generated code therefore defines functions returning a constant,
+three quarters as many as its own functions plus 500, kept in the table of
+functions so that the linker and binaryen do not remove them. On the
+benchmarks of the bench directory (44 programs), this makes the code 2.4 %
+faster (`fib` 23 %, `effects` 22 %, `exn_deep` 19 %, `taku` 9 %), the largest
+programs as fast or a little slower (js_of_ocaml compiling camlboy 12 %, which
+spends more time compiling the inlined code), for wasm 3 % larger. `--disable
+small-functions` leaves them out.
 
 ## Limitations
 

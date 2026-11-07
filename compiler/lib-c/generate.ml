@@ -4515,6 +4515,30 @@ let f
              (List.map plugin_c_functions ~f:(Printf.sprintf "(void (*)(void))&%s")))
     | `Program | `Plugin -> ());
     Buffer.add_char b '\n';
+    if Config.Flag.small_functions ()
+    then (
+      (* V8 inlines less in a module whose functions are mostly large: its
+         inlining budget is a tenth of the full one when less than a quarter
+         of them are under 50 bytes, and full above half. Few compiled
+         functions are that small (a sixth of those of ocamlc), so the
+         module gets functions returning a constant: three quarters of the
+         number of generated functions (some are inlined), and some for
+         those of the runtime. They are in the table of functions, so that
+         neither the linker nor binaryen removes them. *)
+      let n = (3 * List.length definitions / 4) + 500 in
+      Buffer.add_string
+        b
+        "#define CAMLC_PAD(n) static int camlc_pad##n(void) { return n; }\n";
+      for i = 0 to n - 1 do
+        Printf.bprintf b "CAMLC_PAD(%d)%c" i (if i mod 8 = 7 then '\n' else ' ')
+      done;
+      Buffer.add_string
+        b
+        "\n__attribute__((used)) static int (*const camlc_pads[])(void) = {\n";
+      for i = 0 to n - 1 do
+        Printf.bprintf b "camlc_pad%d,%c" i (if i mod 8 = 7 then '\n' else ' ')
+      done;
+      Buffer.add_string b "};\n\n");
     Buffer.add_buffer b out.data;
     Buffer.add_char b '\n';
     (* The globals and the static data, for the runtime *)

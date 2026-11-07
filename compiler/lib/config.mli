@@ -99,6 +99,8 @@ module Flag : sig
 
   val cps_recursions : unit -> bool
 
+  val small_functions : unit -> bool
+
   val enable : string -> unit
 
   val disable : string -> unit

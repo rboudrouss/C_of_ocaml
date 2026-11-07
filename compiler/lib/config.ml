@@ -136,6 +136,8 @@ module Flag = struct
   let split_toplevel = o ~name:"split-toplevel" ~default:true
 
   let cps_recursions = o ~name:"cps-recursions" ~default:false
+
+  let small_functions = o ~name:"small-functions" ~default:true
 end
 
 module Param = struct
