@@ -231,9 +231,11 @@ pointers as code pointers, so `compare`, `hash` and `Obj` keep working.
 
 With the WebAssembly tail call extension (`-mtail-call`), a call in tail
 position is emitted with `musttail` when the callee has the signature of the
-caller. Otherwise, when the call may be recursive (an unknown function, or
-a function of the strongly connected component of the caller in the graph of the
-known calls), it goes through a function of the signature of the caller
+caller. Otherwise, when the call may be recursive (an unknown function, a
+function of the strongly connected component of the caller in the graph of the
+known calls, or a function which may make an unknown tail call, by itself or
+through known tail calls: a loop of tail calls through closures, as the
+continuations of code in CPS), it goes through a function of the signature of the caller
 (`camlc_t_...`), called with `musttail`, which finds the callee and its
 arguments in `camlc_seg` and calls it in tail position: clang would
 otherwise make it a plain call, as soon as the caller has another return (an
@@ -488,7 +490,8 @@ toplevel code of the tests at every point it can: the same pass.
 `tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
 `Marshal.Closures`. `tools/c_of_ocaml_tests.sh compiler/tests-c/gc/*.ml` tests `Gc.Memprof`
 and `Gc.create_alarm`. `tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml`
-tests tail calls between functions of different signatures. `dune build @compiler/tests-c/runtest` checks the
+tests tail calls between functions of different signatures, and loops of
+tail calls through closures. `dune build @compiler/tests-c/runtest` checks the
 primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
 All tests pass on both wasm32 and wasm64, except:

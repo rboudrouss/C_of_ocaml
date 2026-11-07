@@ -150,6 +150,9 @@ type output =
   ; mutable components : int Var.Hashtbl.t
         (** The recursive functions, by strongly connected component of the
             graph of known calls *)
+  ; mutable unknown_tail_calls : Var.Set.t
+        (** The functions which may make an unknown tail call, by themselves
+            or through known tail calls *)
   ; mutable cps_fallback : Var.Set.t
         (** With --cps-stack, the functions which may go on in their CPS version *)
   ; in_cps : Var.Set.t  (** The CPS calls *)
@@ -1786,8 +1789,11 @@ let recursive_call out global_flow_info closures ~fn (x, f, exact) =
    Mutually recursive functions of different signatures then loop in
    constant space, as in OCaml, rather than growing the stack of the
    engine, out of reach of the frame checks (see [camlc_segment]). Only
-   for the calls which may be recursive (see [recursive_call]): the others
-   end, and the C compiler may inline them.
+   for the calls which may be recursive (see [recursive_call]), and those
+   of functions which may make an unknown tail call (by themselves or
+   through known tail calls: a loop of tail calls through closures, as the
+   continuations of a function in CPS): the others end, and the C compiler
+   may inline them.
 
    A CPS call which may bounce, unless it is a tail call (with
    [CAMLC_TAIL_CALLS]), first decrements
@@ -1877,12 +1883,16 @@ let translate_tail_call ctx x ~f ~args ~exact =
         | Some reprs'
           when (not musttail)
                && repr_equal ret ctx.ret
-               && recursive_call
-                    ctx.out
-                    ctx.global_flow_info
-                    ctx.closures
-                    ~fn:ctx.fn
-                    (x, f, exact) ->
+               && (recursive_call
+                     ctx.out
+                     ctx.global_flow_info
+                     ctx.closures
+                     ~fn:ctx.fn
+                     (x, f, exact)
+                  ||
+                  match kind with
+                  | Known g -> Var.Set.mem g ctx.out.unknown_tail_calls
+                  | Known_direct _ | Unknown -> false) ->
             let callee_reprs =
               match kind with
               | Known _ -> reprs @ [ Value ]
@@ -2606,6 +2616,8 @@ type summary =
   ; gcs : bool  (** May trigger a GC by itself and return *)
   ; any_gcs : bool  (** May trigger a GC by itself *)
   ; inner : Var.t list  (** The functions called inside a handler *)
+  ; tail : Var.t list  (** The known functions called in tail position *)
+  ; unknown_tail : bool  (** Makes an unknown tail call *)
   }
 
 let non_tail_calls blocks pc =
@@ -2704,6 +2716,8 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     let gcs = ref false in
     let any_gcs = ref false in
     let inner = ref [] in
+    let tail = ref [] in
+    let unknown_tail = ref false in
     let gc_point depth i =
       match gc_point ctx i with
       | `No -> ()
@@ -2715,6 +2729,21 @@ let analyze_functions out facts global_flow_info closures blocks functions =
       then (
         Addr.Hashtbl.add visited pc ();
         let block = Addr.Map.find pc blocks in
+        (* A tail call (see [translate_function]) *)
+        (if depth = 0
+         then
+           match
+             ( List.find_opt (List.rev block.body) ~f:(fun i ->
+                   match i with
+                   | Event _ -> false
+                   | _ -> true)
+             , block.branch )
+           with
+           | Some (Let (x, Apply { f; exact; _ })), Return y when Var.equal x y -> (
+               match resolve_callee global_flow_info closures x ~f ~exact with
+               | Known g -> tail := g :: !tail
+               | Known_direct _ | Unknown -> unknown_tail := true)
+           | _ -> ());
         List.iter block.body ~f:(fun i ->
             match i with
             | Let (x, Apply { f; args; exact }) -> (
@@ -2759,7 +2788,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
     then (
       raises := true;
       gcs := true);
-    !raises, !outer, !gcs, !gcs || !any_gcs, !inner
+    !raises, !outer, !gcs, !gcs || !any_gcs, !inner, !tail, !unknown_tail
   in
   (* The functions with the property, and the callers of each function *)
   let propagate roots callers =
@@ -2775,7 +2804,7 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   in
   let summaries =
     List.map functions ~f:(fun (f, _, (pc, _)) ->
-        let raises, outer, gcs, any_gcs, inner = summary pc in
+        let raises, outer, gcs, any_gcs, inner, tail, unknown_tail = summary pc in
         let side = Var.Set.mem f out.cps_sides in
         { fn = f
         ; raises = raises || side
@@ -2783,6 +2812,8 @@ let analyze_functions out facts global_flow_info closures blocks functions =
         ; gcs = gcs || side
         ; any_gcs = any_gcs || side
         ; inner
+        ; tail
+        ; unknown_tail
         })
   in
   let callers l =
@@ -2793,6 +2824,8 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   in
   let roots p = List.filter_map summaries ~f:(fun s -> if p s then Some s.fn else None) in
   out.raising <- propagate (roots (fun s -> s.raises)) (callers (fun s -> s.outer));
+  out.unknown_tail_calls <-
+    propagate (roots (fun s -> s.unknown_tail)) (callers (fun s -> s.tail));
   (* The functions which may trigger a GC in any way, then those which may
      return after one: a call inside a handler is in the second case if
      the function called may trigger a GC in any way *)
@@ -3989,6 +4022,7 @@ let f
     ; segment_thunks = String.Hashtbl.create 16
     ; cps_fallback = Var.Set.empty
     ; components = Var.Hashtbl.create 16
+    ; unknown_tail_calls = Var.Set.empty
     ; in_cps
     ; trampolined = trampolined_calls
     ; cps_pairs
