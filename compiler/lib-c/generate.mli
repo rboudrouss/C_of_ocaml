@@ -44,6 +44,7 @@ val f :
   -> debug_info:bool
   -> in_cps:Effects.in_cps
   -> trampolined_calls:Effects.trampolined_calls
+  -> ?toplevel_chunk_size:int
   -> ?part_size:int
   -> Closure_conversion.closure Code.Var.Map.t
   -> result
@@ -59,4 +60,6 @@ val f :
     against, which the runtime checks when it loads a plugin. With
     [debug_info], it records backtraces at the locations of the debug events of
     [p]. With effect handlers (double translation), [in_cps] are the CPS calls
-    and [trampolined_calls] those which may bounce (see {!Effects.f}). *)
+    and [trampolined_calls] those which may bounce (see {!Effects.f}). The
+    toplevel code is split into functions of about [toplevel_chunk_size]
+    instructions (default 2000, 0 for a single function). *)

@@ -91,6 +91,7 @@ platform is left to the host which compiles and links the C code
 | `--split DIR` | Write the C code to several files (see below). |
 | `--part-size KB` | With `--split`, the size of each part (default 2048). |
 | `--manifest FILE` | Write the manifest of the C code to `FILE` (with `--split`, always written to `DIR/manifest`). |
+| `--toplevel-chunk-size N` | Split the toplevel code into functions of about `N` instructions of the intermediate code (default 2000, 0: a single function). |
 | `--opt {1,2,3}` | Optimization profile (default 1). |
 | `--debug-info`, `--no-debug-info` | Record backtraces, or not. By default, they are recorded when the bytecode has debug events (`ocamlc -g`). |
 | `--word-size {32,64}` | Target wasm32 (31-bit integers, default) or wasm64 (63-bit integers). |
@@ -112,8 +113,17 @@ so large programs should be split: `c_of_ocaml main.bc --split DIR` writes
 `DIR/part0.c` (static data and tables) and `DIR/part1.c`, `DIR/part2.c`, ...
 (the functions), which are compiled separately.
 
+The time clang takes to optimize a function grows faster than its size, so
+the toplevel code, which initializes all the modules, is split into functions
+of about 2000 instructions of the intermediate code (`--toplevel-chunk-size`),
+which the toplevel function `camlc_program` calls in turn. A chunk starts at a
+point where no local variable is live (the values which live long are C
+globals), outside any `try` and loop, through which the rest of the program
+goes.
+
 The generated C names do not depend on the rest of the program: functions are
-named after their source location, constants after their contents. After an
+named after their source location, constants after their contents, and the
+chunks of the toplevel code start at points chosen by a hash of their names. After an
 edit, only `part0.c` and the parts whose code changed differ, and unchanged
 files are not rewritten, so a build system only recompiles what changed.
 
@@ -458,6 +468,8 @@ segmented stack, `DOMAINS=1` a plugin starting a domain (linked with
 `-sPROXY_TO_PTHREAD`). `COOC_FLAGS=--cps-stack
 tools/c_of_ocaml_tests.sh` runs the tests with `--cps-stack`: the same pass,
 and `misc/sieve` too.
+`COOC_FLAGS='--toplevel-chunk-size 1' tools/c_of_ocaml_tests.sh` splits the
+toplevel code of the tests at every point it can: the same pass.
 `tools/c_of_ocaml_tests.sh compiler/tests-c/marshal/*.ml` tests
 `Marshal.Closures`. `tools/c_of_ocaml_tests.sh compiler/tests-c/gc/*.ml` tests `Gc.Memprof`
 and `Gc.create_alarm`. `tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml`

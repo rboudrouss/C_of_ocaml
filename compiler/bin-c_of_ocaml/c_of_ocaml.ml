@@ -291,7 +291,8 @@ let compile
     ~word_size
     ~input_file
     ~output
-    ~manifest_file =
+    ~manifest_file
+    ~toplevel_chunk_size =
   let ic = open_in_bin input_file in
   let input = Parse_bytecode.from_channel ic in
   let mode =
@@ -412,6 +413,7 @@ let compile
       ~debug_info
       ~in_cps:optimized.in_cps
       ~trampolined_calls:optimized.trampolined_calls
+      ~toplevel_chunk_size
       ?part_size:
         (match output with
         | `File _ -> None
@@ -443,6 +445,7 @@ let () =
   let split_dir = ref None in
   let manifest_file = ref None in
   let part_size = ref 2048 in
+  let toplevel_chunk_size = ref 2000 in
   let profile = ref Profile.O1 in
   let debug_info = ref None in
   let effects = ref None in
@@ -467,6 +470,15 @@ let () =
             part_size := n)
       , "KB With --split, the size of the C code of the functions of each file, in \
          kilobytes (default 2048)" )
+    ; ( "--toplevel-chunk-size"
+      , Arg.Int
+          (fun n ->
+            if n < 0
+            then raise (Arg.Bad "--toplevel-chunk-size: expected a non-negative size");
+            toplevel_chunk_size := n)
+      , "N Split the toplevel code into functions of about N instructions of the \
+         intermediate code each, to bound the time the C compiler takes to optimize it \
+         (0: not split; default 2000)" )
     ; ( "--opt"
       , Arg.Int
           (fun n ->
@@ -541,6 +553,7 @@ let () =
           ~debug_info:!debug_info
           ~word_size:!word_size
           ~manifest_file:!manifest_file
+          ~toplevel_chunk_size:!toplevel_chunk_size
           ~input_file
           ~output
       with Failure msg ->
