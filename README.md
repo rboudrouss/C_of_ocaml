@@ -325,8 +325,10 @@ engine. The generated functions take the address of none of their variables,
 and make no variadic call, so they have no frame there: the slow paths of the
 applications put the function and its arguments on the shadow stack
 (`camlc_applyN_slow`, `camlc_apply_frame`). A recursion makes it grow only
-through C functions (callbacks). Give it 1 MB at least (ocaml-emcc gives
-8 MB). An overflow of it is silent unless the program is linked with
+through C functions (callbacks): a callback raises `Stack_overflow` when
+less than an eighth of it (at most 64 KB) is left, for the C functions it may
+call. Give it 1 MB at least (ocaml-emcc gives 8 MB). An overflow of it by C
+functions alone is silent unless the program is linked with
 `-sSTACK_OVERFLOW_CHECK`.
 
 **CPS stack** (`c_of_ocaml --cps-stack`). Without JSPI, deep recursions can go
@@ -462,7 +464,7 @@ wasm32. `tools/c_of_ocaml_dynlink_test.sh` tests the plugins
 systhreads and the domains (`compiler/tests-c/threads`), natively, with the
 runtime of the OCaml switch. `tools/c_of_ocaml_segments_test.sh` tests the
 segmented stack (`compiler/tests-c/segments`), with JSPI and node 24, or
-`MODE=cps` with `--cps-stack`. `CPS_STACK=1 tools/c_of_ocaml_dynlink_test.sh`
+`MODE=cps` with `--cps-stack`, and the recursions through callbacks from C. `CPS_STACK=1 tools/c_of_ocaml_dynlink_test.sh`
 tests plugins with `--cps-stack`, `JSPI=1` (node 24) with JSPI and the
 segmented stack, `DOMAINS=1` a plugin starting a domain (linked with
 `-sPROXY_TO_PTHREAD`). `COOC_FLAGS=--cps-stack

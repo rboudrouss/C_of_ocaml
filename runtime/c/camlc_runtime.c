@@ -1387,9 +1387,30 @@ int caml_callback_depth = 0;
    JavaScript in between (see camlc_ml_gc_ramp_up) */
 static _Thread_local int camlc_callback_from_code;
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/stack.h>
+
+/* The C functions on the stack between callbacks have their frames on the
+   C stack of emscripten, in the linear memory, unchecked unless the program
+   is linked with -sSTACK_OVERFLOW_CHECK: a recursion through callbacks
+   would write below it. A callback raises Stack_overflow once less than an
+   eighth of this stack (at most 64 KB) is left for the C functions it may
+   call. */
+static int camlc_c_stack_exhausted(void)
+{
+  uintptr_t end = emscripten_stack_get_end();
+  uintptr_t reserve = (emscripten_stack_get_base() - end) / 8;
+  if (reserve > 65536) reserve = 65536;
+  return emscripten_stack_get_current() < end + reserve;
+}
+#else
+#define camlc_c_stack_exhausted() 0
+#endif
+
 CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
 {
   camlc_thread_check();
+  if (CAMLC_UNLIKELY(camlc_c_stack_exhausted())) return camlc_stack_overflow();
   if (!camlc_segments) return camlc_applyv(closure, narg, args);
   if (camlc_callback_from_code) {
     /* It goes on on new segments as its caller would */

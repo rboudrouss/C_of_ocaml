@@ -8,7 +8,8 @@
 #   tools/c_of_ocaml_segments_test.sh
 #
 # The output and the exit code are compared with segments.expected and 3,
-# and with OCaml 5.4 or later, those of ramp_up.ml with ramp_up.expected
+# those of callbacks.ml (with callbacks_stubs.c) with callbacks.expected and
+# 0, and with OCaml 5.4 or later, those of ramp_up.ml with ramp_up.expected
 # and 0. Prints PASS or FAIL for each, or SKIP when node does not support
 # JSPI.
 #
@@ -73,12 +74,24 @@ cd "$WORKDIR"
 # build NAME: NAME.js from $TEST/NAME.ml
 build() {
   cp "$TEST/$1.ml" .
-  ocamlfind ocamlc "$1.ml" -o "$1.bc"
+  local stubs=
+  if [ -f "$TEST/${1}_stubs.c" ]; then
+    emcc $CCFLAGS -c "$TEST/${1}_stubs.c" -o "${1}_stubs.o"
+    stubs=${1}_stubs.o
+  fi
+  if [ -n "$stubs" ]; then
+    # The primitives of the stubs, unknown to ocamlrun
+    sed -n 's/^value \([a-z_]*\)(.*/\1/p' "$TEST/${1}_stubs.c" > prims
+    ocamlrun -p >> prims
+    ocamlfind ocamlc -use-prims prims "$1.ml" -o "$1.bc"
+  else
+    ocamlfind ocamlc "$1.ml" -o "$1.bc"
+  fi
   "$C_OF_OCAML" $COOC_FLAGS "$1.bc" -o "$1.c"
   emcc $CCFLAGS -Wno-everything -c "$1.c" -o "$1.o"
   # The C stack of emscripten (in the linear memory): its default size,
   # 64 KB, checked, as the deep recursions must not grow it
-  emcc $CFLAGS "$1.o" camlc_runtime.o $HOST "$SYSROOT/lib/libcamlrun.a" -lm \
+  emcc $CFLAGS "$1.o" $stubs camlc_runtime.o $HOST "$SYSROOT/lib/libcamlrun.a" -lm \
     -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -sSTACK_SIZE=64KB \
     -sSTACK_OVERFLOW_CHECK=2 $LDFLAGS -o "$1.js"
 }
@@ -98,6 +111,8 @@ emcc $CCFLAGS -c "$RT/camlc_runtime.c" -o camlc_runtime.o
 if [ -n "$HOST" ]; then emcc $CCFLAGS -c "$TEST/jspi_host.c" -o "$HOST"; fi
 build segments
 check segments 3
+build callbacks
+check callbacks 0
 # Gc.ramp_up, OCaml 5.4 or later
 if [ "$(printf '%s\n' 5.4 "$(ocamlfind ocamlc -vnum)" | sort -V | head -1)" = 5.4 ]; then
   build ramp_up
