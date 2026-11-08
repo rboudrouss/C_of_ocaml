@@ -164,18 +164,3 @@
   (ocamlfind (< 1.5.1))
   (js_of_ocaml (< 3.0))
 ))
-
-(package
- (name c_of_ocaml)
- (synopsis "Compiler from OCaml bytecode to C, for WebAssembly with emscripten")
- (description
-  "c_of_ocaml compiles OCaml bytecode executables and plugins to C, which emscripten compiles to WebAssembly and links with the OCaml runtime and the program's C stubs, as built by ocaml-emcc. It is a fork of js_of_ocaml and reuses its front-end and optimizer.")
- (depends
-  (ocaml (>= 4.14))
-  (ppxlib (>= 0.33))
-  (ocaml-compiler-libs (>= v0.12.4))
-  (sedlex (>= 3.8.1))
-  (menhir (>= 20180523))
-  menhirLib
-  menhirSdk
-  (yojson (>= 2.1))))
