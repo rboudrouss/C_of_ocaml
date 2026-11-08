@@ -91,7 +91,7 @@ platform is left to the host which compiles and links the C code
 | `--opt {1,2,3}` | Optimization profile (default 1). |
 | `--debug-info`, `--no-debug-info` | Record backtraces, or not. By default, they are recorded when the bytecode has debug events (`ocamlc -g`). |
 | `--word-size {32,64}` | Target wasm32 (31-bit integers, default) or wasm64 (63-bit integers). |
-| `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects or with `--cps-stack` (disabled with `--dynlink` and for plugins, unless `--cps-stack`). |
+| `--effects {disabled,double-translation}` | Effect handler support. Defaults to double translation when the program performs effects out of its dead code (with `--dynlink` too, not counting those its plugins perform through its functions) or with `--cps-stack`. Disabled for plugins, unless `--cps-stack`: they need the option of the program. |
 | `--cps-stack` | Deep recursions go on in CPS, on the heap (see below). |
 | `--dynlink` | Compile a program which can load plugins (see below). |
 | `--runtime-files DIR` | Write the C runtime support files to `DIR`. |

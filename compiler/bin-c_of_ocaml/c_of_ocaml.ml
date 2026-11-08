@@ -284,6 +284,23 @@ let uses_effects (p : Code.program) =
     p.blocks
     false
 
+(* The code without the registrations of the compilation units by name
+   (caml_register_global), which keep them all alive *)
+let without_registrations (p : Code.program) =
+  { p with
+    blocks =
+      Code.Addr.Map.map
+        (fun (block : Code.block) ->
+          { block with
+            body =
+              List.filter block.body ~f:(fun i ->
+                  match i with
+                  | Code.Let (_, Prim (Extern ("caml_register_global", _), _)) -> false
+                  | _ -> true)
+          })
+        p.blocks
+  }
+
 let compile
     ~profile
     ~effects
@@ -374,6 +391,30 @@ let compile
      compaction, the next phase would grow the heap further *)
   Gc.compact ();
   memory ();
+  (* Whether the code performs effects out of its dead code, Stdlib.Effect
+     linked with -linkall for instance. The compilation units of a program
+     compiled with --dynlink are all registered for its plugins: not roots
+     here, or Stdlib.Effect would always count. Those of a plugin are, as the
+     plugins loaded after it may use them *)
+  let performs_effects =
+    let needed =
+      match effects, mode with
+      | None, (`Program | `Dynlink) -> not (Config.Flag.cps_recursions ())
+      | Some _, _ | None, `Plugin -> false
+    in
+    if
+      (not needed)
+      || Ocaml_version.compare Ocaml_version.current [ 5; 0 ] < 0
+      || not (uses_effects one.code)
+    then false
+    else
+      let p =
+        match mode with
+        | `Dynlink -> without_registrations one.code
+        | `Program | `Plugin -> one.code
+      in
+      uses_effects (fst (Deadcode.f (Pure_fun.f p) p))
+  in
   (if Config.Flag.cps_recursions ()
    then
      match effects with
@@ -384,19 +425,15 @@ let compile
     | Some e, _ -> e
     | None, (`Program | `Dynlink | `Plugin) when Config.Flag.cps_recursions () ->
         `Double_translation
-    | None, (`Dynlink | `Plugin) ->
-        (* The program and its plugins must agree *)
+    | None, `Plugin ->
+        (* That of the program, which its host gives *)
         `Disabled
-    | None, `Program ->
-        (* Effect handlers in dead code only, the module Effect linked with
-           -linkall for instance, do not need the double translation, which
-           doubles the size of the code *)
-        if
-          Ocaml_version.compare Ocaml_version.current [ 5; 0 ] >= 0
-          && uses_effects one.code
-          && uses_effects (fst (Deadcode.f (Pure_fun.f one.code) one.code))
-        then `Double_translation
-        else `Disabled);
+    | None, (`Program | `Dynlink) ->
+        (* Effect handlers in dead code only do not need the double
+           translation, which doubles the size of the code. A program which
+           performs no effect but whose plugins perform them through its
+           functions needs --effects double-translation *)
+        if performs_effects then `Double_translation else `Disabled);
   let optimized, global_flow_data =
     Driver.optimize_for_wasm ~profile ~shapes:false one.code
   in
@@ -511,7 +548,9 @@ let () =
                   | "disabled" -> `Disabled
                   | _ -> `Double_translation) )
       , " Support of effect handlers (default: double-translation if the program \
-         performs effects, disabled with --dynlink and for plugins)" )
+         performs effects out of its dead code, also with --dynlink, where the effects \
+         of its plugins do not count; disabled for plugins, which need that of the \
+         program)" )
     ; ( "--cps-stack"
       , Arg.Unit (fun () -> Config.Flag.enable "cps-recursions")
       , " Deep recursions go on in CPS, on the heap, past a depth: the functions which \
