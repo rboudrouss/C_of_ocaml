@@ -32,8 +32,9 @@ let memory () =
       (mb st.heap_words)
       (mb st.top_heap_words)
 
-(* The version of c_of_ocaml, which ocaml-emcc checks *)
-let version = "1.0.0"
+(* No release: ocaml-emcc runs --version only to check that the options before it are
+   known *)
+let version = "dev"
 
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
