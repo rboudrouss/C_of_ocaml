@@ -1798,7 +1798,9 @@ let recursive_call out global_flow_info closures ~fn (x, f, exact) =
    A CPS call which may bounce, unless it is a tail call (with
    [CAMLC_TAIL_CALLS]), first decrements
    [camlc_cps_depth]: when it gets negative, the call is returned to the
-   trampoline ([camlc_cps_bounce]), which performs it on a shorter stack. *)
+   trampoline ([camlc_cps_bounce]), which performs it on a shorter stack.
+   Without [CAMLC_TAIL_CALLS], so do the calls of the continuations and the
+   backward jumps of the CPS code ([camlc_cps_bounce_direct]). *)
 let translate_tail_call ctx x ~f ~args ~exact =
   let n = List.length args in
   let k = boxing_prelude ctx [] x ~f ~args ~exact in
@@ -1832,6 +1834,25 @@ let translate_tail_call ctx x ~f ~args ~exact =
   in
   let bounce =
     if
+      Var.Set.mem x ctx.out.trampolined
+      && (not (is_cps_call ctx x))
+      && exact
+      && List.for_all reprs ~f:(fun r -> repr_equal r Value)
+    then
+      (* A call of a continuation or of the closure of a block of CPS code,
+         in direct style (the arguments, then the closure): a plain call
+         without [CAMLC_TAIL_CALLS] *)
+      let closure, arguments = n, List.init ~len:n ~f:Fun.id in
+      Printf.sprintf
+        " if (!CAMLC_TAIL_CALLS && CAMLC_UNLIKELY(--camlc_cps_depth < 0)) { %s return \
+         camlc_cps_bounce_direct(%s, %d); }"
+        (String.concat
+           ~sep:" "
+           (List.mapi arguments ~f:(fun i j ->
+                Printf.sprintf "camlc_bounce_args[%d] = %s;" i (t j))))
+        (t closure)
+        n
+    else if
       is_cps_call ctx x
       && Var.Set.mem x ctx.out.trampolined
       && List.for_all reprs ~f:(fun r -> repr_equal r Value)

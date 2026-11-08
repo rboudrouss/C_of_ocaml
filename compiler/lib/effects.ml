@@ -243,6 +243,11 @@ let allocate_closure ~st ~params ~body ~branch =
   let name = Var.fresh () in
   [ Let (name, Closure (params, (pc, []), (None, None))) ], name
 
+let check_returns () =
+  match Config.target () with
+  | `C -> true
+  | `JavaScript | `Wasm -> false
+
 let tail_call ~st ?(instrs = []) ~exact ~in_cps ~check ~f args =
   assert (exact || check);
   let ret = Var.fresh () in
@@ -348,8 +353,11 @@ let cps_last ~st ~alloc_jump_closures pc (last : last) ~k : instr list * last =
       assert (List.is_empty alloc_jump_closures);
       (* If the number of successive 'returns' is unbounded in CPS, it
          means that we have an unbounded of calls in direct style
-         (even with tail call optimization) *)
-      tail_call ~st ~exact:true ~in_cps:false ~check:false ~f:k [ x ]
+         (even with tail call optimization). Not with c_of_ocaml
+         --cps-stack, whose deep recursions run in CPS: without the tail
+         calls of WebAssembly, the returns may bounce (see
+         [camlc_cps_bounce_direct]) *)
+      tail_call ~st ~exact:true ~in_cps:false ~check:(check_returns ()) ~f:k [ x ]
   | Raise (x, rmode) -> (
       assert (List.is_empty alloc_jump_closures);
       match Addr.Hashtbl.find_opt st.matching_exn_handler pc with
@@ -387,7 +395,7 @@ let cps_last ~st ~alloc_jump_closures pc (last : last) ~k : instr list * last =
               (Let (exn_handler, Prim (Extern ("caml_pop_trap", None), [])) :: instrs)
             ~exact:true
             ~in_cps:false
-            ~check:false
+            ~check:(check_returns ())
             ~f:exn_handler
             [ x ])
   | Stop ->

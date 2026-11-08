@@ -257,6 +257,14 @@ extern const int camlc_double_translation;
 #define camlc_cps_depth (camlc_thread.cps_depth)
 #define camlc_bounce_args (camlc_thread.bounce_args)
 value camlc_cps_bounce(value f, int n);
+/* Without the tail calls of WebAssembly (asyncify), the calls of the
+   continuations, which return a result to the CPS code, are plain calls: a
+   long sequence of returns, as that of a deep recursion running in CPS
+   (c_of_ocaml --cps-stack), would grow the stack of the engine. They
+   decrement [camlc_cps_depth] as well, and are returned to the trampoline,
+   which makes the exact call of [f] to its [n] arguments
+   ([camlc_bounce_args]) in direct style */
+value camlc_cps_bounce_direct(value f, int n);
 /* Generic CPS application: apply [f] to the [n] arguments [args], then
    pass the result to the continuation [args[n]] */
 value camlc_applyv_cps(value f, int n, value *args);

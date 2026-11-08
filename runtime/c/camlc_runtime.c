@@ -945,6 +945,18 @@ value camlc_cps_bounce(value f, int n)
   return CAMLC_BOUNCE;
 }
 
+/* Same for an exact call in direct style of [f] to its [n] arguments: the
+   calls of the continuations, without the tail calls of WebAssembly (see
+   [camlc_cps_bounce_direct] in camlc.h) */
+value camlc_cps_bounce_direct(value f, int n)
+{
+  if (n > CAMLC_MAX_BOUNCE_ARGS)
+    caml_fatal_error("c_of_ocaml: too many arguments");
+  camlc_bounce_f = f;
+  camlc_bounce_n = -n;
+  return CAMLC_BOUNCE;
+}
+
 static inline value camlc_continue(value k, value v)
 {
   return ((value (*)(value, value))Field(k, 0))(v, k);
@@ -1067,7 +1079,8 @@ static value camlc_cps_run(value res)
 {
   while (1) {
     if (res == CAMLC_BOUNCE) {
-      int n = camlc_bounce_n;
+      int n = camlc_bounce_n, direct = n < 0;
+      if (direct) n = -n;
       value *a = camlc_sp - (n + 1);
       camlc_bounce_n = 0;
       if (CAMLC_UNLIKELY(a < camlc_stack_limit)) {
@@ -1079,7 +1092,7 @@ static value camlc_cps_run(value res)
       camlc_bounce_f = Val_unit;
       for (int i = 0; i < n; i++) a[1 + i] = camlc_bounce_args[i];
       camlc_cps_depth = CAMLC_CPS_DEPTH;
-      res = camlc_applyv_cps(a[0], n - 1, a + 1);
+      res = direct ? camlc_call_exact(a[0], n, a + 1) : camlc_applyv_cps(a[0], n - 1, a + 1);
       camlc_sp = a + n + 1;
     } else if (Is_exception_result(res)) {
       value l = Field(camlc_fiber, Fiber_exns), h;
