@@ -67,11 +67,16 @@ let read_file name =
    - [mode program|dynlink|plugin]
    - [effects disabled|double-translation]: the effect handlers of the
      program (with [dynlink], its plugins must have the same)
+   - [uses_effects true|false]: the code performs effects ([%perform],
+     [%resume]...) out of its dead code, whatever [effects]. Not counted for a
+     program compiled with --dynlink: its compilation units registered for
+     its plugins. Counted for a plugin: its units registered for the plugins
+     loaded after it
    - [debug_info true|false]: backtraces are recorded
    - [primitive NAME ARITY], for each C primitive the code calls, sorted:
      the number of [value] arguments of its calls, or -1 for the calls
      with an array of arguments and its length ([value *, int]) *)
-let manifest ~word_size ~mode ~debug_info primitives =
+let manifest ~word_size ~mode ~debug_info ~uses_effects primitives =
   let b = Buffer.create 4096 in
   Printf.bprintf b "format 1\n";
   Printf.bprintf b "word_size %d\n" word_size;
@@ -89,6 +94,7 @@ let manifest ~word_size ~mode ~debug_info primitives =
     | `Double_translation -> "double-translation"
     | `Disabled -> "disabled"
     | `Cps | `Jspi | `Native -> assert false);
+  Printf.bprintf b "uses_effects %b\n" uses_effects;
   Printf.bprintf b "debug_info %b\n" debug_info;
   List.iter primitives ~f:(fun (name, arity) ->
       Printf.bprintf b "primitive %s %d\n" name arity);
@@ -391,6 +397,12 @@ let compile
      compaction, the next phase would grow the heap further *)
   Gc.compact ();
   memory ();
+  let manifest_file =
+    match manifest_file, output with
+    | Some f, _ -> Some f
+    | None, `Split (dir, _) -> Some (Filename.concat dir "manifest")
+    | None, `File _ -> None
+  in
   (* Whether the code performs effects out of its dead code, Stdlib.Effect
      linked with -linkall for instance. The compilation units of a program
      compiled with --dynlink are all registered for its plugins: not roots
@@ -398,6 +410,8 @@ let compile
      plugins loaded after it may use them *)
   let performs_effects =
     let needed =
+      Option.is_some manifest_file
+      ||
       match effects, mode with
       | None, (`Program | `Dynlink) -> not (Config.Flag.cps_recursions ())
       | Some _, _ | None, `Plugin -> false
@@ -467,14 +481,15 @@ let compile
       close_out oc
   | `Split (dir, _), parts -> write_parts dir parts
   | `File _, _ -> assert false);
-  let manifest_file =
-    match manifest_file, output with
-    | Some f, _ -> Some f
-    | None, `Split (dir, _) -> Some (Filename.concat dir "manifest")
-    | None, `File _ -> None
-  in
   Option.iter manifest_file ~f:(fun f ->
-      write_if_changed f (manifest ~word_size ~mode ~debug_info c.primitives))
+      write_if_changed
+        f
+        (manifest
+           ~word_size
+           ~mode
+           ~debug_info
+           ~uses_effects:performs_effects
+           c.primitives))
 
 let () =
   let input_file = ref None in

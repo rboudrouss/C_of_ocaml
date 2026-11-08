@@ -135,6 +135,7 @@ format 1
 word_size 32
 mode program
 effects disabled
+uses_effects false
 debug_info false
 primitive caml_array_make 2
 primitive caml_ml_open_descriptor_in 1
@@ -143,7 +144,12 @@ primitive caml_ml_open_descriptor_in 1
 
 `mode` is `program`, `dynlink` or `plugin`. `effects` is `disabled` or
 `double-translation`: the plugins of a `--dynlink` program must be compiled
-with the same. `primitive NAME ARITY` lists the C primitives the code calls,
+with the same. `uses_effects` is `true` when the code performs effects
+(`%perform`, `%resume`...) out of its dead code, whatever `effects`: for a
+`--dynlink` program, its compilation units are not counted as used by its
+plugins; for a plugin, they are, by the plugins loaded after it. A host can
+refuse a plugin which performs effects for a program compiled without them.
+`primitive NAME ARITY` lists the C primitives the code calls,
 with the number of arguments of their calls, or `-1` for those called with an
 array of arguments and its length (`value *argv, int argc`, more than 5
 arguments). A host uses them to adapt stubs whose C signature differs, or to
