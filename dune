@@ -130,4 +130,4 @@
 
 (data_only_dirs _wikidoc doc-dev janestreet)
 
-(vendored_dirs vendor)
+(vendored_dirs)
