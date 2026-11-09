@@ -138,6 +138,8 @@ module Flag = struct
   let cps_recursions = o ~name:"cps-recursions" ~default:false
 
   let small_functions = o ~name:"small-functions" ~default:true
+
+  let tuple_args = o ~name:"tuple-args" ~default:true
 end
 
 module Param = struct

@@ -101,6 +101,8 @@ module Flag : sig
 
   val small_functions : unit -> bool
 
+  val tuple_args : unit -> bool
+
   val enable : string -> unit
 
   val disable : string -> unit
