@@ -448,6 +448,52 @@ void camlc_reset_young_limit(void)
 #endif
 
 /****************************************************************/
+/* Write barrier */
+
+#if OCAML_VERSION_MAJOR >= 5
+#include <caml/minor_gc.h>
+#include <caml/major_gc.h>
+
+/* Whether the program has spawned a domain (the code calls
+   [camlc_domain_spawn]): until then, a single thread runs OCaml code at a
+   time, and the write barrier needs neither the fence nor the release
+   store of [caml_modify], which WebAssembly with threads makes
+   sequentially consistent atomic operations, slow in V8 */
+static int camlc_domains_spawned;
+
+extern value caml_domain_spawn(value callback, value term_sync);
+
+value camlc_domain_spawn(value callback, value term_sync)
+{
+  camlc_domains_spawned = 1;
+  return caml_domain_spawn(callback, term_sync);
+}
+
+/* [caml_modify] of a field of a block of the major heap (see
+   [camlc_modify]) */
+void camlc_modify_major(volatile value *fp, value val)
+{
+  value old;
+  if (camlc_domains_spawned) {
+    caml_modify(fp, val);
+    return;
+  }
+  old = *fp;
+  if (Is_block(old)) {
+    /* Already remembered */
+    if (Is_young(old)) {
+      *fp = val;
+      return;
+    }
+    caml_darken(Caml_state, old, 0);
+  }
+  if (Is_block(val) && Is_young(val))
+    Ref_table_add(&Caml_state->minor_tables->major_ref, fp);
+  *fp = val;
+}
+#endif
+
+/****************************************************************/
 /* Exceptions */
 
 /* Call [f], turning an exception it raises with longjmp into an

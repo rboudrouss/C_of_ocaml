@@ -1033,6 +1033,10 @@ let primitive out name (args : parg list) =
                  of the caller (see the runtime) *)
               | "caml_ml_gc_ramp_up", 1 ->
                   Checked (c_call "camlc_ccall1" ("camlc_ml_gc_ramp_up" :: args))
+              (* The write barrier of the code is cheaper until a
+                 domain is spawned (see the runtime) *)
+              | "caml_domain_spawn", 2 ->
+                  Checked (c_call "camlc_ccall2" ("camlc_domain_spawn" :: args))
               (* With [Marshal.Closures], marshaled by the runtime *)
               | ( ( "caml_output_value"
                   | "caml_output_value_to_bytes"

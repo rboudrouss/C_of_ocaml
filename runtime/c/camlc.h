@@ -431,11 +431,20 @@ static inline value camlc_store_double_flat(value a, value i, double d)
 /* Write barrier: no work for an integer replacing an integer (the major
    GC only cares about the pointers overwritten or written), nor for a
    block of the minor heap */
+#if OCAML_VERSION_MAJOR >= 5
+void camlc_modify_major(volatile value *fp, value v);
+value camlc_domain_spawn(value callback, value term_sync);
+#endif
+
 static inline void camlc_modify(volatile value *fp, value v)
 {
   if ((Is_long(v) && Is_long(*fp)) || Is_young((value)fp)) *fp = v;
+#if OCAML_VERSION_MAJOR >= 5
+  else camlc_modify_major(fp, v);
+#else
   /* Without volatile in OCaml 4.14 */
   else caml_modify((value *)fp, v);
+#endif
 }
 
 /* Arrays and strings */
