@@ -488,15 +488,13 @@ let float_functions =
   ; "caml_acosh_float", "acosh"
   ; "caml_atanh_float", "atanh"
   ; "caml_erf_float", "erf"
-  ; "caml_erfc_float", "erfc"
-    (* Two arguments *)
+  ; "caml_erfc_float", "erfc" (* Two arguments *)
   ; "caml_atan2_float", "atan2"
   ; "caml_hypot_float", "hypot"
   ; "caml_power_float", "pow"
   ; "caml_fmod_float", "fmod"
   ; "caml_copysign_float", "copysign"
-  ; "caml_nextafter_float", "nextafter"
-    (* Three *)
+  ; "caml_nextafter_float", "nextafter" (* Three *)
   ; "caml_fma_float", "fma"
   ]
 
@@ -708,6 +706,24 @@ let primitive out name (args : parg list) =
                 |> Option.get)
                 u
                 (arg r 1) )
+      | None, Some (r, (("div" | "mod") as op)) when n = 2 ->
+          Guarded
+            ( Printf.sprintf "camlc_check_divisor(%s == 0)" (arg r 1)
+            , r
+            , if String.equal op "div"
+              then
+                Printf.sprintf
+                  "Camlc_boxed_div(%s, %s, %s, %s)"
+                  (c_type r)
+                  (unsigned_type r)
+                  (arg r 0)
+                  (arg r 1)
+              else
+                Printf.sprintf
+                  "Camlc_boxed_mod(%s, %s, %s)"
+                  (c_type r)
+                  (arg r 0)
+                  (arg r 1) )
       | None, Some (r, "neg") when n = 1 ->
           pure
             (r, Printf.sprintf "(%s)(0 - (%s)%s)" (c_type r) (unsigned_type r) (arg r 0))
@@ -1179,6 +1195,8 @@ let register_typing_primitives () =
         [ "add"
         ; "sub"
         ; "mul"
+        ; "div"
+        ; "mod"
         ; "and"
         ; "or"
         ; "xor"

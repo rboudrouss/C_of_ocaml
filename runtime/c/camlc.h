@@ -389,6 +389,18 @@ static inline value camlc_int_mod(value a, value b)
   return Camlc_int_mod_unsafe(a, b);
 }
 
+/* The division of boxed integers: [Division_by_zero], and the quotient
+   of the smallest integer by -1 is itself, its remainder 0, as in the
+   runtime (the division of C overflows) */
+static inline value camlc_check_divisor(int zero)
+{
+  if (CAMLC_UNLIKELY(zero)) return camlc_exception_result(camlc_raise_zero_divide());
+  return Val_unit;
+}
+
+#define Camlc_boxed_div(t, u, a, b) ((b) == -1 ? (t)(0 - (u)(a)) : (a) / (b))
+#define Camlc_boxed_mod(t, a, b) ((b) == -1 ? (t)0 : (a) % (b))
+
 /* Floats */
 
 static inline value camlc_float_compare_unboxed(double x, double y)
