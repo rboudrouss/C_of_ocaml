@@ -79,7 +79,7 @@ let iter_closures ~f instrs =
         | Some ((_, d, c) as pair) ->
             (* [Effects.rewrite_direct_block] emits the instruction right
                after the two closures. The code generator relies on them
-               being grouped (see [Generate.cps_pairs]). *)
+               being grouped (see [cps_pairs] in [Generate.f]). *)
             assert (Var.Map.mem d clos_acc && Var.Map.mem c clos_acc);
             iter_closures_rec f instr_acc clos_acc ((pair, i) :: pairs_acc) rem
         | None ->

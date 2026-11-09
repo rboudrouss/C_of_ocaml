@@ -1843,8 +1843,9 @@ code_t caml_next_frame_pointer(value **sp, value **trsp)
    The marshaler of OCaml expects the closures of native code, where a
    function of arity 2 or more has a second code pointer after its closure
    info. Here, it has one only in a closure of several functions, or a CPS
-   version with effect handlers (see [closure_layout] in generate.ml). The
-   values are then marshaled here, in the format [input_value] reads.
+   version with effect handlers (see [closure_layout] in
+   compiler/lib-c/codegen/c_translate.ml). The values are then marshaled
+   here, in the format [input_value] reads.
    Without [Marshal.Closures], the marshaler of OCaml is called, but with
    OCaml 4 and naked pointers: it takes the closures for blocks, and their
    code pointers for naked pointers, except the odd ones, which look like
