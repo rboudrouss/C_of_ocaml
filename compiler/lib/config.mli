@@ -103,6 +103,8 @@ module Flag : sig
 
   val tuple_args : unit -> bool
 
+  val loop_reentry : unit -> bool
+
   val enable : string -> unit
 
   val disable : string -> unit

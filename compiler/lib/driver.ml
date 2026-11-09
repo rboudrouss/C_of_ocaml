@@ -740,6 +740,10 @@ let optimize ~shapes ~profile ~keep_flow_data p =
     match Config.target () with
     | `C when Config.Flag.tuple_args () -> Tuple_args.f p
     | `C | `JavaScript | `Wasm -> p)
+    +> (fun p ->
+    match Config.target () with
+    | `C when Config.Flag.loop_reentry () -> Loop_reentry.f p
+    | `C | `JavaScript | `Wasm -> p)
     +> effects_and_exact_calls ~keep_flow_data ~deadcode_sentinel ~shapes profile
     +> map_fst5
          (match Config.target (), Config.effects () with

@@ -140,6 +140,8 @@ module Flag = struct
   let small_functions = o ~name:"small-functions" ~default:true
 
   let tuple_args = o ~name:"tuple-args" ~default:true
+
+  let loop_reentry = o ~name:"loop-reentry" ~default:true
 end
 
 module Param = struct
