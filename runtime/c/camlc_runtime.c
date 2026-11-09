@@ -1016,6 +1016,10 @@ static value camlc_cps_call(value f, int n, value *args)
     for (int i = 0; i <= n; i++) camlc_bounce_args[i] = args[i];
     return camlc_cps_bounce(f, n + 1);
   }
+  /* A function with a CPS version, applied to as many arguments as its
+     arity (the handlers of effects): called directly */
+  if (Field(f, 2) != CAMLC_NO_CPS && Arity_closinfo(Closinfo_val(f)) == n)
+    return camlc_call_exact_cps(f, n, args);
   return camlc_applyv_cps(f, n, args);
 }
 
