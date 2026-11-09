@@ -1,3 +1,5 @@
+(include_subdirs unqualified)
+
 (library
  (name c_of_ocaml_compiler)
  (synopsis "C_of_ocaml compiler library")

@@ -278,7 +278,7 @@ one per primitive call was tried: each `try` then costs about as much as a
 wrapper, and a loop around `try ... with Not_found` became 70% slower.
 
 **Unboxed numbers.** The type analysis of wasm_of_ocaml
-(`compiler/lib-c/typing.ml`) finds floats and boxed integers that never need
+(`compiler/lib-c/analysis/typing.ml`) finds floats and boxed integers that never need
 to be boxed. They become C `double`s and integers, and their arithmetic is
 inlined. Parameters of functions that are only called directly can be unboxed
 as well, and so can their results if they cannot raise (exceptions are
