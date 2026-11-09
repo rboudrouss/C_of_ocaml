@@ -3288,6 +3288,141 @@ let translate_function
           ; "for (int i = 0; i < FRAME_SIZE; i++) fp[i] = Val_unit;"
           ]));
   ctx.framed <- frame_size > 0 && Option.is_none ctx.framed_blocks;
+  (* The slots of the frame holding a value no longer live are cleared
+     before the points where the GC may run, which would otherwise keep the
+     value alive (as ocamlopt's frame descriptors do not): the slots
+     written since they were last cleared, a forward analysis *)
+  let env_slot = Var.Hashtbl.find_opt ctx.slots ctx.env_var in
+  let slot_of x =
+    match Var.Hashtbl.find_opt ctx.slots x with
+    | Some i when not (Poly.equal (Some i) env_slot) -> Some i
+    | _ -> None
+  in
+  let add_slot x d =
+    match slot_of x with
+    | Some i -> IntSet.add i d
+    | None -> d
+  in
+  let live_slots live =
+    Var.Set.fold
+      (fun x acc ->
+        match Var.Hashtbl.find_opt ctx.slots x with
+        | Some i -> IntSet.add i acc
+        | None -> acc)
+      live
+      IntSet.empty
+  in
+  let all_slots =
+    Var.Hashtbl.fold (fun x _ acc -> add_slot x acc) ctx.slots IntSet.empty
+  in
+  let is_framed pc =
+    frame_size > 0
+    &&
+    match ctx.framed_blocks with
+    | Some s -> Addr.Set.mem pc s
+    | None -> true
+  in
+  (* The live variables after each instruction of a block *)
+  let live_after_body ~live_end body =
+    let n = Array.length body in
+    let live_after = Array.make n live_end in
+    for k = n - 1 downto 1 do
+      let i = body.(k) in
+      let live =
+        match instr_defs i with
+        | Some x -> Var.Set.remove x live_after.(k)
+        | None -> live_after.(k)
+      in
+      live_after.(k - 1) <- instr_uses ctx i live
+    done;
+    live_after
+  in
+  (* The variables live through the point where the GC may run of the
+     instruction [i], the [k]-th of the block: those live after it, and the
+     fields of the block it allocates, rooted during the allocation *)
+  let gc_live_at live_after g k i =
+    let live =
+      match instr_defs i with
+      | Some x -> Var.Set.remove x live_after.(k)
+      | None -> live_after.(k)
+    in
+    match g with
+    | `Alloc -> instr_uses ctx i live
+    | `Call -> live
+  in
+  (* Through a point where the GC may run: the slots to clear, and the
+     slots written then *)
+  let through_gc_point d live =
+    let l = live_slots live in
+    IntSet.diff d l, IntSet.inter d l
+  in
+  let dirty_in = Addr.Hashtbl.create 16 in
+  let handlers = ref Addr.Set.empty in
+  List.iter pcs ~f:(fun pc ->
+      match (Addr.Map.find pc blocks).branch with
+      | Pushtrap (_, _, (h, _)) -> handlers := Addr.Set.add h !handlers
+      | _ -> ());
+  let block_dirty_in pc =
+    if not (is_framed pc)
+    then IntSet.empty
+    else if Addr.Set.mem pc !handlers
+    then all_slots
+    else Option.value ~default:IntSet.empty (Addr.Hashtbl.find_opt dirty_in pc)
+  in
+  (let entry = List.fold_left params ~init:IntSet.empty ~f:(fun d x -> add_slot x d) in
+   Addr.Hashtbl.replace dirty_in pc entry;
+   let changed = ref true in
+   while !changed do
+     changed := false;
+     List.iter pcs ~f:(fun pc ->
+         if is_framed pc
+         then (
+           let block = Addr.Map.find pc blocks in
+           let d = ref (block_dirty_in pc) in
+           if Addr.Set.mem pc loop_polls
+           then d := snd (through_gc_point !d (Addr.Hashtbl.find live_in pc));
+           let body = Array.of_list block.body in
+           let live_after = live_after_body ~live_end:(live_out ctx live_in pc) body in
+           let gc_live = gc_live_at live_after in
+           Array.iteri body ~f:(fun k i ->
+               (match gc_point ctx i with
+               | (`Call | `Alloc) as g -> d := snd (through_gc_point !d (gc_live g k i))
+               | `No | `Raise -> ());
+               match instr_defs i with
+               | Some x -> d := add_slot x !d
+               | None -> ());
+           let succ (pc', _) =
+             let d' =
+               List.fold_left (Addr.Map.find pc' blocks).params ~init:!d ~f:(fun d x ->
+                   add_slot x d)
+             in
+             let old =
+               Option.value ~default:IntSet.empty (Addr.Hashtbl.find_opt dirty_in pc')
+             in
+             if not (IntSet.subset d' old)
+             then (
+               Addr.Hashtbl.replace dirty_in pc' (IntSet.union old d');
+               changed := true)
+           in
+           match block.branch with
+           | Return _ | Raise _ | Stop -> ()
+           | Branch c | Poptrap c | Pushtrap (c, _, _) -> succ c
+           | Cond (_, c1, c2) ->
+               succ c1;
+               succ c2
+           | Switch (_, a) -> Array.iter a ~f:succ))
+   done);
+  let clear_slots d =
+    if not (IntSet.is_empty d)
+    then
+      line
+        ctx
+        "%s"
+        (String.concat
+           ~sep:" "
+           (List.map (IntSet.elements d) ~f:(fun i ->
+                Printf.sprintf "fp[%d] = Val_unit;" i)))
+  in
   (* Body *)
   List.iteri params ~f:(fun i x ->
       if Var.Hashtbl.mem ctx.slots x then line ctx "%s = a%d;" (slot ctx x) i);
@@ -3302,8 +3437,14 @@ let translate_function
       | Some s -> ctx.framed <- Addr.Set.mem pc s
       | None -> ());
       Printf.bprintf ctx.buf " %s:;\n" (label ctx pc);
+      let dirty = ref (block_dirty_in pc) in
       if Addr.Set.mem pc loop_polls
-      then
+      then (
+        if ctx.framed
+        then (
+          let clear, d = through_gc_point !dirty (Addr.Hashtbl.find live_in pc) in
+          clear_slots clear;
+          dirty := d);
         line
           ctx
           "%s"
@@ -3312,24 +3453,23 @@ let translate_function
              |> Var.Set.elements
              |> List.filter ~f:(fun x -> gc_value ctx x)
              |> List.map ~f:(fun x -> local ctx x))
-             ~raise:(raise_stmt ctx traps "r"));
+             ~raise:(raise_stmt ctx traps "r")));
       (* After a point where the GC may run, the variables of the frame
          live after it are reloaded (those live in a handler are reloaded
          at its start) *)
       let translate_body ?(live_end = live_out ctx live_in pc) body =
         let body = Array.of_list body in
-        let n = Array.length body in
-        let live_after = Array.make n live_end in
-        for k = n - 1 downto 1 do
-          let i = body.(k) in
-          let live =
-            match instr_defs i with
-            | Some x -> Var.Set.remove x live_after.(k)
-            | None -> live_after.(k)
-          in
-          live_after.(k - 1) <- instr_uses ctx i live
-        done;
+        let live_after = live_after_body ~live_end body in
         Array.iteri body ~f:(fun k i ->
+            (match gc_point ctx i with
+            | (`Call | `Alloc) as g when ctx.framed ->
+                let clear, d = through_gc_point !dirty (gc_live_at live_after g k i) in
+                clear_slots clear;
+                dirty := d
+            | `Call | `Alloc | `No | `Raise -> ());
+            (match instr_defs i with
+            | Some x -> dirty := add_slot x !dirty
+            | None -> ());
             translate_instr ctx traps i;
             match gc_point ctx i with
             | `Call | `Alloc ->
