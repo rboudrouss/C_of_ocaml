@@ -105,6 +105,8 @@ module Flag : sig
 
   val loop_reentry : unit -> bool
 
+  val apply_fusion : unit -> bool
+
   val enable : string -> unit
 
   val disable : string -> unit

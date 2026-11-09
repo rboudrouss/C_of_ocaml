@@ -142,6 +142,8 @@ module Flag = struct
   let tuple_args = o ~name:"tuple-args" ~default:true
 
   let loop_reentry = o ~name:"loop-reentry" ~default:true
+
+  let apply_fusion = o ~name:"apply-fusion" ~default:true
 end
 
 module Param = struct
