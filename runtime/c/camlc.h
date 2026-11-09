@@ -606,6 +606,18 @@ void camlc_backtrace_call(const struct camlc_location *loc);
 value camlc_oo_cache_id(void);
 value camlc_get_cached_method(value obj, value tag, value cache_id);
 
+/* The method of a public method call, its cache tried first (shared by
+   the domains: the offset read is any offset written, read with a plain
+   load) */
+static inline value camlc_get_method_cached(value obj, value tag, value cache_id)
+{
+  value meths = Field(obj, 0);
+  uintnat ofs = *(volatile uintnat *)(cache_id - 1) & Field(meths, 1);
+  if (CAMLC_LIKELY(*(value *)(((char *)&Field(meths, 3)) + ofs) == tag))
+    return *(value *)(((char *)&Field(meths, 2)) + ofs);
+  return camlc_get_cached_method(obj, tag, cache_id);
+}
+
 /* Polls, in the loops and at the start of the functions which make tail
    calls, when the program uses threads or domains: when
    [Camlc_poll_needed()], [camlc_poll] runs the asynchronous actions (stop

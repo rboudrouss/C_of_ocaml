@@ -1008,7 +1008,7 @@ let primitive out name (args : parg list) =
               | "caml_get_global_data", 0 -> plain "caml_global_data"
               | "caml_oo_cache_id", 0 -> plain "camlc_oo_cache_id()"
               | "caml_get_cached_method", 3 ->
-                  plain (c_call "camlc_get_cached_method" args)
+                  plain (c_call "camlc_get_method_cached" args)
               | ( ( "%perform"
                   | "%reperform"
                   | "%resume"
