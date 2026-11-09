@@ -429,11 +429,6 @@ let compile
       in
       uses_effects (fst (Deadcode.f (Pure_fun.f p) p))
   in
-  (if Config.Flag.cps_recursions ()
-   then
-     match effects with
-     | None | Some `Double_translation -> ()
-     | Some _ -> failwith "c_of_ocaml: --cps-stack needs --effects=double-translation");
   Config.set_effects_backend
     (match effects, mode with
     | Some e, _ -> e
@@ -491,6 +486,15 @@ let compile
            ~uses_effects:performs_effects
            c.primitives))
 
+(* The combinations of options which c_of_ocaml refuses, whatever the
+   input: checked before reading it, and by --check *)
+let check_options ~effects =
+  if Config.Flag.cps_recursions ()
+  then
+    match effects with
+    | None | Some `Double_translation -> ()
+    | Some _ -> failwith "c_of_ocaml: --cps-stack needs --effects=double-translation"
+
 let () =
   let input_file = ref None in
   let runtime_dir = ref None in
@@ -504,6 +508,9 @@ let () =
   let effects = ref None in
   let dynlink = ref false in
   let word_size = ref 32 in
+  let check = ref false in
+  (* (an unknown name, an error of the command line) *)
+  let flag set name = try set name with Failure msg -> raise (Arg.Bad msg) in
   let spec =
     [ "-o", Arg.String (fun s -> output_file := Some s), "FILE Write the C code to FILE"
     ; ( "--split"
@@ -575,6 +582,11 @@ let () =
       , Arg.Set dynlink
       , " Compile a program which can load plugins: its compilation units are registered \
          by name, and kept whole. A .cmo or .cma file is compiled to a plugin" )
+    ; ( "--check"
+      , Arg.Set check
+      , " Check the options, those before and after this one, and exit, without input: \
+         whether this c_of_ocaml knows them and accepts them together (an error and exit \
+         code 2 if it does not know one, 1 if it refuses them together, 0 otherwise)" )
     ; ( "--version"
       , Arg.Unit
           (fun () ->
@@ -582,11 +594,16 @@ let () =
             exit 0)
       , " Print the version and exit" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
-    ; "--enable", Arg.String Config.Flag.enable, "OPT Enable the option OPT"
-    ; "--disable", Arg.String Config.Flag.disable, "OPT Disable the option OPT"
+    ; "--enable", Arg.String (flag Config.Flag.enable), "OPT Enable the option OPT"
+    ; "--disable", Arg.String (flag Config.Flag.disable), "OPT Disable the option OPT"
     ]
   in
   Arg.parse spec (fun s -> input_file := Some s) usage;
+  (try check_options ~effects:!effects
+   with Failure msg ->
+     prerr_endline msg;
+     exit 1);
+  if !check then exit 0;
   let output =
     match !output_file, !split_dir with
     | Some f, None -> Some (`File f)

@@ -96,6 +96,7 @@ platform is left to the host which compiles and links the C code
 | `--dynlink` | Compile a program which can load plugins (see below). |
 | `--runtime-files DIR` | Write the C runtime support files to `DIR`. |
 | `--disable small-functions` | No small functions for V8's inlining budget (see Design). |
+| `--check` | Check the options and exit, without input: exit code 2 if one is unknown, 1 if c_of_ocaml refuses them together (`--cps-stack --effects disabled`), 0 otherwise. A host can check the options it will pass before building the program. |
 
 ### wasm64
 
