@@ -1094,9 +1094,9 @@ value camlc_applyv_cps(value f, int n, value *args)
         Field(r, 0) = (value)&camlc_cps_rest_code;
         Field(r, 1) = Make_closinfo(1, 3);
         Field(r, 2) = CAMLC_NO_CPS;
-        caml_modify(&Field(r, 3), fp[1 + n]);
+        camlc_modify(&Field(r, 3), fp[1 + n]);
         for (mlsize_t j = 0; j < m; j++)
-          caml_modify(&Field(r, 4 + j), fp[1 + i + arity + j]);
+          camlc_modify(&Field(r, 4 + j), fp[1 + i + arity + j]);
         for (int j = 0; j < arity; j++) a[j] = fp[1 + i + j];
         a[arity] = r;
         r = camlc_call_exact_cps(fp[0], arity, a);
@@ -1143,7 +1143,7 @@ static value camlc_cps_run(value res)
     } else if (Is_exception_result(res)) {
       value l = Field(camlc_fiber, Fiber_exns), h;
       if (l == Val_unit) return res;
-      caml_modify(&Field(camlc_fiber, Fiber_exns), Field(l, 1));
+      camlc_modify(&Field(camlc_fiber, Fiber_exns), Field(l, 1));
       h = Field(l, 0);
       camlc_cps_depth = CAMLC_CPS_DEPTH;
       res = camlc_continue(h, Extract_exception(res));
@@ -1158,7 +1158,7 @@ value camlc_push_trap(value h)
   value l = caml_alloc_small(2, 0);
   Field(l, 0) = h;
   Field(l, 1) = Field(camlc_fiber, Fiber_exns);
-  caml_modify(&Field(camlc_fiber, Fiber_exns), l);
+  camlc_modify(&Field(camlc_fiber, Fiber_exns), l);
   CAMLreturn(Val_unit);
 }
 
@@ -1166,7 +1166,7 @@ value camlc_pop_trap(void)
 {
   value l = Field(camlc_fiber, Fiber_exns);
   if (l == Val_unit) return Static_closure(camlc_raise_closure);
-  caml_modify(&Field(camlc_fiber, Fiber_exns), Field(l, 1));
+  camlc_modify(&Field(camlc_fiber, Fiber_exns), Field(l, 1));
   return Field(l, 0);
 }
 
@@ -1174,7 +1174,7 @@ value camlc_pop_trap(void)
 static value camlc_pop_fiber(void)
 {
   value f = Field(camlc_fiber, Fiber_parent);
-  caml_modify(&Field(camlc_fiber, Fiber_parent), Val_unit);
+  camlc_modify(&Field(camlc_fiber, Fiber_parent), Val_unit);
   camlc_fiber = f;
   return Field(f, Fiber_cont);
 }
@@ -1259,8 +1259,8 @@ value camlc_resume_stack(value stack, value last, value k)
     while (Field(last, Fiber_parent) != Val_unit)
       last = Field(last, Fiber_parent);
   }
-  caml_modify(&Field(camlc_fiber, Fiber_cont), k);
-  caml_modify(&Field(last, Fiber_parent), camlc_fiber);
+  camlc_modify(&Field(camlc_fiber, Fiber_cont), k);
+  camlc_modify(&Field(last, Fiber_parent), camlc_fiber);
   camlc_fiber = stack;
   return Field(stack, Fiber_cont);
 }
@@ -1273,7 +1273,7 @@ value camlc_perform_effect(value eff, value k)
   int n;
   if (Field(camlc_fiber, Fiber_parent) == Val_unit)
     CAMLreturnT(value, camlc_raise_unhandled(eff));
-  caml_modify(&Field(camlc_fiber, Fiber_cont), k);
+  camlc_modify(&Field(camlc_fiber, Fiber_cont), k);
   cont = caml_alloc_small(2, 0);
   Field(cont, 0) = camlc_fiber;
   Field(cont, 1) = camlc_fiber;
@@ -1311,9 +1311,9 @@ value camlc_reperform_effect(value eff, value cont, value last, value k)
   }
   fiber = camlc_fiber;
   h = Field(fiber, Fiber_heff);
-  caml_modify(&Field(fiber, Fiber_cont), k);
-  caml_modify(&Field(last, Fiber_parent), fiber);
-  caml_modify(&Field(cont, 1), fiber);
+  camlc_modify(&Field(fiber, Fiber_cont), k);
+  camlc_modify(&Field(last, Fiber_parent), fiber);
+  camlc_modify(&Field(cont, 1), fiber);
   args[0] = eff;
   args[1] = cont;
 #if OCAML_VERSION_MAJOR > 5 || OCAML_VERSION_MINOR >= 6
@@ -1329,7 +1329,7 @@ value camlc_reperform_effect(value eff, value cont, value last, value k)
 value camlc_continuation_use_noexc(value cont)
 {
   value stack = Field(cont, 0);
-  caml_modify(&Field(cont, 0), Val_unit);
+  camlc_modify(&Field(cont, 0), Val_unit);
   return stack;
 }
 
@@ -1339,9 +1339,9 @@ value camlc_continuation_use_and_update_handler_noexc(value cont, value hval,
   value stack = camlc_continuation_use_noexc(cont), last;
   if (Is_long(stack)) return stack;
   last = Field(cont, 1);
-  caml_modify(&Field(last, Fiber_hval), hval);
-  caml_modify(&Field(last, Fiber_hexn), hexn);
-  caml_modify(&Field(last, Fiber_heff), heff);
+  camlc_modify(&Field(last, Fiber_hval), hval);
+  camlc_modify(&Field(last, Fiber_hexn), hexn);
+  camlc_modify(&Field(last, Fiber_heff), heff);
   return stack;
 }
 
