@@ -67,6 +67,17 @@ let () =
         let m = Sys.opaque_identity (n - 1) in
         fun x -> !over m (x + 1)
 
+(* Partial applications of a function of more than 8 parameters (camlc_papN),
+   whose application to the arguments left is a tail call *)
+let pap = ref (fun _ -> 0)
+
+let rec p9 a b c d e f g i n =
+  if n = 0 then a + b + c + d + e + f + g + i + h n else !pap (n - 1)
+
+(* (Obj.dup: an unknown function, whose partial application is not
+   specialized, unlike through Sys.opaque_identity, which ocamlc drops) *)
+let () = pap := (Obj.obj (Obj.dup (Obj.repr p9)) : _ -> _) 1 2 3 4 5 6 7 (h 8)
+
 (* Unboxed floats *)
 let rec x a (s : float) = if a = 0 then s else y (a - 1) (s +. 1.) (float_of_int (h a))
 
@@ -74,9 +85,10 @@ and y a s z = if a = 0 then s else x (a - 1) (s +. Float.min z 1.)
 
 let () =
   Printf.printf
-    "%d %d %d %.0f %d\n"
+    "%d %d %d %.0f %d %d\n"
     (f n 0 0 0 0)
     (g n 0 0 0)
     (u n 0 0)
     (x n 0.)
     (!over n 0)
+    (!pap n)

@@ -4656,58 +4656,87 @@ let f
           functions_max_arity);
     (* Partial applications: the closure holds the function and the
        arguments already given (after the code pointer of the CPS version,
-       with effect handlers), see [camlc_make_pap] *)
+       with effect handlers), see [camlc_make_pap]. Their application to the
+       arguments left is a tail call, as in OCaml: [camlc_papM] puts all the
+       arguments in [camlc_seg] and its only return calls
+       [camlc_pap_enterA], A the arity of the function, through a table:
+       a tail call of another signature, as [camlc_pap_enterA]'s *)
     let e = if dt then 3 else 2 in
+    let seg_args n =
+      String.concat
+        ~sep:", "
+        (List.init ~len:n ~f:(fun i -> Printf.sprintf "camlc_seg[%d].v" i) @ [ "f" ])
+    in
+    let enter_table name =
+      Printf.bprintf
+        b
+        "static value (*const %s[])(value) = { 0, 0%s };\n\n"
+        name
+        (String.concat
+           ~sep:""
+           (List.init ~len:(out.max_arity - 1) ~f:(fun i ->
+                Printf.sprintf ", %s%d" name (i + 2))))
+    in
+    if program
+    then (
+      for a = 2 to out.max_arity do
+        Printf.bprintf
+          b
+          "static __attribute__((noinline)) value camlc_pap_enter%d(value f) {\n\
+          \  return ((%s)Field(f, 0))(%s);\n\
+           }\n\n"
+          a
+          (fun_type a)
+          (seg_args a);
+        if dt
+        then
+          Printf.bprintf
+            b
+            "static __attribute__((noinline)) value camlc_pap_enter_cps%d(value f) {\n\
+            \  return ((%s)Field(f, 2))(%s);\n\
+             }\n\n"
+            a
+            (fun_type (a + 1))
+            (seg_args (a + 1))
+      done;
+      enter_table "camlc_pap_enter";
+      if dt then enter_table "camlc_pap_enter_cps");
     for m = 1 to if program then out.max_arity - 1 else 0 do
       Printf.bprintf
         b
         "static value camlc_pap%d(%s) {\n\
         \  mlsize_t k = Camlc_wosize_val(env) - %d;\n\
-        \  value *argv = camlc_sp - (k + %d);\n\
-        \  value r;\n\
-        \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
-        \  camlc_sp = argv;\n\
-        \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, %d + i);\n\
-         %s  r = camlc_applyv(Field(env, %d), k + %d, argv);\n\
-        \  camlc_sp = argv + k + %d;\n\
-        \  return r;\n\
+        \  for (mlsize_t i = 0; i < k; i++) camlc_seg[i].v = Field(env, %d + i);\n\
+         %s  return camlc_pap_enter[k + %d](Field(env, %d));\n\
          }\n\n"
         m
         (fun_params m)
         (e + 1)
-        m
         (e + 1)
         (String.concat
            ~sep:""
-           (List.init ~len:m ~f:(fun i -> Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
-        e
+           (List.init ~len:m ~f:(fun i ->
+                Printf.sprintf "  camlc_seg[k + %d].v = a%d;\n" i i)))
         m
-        m;
+        e;
       if dt
       then
-        (* CPS version: the last argument is the continuation *)
+        (* CPS version: the last argument is the continuation. The function
+           has a CPS version, see [camlc_make_pap] *)
         Printf.bprintf
           b
           "static value camlc_pap_cps%d(%s) {\n\
           \  mlsize_t k = Camlc_wosize_val(env) - 4;\n\
-          \  value *argv = camlc_sp - (k + %d);\n\
-          \  value r;\n\
-          \  if (CAMLC_UNLIKELY(argv < camlc_stack_limit)) return camlc_stack_overflow();\n\
-          \  camlc_sp = argv;\n\
-          \  for (mlsize_t i = 0; i < k; i++) argv[i] = Field(env, 4 + i);\n\
-           %s  r = camlc_applyv_cps(Field(env, 3), k + %d, argv);\n\
-          \  camlc_sp = argv + k + %d;\n\
-          \  return r;\n\
+          \  for (mlsize_t i = 0; i < k; i++) camlc_seg[i].v = Field(env, 4 + i);\n\
+           %s  return camlc_pap_enter_cps[k + %d](Field(env, 3));\n\
            }\n\n"
           m
           (fun_params (m + 1))
-          (m + 1)
           (String.concat
              ~sep:""
              (List.init ~len:(m + 1) ~f:(fun i ->
-                  Printf.sprintf "  argv[k + %d] = a%d;\n" i i)))
+                  Printf.sprintf "  camlc_seg[k + %d].v = a%d;\n" i i)))
           m
-          (m + 1)
     done;
     (* The partial applications of the functions of arity at most
        [curry_max]: once applied to the arguments left, they call the
