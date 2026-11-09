@@ -456,6 +456,10 @@ let float_comparisons =
   ; "caml_ge_float", ">="
   ]
 
+(* The float functions of the C library which the primitives of the
+   runtime call (with emscripten's libm, which conforms to C99:
+   HAS_C99_FLOAT_OPS, HAS_WORKING_ROUND, HAS_WORKING_FMA), on unboxed
+   arguments *)
 let float_functions =
   [ "caml_sqrt_float", "sqrt"
   ; "caml_exp_float", "exp"
@@ -470,6 +474,30 @@ let float_functions =
   ; "caml_ceil_float", "ceil"
   ; "caml_abs_float", "fabs"
   ; "caml_trunc_float", "trunc"
+  ; "caml_round_float", "round"
+  ; "caml_exp2_float", "exp2"
+  ; "caml_expm1_float", "expm1"
+  ; "caml_log10_float", "log10"
+  ; "caml_log2_float", "log2"
+  ; "caml_log1p_float", "log1p"
+  ; "caml_cbrt_float", "cbrt"
+  ; "caml_sinh_float", "sinh"
+  ; "caml_cosh_float", "cosh"
+  ; "caml_tanh_float", "tanh"
+  ; "caml_asinh_float", "asinh"
+  ; "caml_acosh_float", "acosh"
+  ; "caml_atanh_float", "atanh"
+  ; "caml_erf_float", "erf"
+  ; "caml_erfc_float", "erfc"
+    (* Two arguments *)
+  ; "caml_atan2_float", "atan2"
+  ; "caml_hypot_float", "hypot"
+  ; "caml_power_float", "pow"
+  ; "caml_fmod_float", "fmod"
+  ; "caml_copysign_float", "copysign"
+  ; "caml_nextafter_float", "nextafter"
+    (* Three *)
+  ; "caml_fma_float", "fma"
   ]
 
 (* The functions of the C library the generated code may call (beyond the
@@ -636,7 +664,13 @@ let primitive out name (args : parg list) =
       pure (Double, Printf.sprintf "(%s %s %s)" (arg Double 0) op (arg Double 1))
   | _, Some op, _, 2 ->
       pure (Value, Printf.sprintf "Val_bool(%s %s %s)" (arg Double 0) op (arg Double 1))
-  | _, _, Some f, 1 -> pure (Double, Printf.sprintf "%s(%s)" f (arg Double 0))
+  | _, _, Some f, _ ->
+      pure
+        ( Double
+        , Printf.sprintf
+            "%s(%s)"
+            f
+            (String.concat ~sep:", " (List.init ~len:n ~f:(fun i -> arg Double i))) )
   | _ -> (
       match specialized_comparison name args, boxed_int_op with
       | Some ("compare", `Int), _ ->
