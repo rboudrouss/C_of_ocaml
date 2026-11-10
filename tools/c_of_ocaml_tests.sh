@@ -21,6 +21,8 @@
 #   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
 #               SPLIT kilobytes
 #   COOC_FLAGS  more flags for c_of_ocaml (--cps-stack for instance)
+#   TAIL_CALLS  no: compiled without the tail calls of WebAssembly (no
+#               -mtail-call), as ocaml-emcc --no-tail-calls
 #
 # emcc, node and ocamlfind must be in PATH (node >= 24 for wasm64).
 
@@ -32,8 +34,9 @@ SYSROOT=${SYSROOT:-$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm$WORD_SIZE}
 C_OF_OCAML=${C_OF_OCAML:-$ROOT/_build/default/compiler/bin-c_of_ocaml/c_of_ocaml.exe}
 JOBS=${JOBS:-$(nproc)}
 RT=$ROOT/runtime/c
-CFLAGS="-O1 -mtail-call -fno-strict-aliasing -fwrapv -fno-strict-overflow \
+CFLAGS="-O1 -fno-strict-aliasing -fwrapv -fno-strict-overflow \
   -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
+[ "${TAIL_CALLS:-yes}" = no ] || CFLAGS="$CFLAGS -mtail-call"
 COOC_FLAGS=${COOC_FLAGS:-}
 LDFLAGS=
 if [ "$WORD_SIZE" = 64 ]; then

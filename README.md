@@ -507,7 +507,9 @@ toplevel code of the tests at every point it can: the same pass.
 `Marshal.Closures`. `tools/c_of_ocaml_tests.sh compiler/tests-c/gc/*.ml` tests `Gc.Memprof`
 and `Gc.create_alarm`. `tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml`
 tests tail calls between functions of different signatures, and loops of
-tail calls through closures. `dune build @compiler/tests-c/runtest` checks the
+tail calls through closures, also without the tail calls of WebAssembly
+(`TAIL_CALLS=no`, with `COOC_FLAGS='--effects=double-translation
+--cps-stack'` for the whole suite on the stack of node). `dune build @compiler/tests-c/runtest` checks the
 primitives called by a program using `Js_of_ocaml.Js.Unsafe`.
 
 All tests pass on both wasm32 and wasm64, except:
