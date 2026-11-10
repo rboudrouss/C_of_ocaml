@@ -392,7 +392,7 @@ let helpers ~out ~mode ~dt b =
         \  if (CAMLC_UNLIKELY(ks < camlc_stack_limit)) return camlc_stack_overflow();\n\
         \  *ks = k;\n\
         \  camlc_sp = ks;\n\
-        \  r = ((%s)Field(f, 0))(%s, f);\n\
+        \  r = Camlc_resolve(((%s)Field(f, 0))(%s, f));\n\
         \  camlc_sp = ks + 1;\n\
         \  if (CAMLC_UNLIKELY(Is_exception_result(r))) return r;\n\
         \  return ((value (*)(value, value))Field(*ks, 0))(r, *ks);\n\

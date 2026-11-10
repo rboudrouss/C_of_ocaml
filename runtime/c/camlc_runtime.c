@@ -162,6 +162,7 @@ static void camlc_thread_start(mlsize_t words)
   t->sp = t->stack_top;
   t->cps_depth = 0;
   t->bounce_n = 0;
+  t->tail_depth = 0;
   t->fiber = Val_unit;
   t->async_exn = Val_unit;
   t->bounce_f = Val_unit;
@@ -907,7 +908,7 @@ int camlc_apply_prefix(value *fp, int n)
     int arity = Arity_closinfo(Closinfo_val(fp[0]));
     value r;
     if (arity >= n - i) return i;
-    r = camlc_call_exact(fp[0], arity, fp + 1 + i);
+    r = Camlc_resolve(camlc_call_exact(fp[0], arity, fp + 1 + i));
     if (Is_exception_result(r)) {
       fp[0] = Extract_exception(r);
       return -1;
@@ -932,7 +933,7 @@ static value camlc_apply_frame(value *fp, int n)
       r = camlc_make_pap(fp[0], remaining, fp + 1 + i);
       break;
     }
-    r = camlc_call_exact(fp[0], arity, fp + 1 + i);
+    r = Camlc_resolve(camlc_call_exact(fp[0], arity, fp + 1 + i));
     if (Is_exception_result(r)) break;
     fp[0] = r;
     i += arity;
@@ -981,6 +982,29 @@ value camlc_applyv(value f, int n, value *args)
 static value camlc_bounce_block[2] = {
   Make_header(1, 0, CAMLC_STATIC_COLOR), Val_unit };
 #define CAMLC_BOUNCE ((value)&camlc_bounce_block[1])
+
+/* A tail call left pending (see camlc.h), [f] applied to the [n]
+   arguments [camlc_bounce_args] */
+value camlc_tail_pending(value f, int n)
+{
+  if (n > CAMLC_MAX_BOUNCE_ARGS)
+    caml_fatal_error("c_of_ocaml: too many arguments");
+  camlc_bounce_f = f;
+  camlc_bounce_n = n;
+  return CAMLC_PENDING;
+}
+
+value camlc_run_pending(void)
+{
+  value r;
+  do {
+    value f = camlc_bounce_f;
+    camlc_bounce_f = Val_unit;
+    /* (which copies the arguments to the shadow stack first) */
+    r = camlc_applyv(f, camlc_bounce_n, camlc_bounce_args);
+  } while (r == CAMLC_PENDING);
+  return r;
+}
 
 value camlc_cps_bounce(value f, int n)
 {
@@ -1110,11 +1134,11 @@ value camlc_applyv_cps(value f, int n, value *args)
     /* A function without CPS version, which cannot perform an effect:
        it is applied in direct style */
     if (arity >= remaining) {
-      r = camlc_applyv(fp[0], remaining, fp + 1 + i);
+      r = Camlc_resolve(camlc_applyv(fp[0], remaining, fp + 1 + i));
       if (!Is_exception_result(r)) r = camlc_continue(fp[1 + n], r);
       break;
     }
-    r = camlc_call_exact(fp[0], arity, fp + 1 + i);
+    r = Camlc_resolve(camlc_call_exact(fp[0], arity, fp + 1 + i));
     if (Is_exception_result(r)) break;
     fp[0] = r;
     i += arity;
@@ -1128,6 +1152,8 @@ value camlc_applyv_cps(value f, int n, value *args)
 static value camlc_cps_run(value res)
 {
   while (1) {
+    /* (a direct-style call of the CPS code, a tail call) */
+    if (!CAMLC_TAIL_CALLS && res == CAMLC_PENDING) res = camlc_run_pending();
     if (res == CAMLC_BOUNCE) {
       int n = camlc_bounce_n, direct = n < 0;
       if (direct) n = -n;
@@ -1474,17 +1500,17 @@ CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
 {
   camlc_thread_check();
   if (CAMLC_UNLIKELY(camlc_c_stack_exhausted())) return camlc_stack_overflow();
-  if (!camlc_segments) return camlc_applyv(closure, narg, args);
+  if (!camlc_segments) return Camlc_resolve(camlc_applyv(closure, narg, args));
   if (camlc_callback_from_code) {
     /* It goes on on new segments as its caller would */
     camlc_callback_from_code = 0;
-    return camlc_applyv(closure, narg, args);
+    return Camlc_resolve(camlc_applyv(closure, narg, args));
   }
   /* No new segment in a callback: C code or JavaScript may be on the
      stack, which a JSPI context cannot suspend */
   value *limit = camlc_segment_limit;
   camlc_segment_limit = camlc_stack_limit;
-  value res = camlc_applyv(closure, narg, args);
+  value res = Camlc_resolve(camlc_applyv(closure, narg, args));
   camlc_segment_limit = limit;
   return res;
 }
@@ -2550,6 +2576,14 @@ value camlc_get_unit(const char *name)
   return camlc_exception_with_string(FAILURE_EXN, buf);
 }
 
+/* The toplevel code of the plugin being loaded, run by camlc_ccall0 */
+static _Thread_local value (*camlc_plugin_program)(void);
+
+static value camlc_run_plugin_program(void)
+{
+  return Camlc_resolve(camlc_plugin_program());
+}
+
 value camlc_load_plugin(const struct camlc_plugin *p)
 {
   value res;
@@ -2595,7 +2629,8 @@ value camlc_load_plugin(const struct camlc_plugin *p)
     pthread_mutex_unlock(&camlc_units_lock);
     if (error != NULL) caml_failwith(error);
   }
-  res = camlc_ccall0(p->program);
+  camlc_plugin_program = p->program;
+  res = camlc_ccall0(camlc_run_plugin_program);
   if (Is_exception_result(res)) caml_raise(Extract_exception(res));
   return Val_unit;
 }
@@ -2792,7 +2827,7 @@ CAMLprim value caml_dynlink_get_bytecode_sections(value unit)
 /****************************************************************/
 /* Startup (follows caml_startup_code_exn, without the bytecode) */
 
-static value camlc_run_program(void) { return camlc_program(); }
+static value camlc_run_program(void) { return Camlc_resolve(camlc_program()); }
 
 void camlc_main(char **argv)
 {

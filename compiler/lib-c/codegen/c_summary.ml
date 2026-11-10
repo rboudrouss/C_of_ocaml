@@ -329,6 +329,23 @@ let analyze_functions out facts global_flow_info closures blocks functions =
   in
   List.iter summaries ~f:(fun s -> if not (Var.Hashtbl.mem index s.fn) then visit s.fn);
   out.components <- components;
+  (* The functions which may return a tail call left pending: those making
+     a tail call which may loop (unknown, or to their component, see
+     [translate_tail_call]), and those making a known tail call to such a
+     function *)
+  let recursive_tail s =
+    match Var.Hashtbl.find_opt components s.fn with
+    | Some c ->
+        List.exists s.tail ~f:(fun g ->
+            match Var.Hashtbl.find_opt components g with
+            | Some c' -> c = c'
+            | None -> false)
+    | None -> false
+  in
+  out.pending <-
+    propagate
+      (roots (fun s -> s.unknown_tail || recursive_tail s))
+      (callers (fun s -> s.tail));
   (* With --cps-stack, the recursive functions with a CPS version may go on
      in it, which allocates (see [camlc_cps_stack]): the linear recursions
      (one call which may be recursive on each path), and the others which

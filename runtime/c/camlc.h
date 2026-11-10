@@ -110,6 +110,9 @@ struct camlc_thread {
   value *stack_base, *stack_top;
   int cps_depth;
   int bounce_n;
+  /* Without wasm tail calls: the tail calls which may loop under way (see
+     [CAMLC_PENDING]) */
+  int tail_depth;
   value fiber, bounce_f;
   value bounce_args[CAMLC_MAX_BOUNCE_ARGS];
   /* A call on a new segment: the function, its result then its arguments */
@@ -237,6 +240,40 @@ extern const int camlc_curry_max;
 /* Allocate the closure for the partial application of [f] to [n]
    arguments [args] */
 value camlc_make_pap(value f, int n, value *args);
+
+/* Without the tail calls of WebAssembly (asyncify, --no-tail-calls), the
+   tail calls are plain calls: a loop of tail calls through closures (a
+   function and its continuations, a state machine), which runs in
+   constant space in OCaml, would grow the stack of the engine, out of reach
+   of the frame checks (a tail call releases its frame). The tail calls
+   which may loop count those under way, which return to the caller once
+   done ([camlc_tail_depth]). Beyond [CAMLC_TAIL_DEPTH], such a call is not
+   made: it is recorded as a bounce ([camlc_bounce_f] and its arguments in
+   [camlc_bounce_args]) and [CAMLC_PENDING] returned, an exception result
+   that the frames of the tail calls return as is, as an exception. The
+   first call which is not a tail call (of the generated code, or of the
+   runtime) makes it ([camlc_run_pending]), and so on: the loop goes on
+   there, with as many tail calls under way as before. With the tail
+   calls of WebAssembly, none of this is compiled. */
+#ifndef CAMLC_TAIL_DEPTH
+#define CAMLC_TAIL_DEPTH 256
+#endif
+#define camlc_tail_depth (camlc_thread.tail_depth)
+/* The exception result of a null pointer, never raised: a constant */
+#define CAMLC_PENDING ((value)2)
+value camlc_tail_pending(value f, int n);
+value camlc_run_pending(void);
+/* The result [r] of a call which is not a tail call: the call left
+   pending made */
+#define Camlc_resolve(r)                                                     \
+  ({ value camlc_r_ = (r);                                                   \
+     !CAMLC_TAIL_CALLS && CAMLC_UNLIKELY(camlc_r_ == CAMLC_PENDING)          \
+       ? camlc_run_pending() : camlc_r_; })
+/* Same, an exception result [r] being checked: whether the result is still
+   an exception result once the call left pending is made */
+#define Camlc_raised(r)                                                      \
+  (CAMLC_TAIL_CALLS || (r) != CAMLC_PENDING                                  \
+   || Is_exception_result((r) = camlc_run_pending()))
 
 /* Effect handlers (OCaml 5, with double translation: c_of_ocaml
    --effects=double-translation).

@@ -210,6 +210,7 @@ let f
     ; cps_fallback = Var.Set.empty
     ; components = Var.Hashtbl.create 16
     ; unknown_tail_calls = Var.Set.empty
+    ; pending = Var.Set.empty
     ; in_cps
     ; trampolined = trampolined_calls
     ; cps_pairs
@@ -387,7 +388,8 @@ let f
           else
             Printf.bprintf
               b
-              "  r = %s();\n  if (CAMLC_UNLIKELY(Is_exception_result(r))) return r;\n"
+              "  r = Camlc_resolve(%s());\n\
+              \  if (CAMLC_UNLIKELY(Is_exception_result(r))) return r;\n"
               name);
       Buffer.add_string b "}\n\n";
       out.definitions <-

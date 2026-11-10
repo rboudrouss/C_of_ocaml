@@ -249,6 +249,19 @@ applies it, then its results, to the first ones (`camlc_apply_prefix`), and
 makes the last application in tail position (`camlc_lastN_K`), as OCaml
 does.
 
+Without the tail call extension (asyncify, `ocaml-emcc --no-tail-calls`, for
+the browsers that lack it), tail calls are plain calls. The tail calls which
+may loop (the same ones) count those under way (`camlc_tail_depth`). Past
+`CAMLC_TAIL_DEPTH` (256), such a call is left pending: its callee and
+arguments go to `camlc_bounce_args`, and it returns `CAMLC_PENDING`, an
+exception result that the frames of the tail calls return as is. The first
+call which is not a tail call, in the generated code or in the runtime, makes
+it (`camlc_run_pending`): a loop of tail calls through closures still runs in
+constant space. Only the calls of the functions which may return such a call
+check for it: those making a tail call which may loop, or a known tail call to
+such a function (`pending` in `c_summary.ml`). None of this is compiled with `-mtail-call`: the code is
+then unchanged.
+
 **GC roots.** Variables that are live across a point where the GC may run (an
 allocation or a call) are stored in the function's frame on a shadow stack,
 which the GC scans through `caml_scan_roots_hook`. Variables holding integers

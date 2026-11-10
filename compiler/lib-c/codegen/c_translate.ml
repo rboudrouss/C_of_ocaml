@@ -631,6 +631,47 @@ let translate_tail_call ctx x ~f ~args ~exact =
     then if k > 0 then Printf.sprintf " camlc_sp = bx + %d;" k else ""
     else " camlc_sp = fp + FRAME_SIZE;"
   in
+  (* Without [CAMLC_TAIL_CALLS], a tail call which may loop is counted, and
+     left pending beyond [CAMLC_TAIL_DEPTH] (see [CAMLC_PENDING]): only
+     in direct style (the CPS code bounces), between values *)
+  let pending call =
+    match kind, ctx.fn with
+    | (Known _ | Unknown), Some fn
+      when String.equal bounce ""
+           && (not (Var.Set.mem fn ctx.out.cps_sides))
+           && repr_equal ret Value
+           && repr_equal ctx.ret Value
+           && List.for_all reprs ~f:(fun r -> repr_equal r Value)
+           && (recursive_call
+                 ctx.out
+                 ctx.global_flow_info
+                 ctx.closures
+                 ~fn:ctx.fn
+                 (x, f, exact)
+              ||
+              match kind with
+              | Known g -> Var.Set.mem g ctx.out.unknown_tail_calls
+              | Known_direct _ | Unknown -> false) ->
+        (* The closure, then the arguments *)
+        let closure, arguments =
+          match kind with
+          | Known _ -> n, List.init ~len:n ~f:Fun.id
+          | Unknown when exact -> n, List.init ~len:n ~f:Fun.id
+          | Unknown | Known_direct _ -> 0, List.init ~len:n ~f:(fun i -> i + 1)
+        in
+        Printf.sprintf
+          " if (!CAMLC_TAIL_CALLS) { if (CAMLC_UNLIKELY(++camlc_tail_depth > \
+           CAMLC_TAIL_DEPTH)) { camlc_tail_depth--; %s return camlc_tail_pending(%s, \
+           %d); } value tr = %s; camlc_tail_depth--; return tr; }"
+          (String.concat
+             ~sep:" "
+             (List.mapi arguments ~f:(fun i j ->
+                  Printf.sprintf "camlc_bounce_args[%d] = %s;" i (t j))))
+          (t closure)
+          n
+          call
+    | _ -> ""
+  in
   match kind with
   | Known_direct _ ->
       (* The continuation is kept on the shadow stack during the call *)
@@ -638,9 +679,10 @@ let translate_tail_call ctx x ~f ~args ~exact =
       line
         ctx
         "{ %s%s%s value *ks = camlc_sp - 1; if (CAMLC_UNLIKELY(ks < camlc_stack_limit)) \
-         return camlc_stack_overflow(); *ks = t%d; camlc_sp = ks; value r = %s; camlc_sp \
-         = ks + 1; if (CAMLC_UNLIKELY(Is_exception_result(r))) return r; return ((value \
-         (*)(value, value))Field(*ks, 0))(r, *ks); }"
+         return camlc_stack_overflow(); *ks = t%d; camlc_sp = ks; value r = \
+         Camlc_resolve(%s); camlc_sp = ks + 1; if \
+         (CAMLC_UNLIKELY(Is_exception_result(r))) return r; return ((value (*)(value, \
+         value))Field(*ks, 0))(r, *ks); }"
         (String.concat ~sep:" " temps)
         pop
         bounce
@@ -698,23 +740,28 @@ let translate_tail_call ctx x ~f ~args ~exact =
       in
       line
         ctx
-        "{ %s%s%s%s %sreturn %s; }"
+        "{ %s%s%s%s%s %sreturn %s; }"
         (String.concat ~sep:" " temps)
         pop
         bounce
+        (pending call)
         through
         (if musttail then "CAMLC_MUSTTAIL " else "")
-        (if repr_equal ret ctx.ret then call else unbox ctx.ret call)
+        (if repr_equal ret ctx.ret
+         then call
+         else unbox ctx.ret (Printf.sprintf "Camlc_resolve(%s)" call))
 
 let translate_instr ctx traps i =
   match i with
   | Let (x, e) -> (
       let dst = slot ctx x in
-      let checked ?(bt = `Raise false) call =
+      let checked ?(bt = `Raise false) ?(pending = false) call =
         line ctx "r = %s;" call;
         line
           ctx
-          "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
+          "if (CAMLC_UNLIKELY(Is_exception_result(r))%s) %s"
+          (* A call: a tail call of the callee may be left pending *)
+          (if pending then " && Camlc_raised(r)" else "")
           (raise_stmt ~bt ctx traps "r");
         define ctx x Value "r"
       in
@@ -731,24 +778,36 @@ let translate_instr ctx traps i =
           (* The typing ensures that an unboxed result is never boxed *)
           if (not (repr_equal ret Value)) && repr_equal (var_repr ctx x) Value
           then failwith "c_of_ocaml: an unboxed result would need to be boxed";
+          (* Whether the callee may return a tail call left pending *)
+          let pending =
+            match callee ctx x ~f ~exact with
+            | Known g -> Var.Set.mem g ctx.out.pending
+            | Known_direct _ | Unknown -> true
+          in
           let callee, args, _ = apply ctx x ~f ~args ~exact in
+          let resolve call =
+            if pending && repr_equal ret Value
+            then Printf.sprintf "Camlc_resolve(%s)" call
+            else call
+          in
           if not raises
           then
             if k = 0
-            then define ctx x ret (c_call callee args)
+            then define ctx x ret (resolve (c_call callee args))
             else (
-              line ctx "{ %s rv = %s;" (c_type ret) (c_call callee args);
+              line ctx "{ %s rv = %s;" (c_type ret) (resolve (c_call callee args));
               line ctx "camlc_sp = bx + %d;" k;
               define ctx x ret "rv";
               line ctx "}")
           else if k = 0
-          then checked ~bt:`Call (c_call callee args)
+          then checked ~bt:`Call ~pending (c_call callee args)
           else (
             line ctx "r = %s;" (c_call callee args);
             line ctx "camlc_sp = bx + %d;" k;
             line
               ctx
-              "if (CAMLC_UNLIKELY(Is_exception_result(r))) %s"
+              "if (CAMLC_UNLIKELY(Is_exception_result(r))%s) %s"
+              (if pending then " && Camlc_raised(r)" else "")
               (raise_stmt ~bt:`Call ctx traps "r");
             define ctx x Value "r")
       | Block (tag, a, _, _, _) ->

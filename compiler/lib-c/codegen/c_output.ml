@@ -53,6 +53,9 @@ type output =
   ; mutable unknown_tail_calls : Var.Set.t
         (** The functions which may make an unknown tail call, by themselves
             or through known tail calls *)
+  ; mutable pending : Var.Set.t
+        (** The functions which may return a tail call left pending, without
+            the tail calls of WebAssembly (see [CAMLC_PENDING]) *)
   ; mutable cps_fallback : Var.Set.t
         (** With --cps-stack, the functions which may go on in their CPS version *)
   ; in_cps : Var.Set.t  (** The CPS calls *)
