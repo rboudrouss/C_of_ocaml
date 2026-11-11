@@ -638,6 +638,7 @@ let translate_tail_call ctx x ~f ~args ~exact =
     match kind, ctx.fn with
     | (Known _ | Unknown), Some fn
       when String.equal bounce ""
+           && (not (is_cps_call ctx x))
            && (not (Var.Set.mem fn ctx.out.cps_sides))
            && repr_equal ret Value
            && repr_equal ctx.ret Value
