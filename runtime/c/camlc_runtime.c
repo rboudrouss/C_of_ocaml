@@ -124,6 +124,11 @@ _Thread_local struct camlc_thread camlc_thread;
 #define camlc_fiber (camlc_thread.fiber)
 #define camlc_bounce_f (camlc_thread.bounce_f)
 #define camlc_bounce_n (camlc_thread.bounce_n)
+/* The number of arguments of a bounce: [n] for a CPS call, [-n - 1] for an
+   exact call in direct style (see [camlc_cps_bounce_direct]), which may
+   have no argument (the closure of a block of CPS code without
+   parameter) */
+#define camlc_bounce_args_n(b) ((b) < 0 ? -(b) - 1 : (b))
 
 #if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 3)
 #define CAMLC_MAX_DOMAINS (caml_params->max_domains)
@@ -205,7 +210,7 @@ static void camlc_scan_roots(scanning_action action,
     if (Is_block(t->fiber)) action(fdata, t->fiber, &t->fiber);
     if (Is_block(t->async_exn)) action(fdata, t->async_exn, &t->async_exn);
     if (Is_block(t->bounce_f)) action(fdata, t->bounce_f, &t->bounce_f);
-    for (int i = 0; i < t->bounce_n; i++) {
+    for (int i = 0; i < camlc_bounce_args_n(t->bounce_n); i++) {
       value v = t->bounce_args[i];
       if (Is_block(v)) action(fdata, v, &t->bounce_args[i]);
     }
@@ -245,7 +250,7 @@ static void camlc_scan_roots(scanning_action action)
     if (Is_block(t->fiber)) action(t->fiber, &t->fiber);
     if (Is_block(t->async_exn)) action(t->async_exn, &t->async_exn);
     if (Is_block(t->bounce_f)) action(t->bounce_f, &t->bounce_f);
-    for (int i = 0; i < t->bounce_n; i++) {
+    for (int i = 0; i < camlc_bounce_args_n(t->bounce_n); i++) {
       value v = t->bounce_args[i];
       if (Is_block(v)) action(v, &t->bounce_args[i]);
     }
@@ -999,9 +1004,11 @@ value camlc_run_pending(void)
   value r;
   do {
     value f = camlc_bounce_f;
+    int n = camlc_bounce_n;
     camlc_bounce_f = Val_unit;
+    camlc_bounce_n = 0;
     /* (which copies the arguments to the shadow stack first) */
-    r = camlc_applyv(f, camlc_bounce_n, camlc_bounce_args);
+    r = camlc_applyv(f, n, camlc_bounce_args);
   } while (r == CAMLC_PENDING);
   return r;
 }
@@ -1023,7 +1030,7 @@ value camlc_cps_bounce_direct(value f, int n)
   if (n > CAMLC_MAX_BOUNCE_ARGS)
     caml_fatal_error("c_of_ocaml: too many arguments");
   camlc_bounce_f = f;
-  camlc_bounce_n = -n;
+  camlc_bounce_n = -n - 1;
   return CAMLC_BOUNCE;
 }
 
@@ -1155,8 +1162,7 @@ static value camlc_cps_run(value res)
     /* (a direct-style call of the CPS code, a tail call) */
     if (!CAMLC_TAIL_CALLS && res == CAMLC_PENDING) res = camlc_run_pending();
     if (res == CAMLC_BOUNCE) {
-      int n = camlc_bounce_n, direct = n < 0;
-      if (direct) n = -n;
+      int n = camlc_bounce_args_n(camlc_bounce_n), direct = camlc_bounce_n < 0;
       value *a = camlc_sp - (n + 1);
       camlc_bounce_n = 0;
       if (CAMLC_UNLIKELY(a < camlc_stack_limit)) {

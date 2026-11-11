@@ -337,7 +337,9 @@ let tables
   done;
   if program
   then (
-    (* Exact calls with the arguments in an array. The error is in a
+    (* Exact calls with the arguments in an array, also to no argument (the
+       closure of a block of CPS code without parameter, called again from
+       [camlc_cps_run] or [camlc_run_pending]). The error is in a
        function of its own: the arguments of a variadic call are on the C
        stack of the linear memory, which would give [camlc_call_exact] a
        frame there, during the call *)
@@ -347,7 +349,8 @@ let tables
       \  caml_fatal_error(\"c_of_ocaml: arity %%d\", n);\n\
        }\n\n\
        value camlc_call_exact(value f, int n, value *args) {\n\
-      \  switch (n) {\n";
+      \  switch (n) {\n\
+      \  case 0: return ((value (*)(value))Field(f, 0))(f);\n";
     for n = 1 to out.max_arity do
       Printf.bprintf
         b
