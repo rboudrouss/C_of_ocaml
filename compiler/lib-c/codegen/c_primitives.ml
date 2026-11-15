@@ -86,6 +86,16 @@ let noraise_primitives =
     ; "caml_atomic_cas_field"
     ; "caml_atomic_exchange_field"
     ; "caml_atomic_fetch_add_field"
+    ; "caml_lazy_update_to_forcing"
+    ; "caml_lazy_update_to_forward"
+    ; "caml_lazy_reset_to_lazy"
+    ; "caml_domain_dls_get"
+    ; "caml_get_public_method"
+    ; "caml_set_oo_id"
+    ; "caml_string_hash"
+    ; "caml_sys_time"
+    ; "caml_int32_float_of_bits"
+    ; "caml_int32_bits_of_float"
     ]
 
 let float_binops =
