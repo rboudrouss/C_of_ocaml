@@ -72,3 +72,53 @@ let find_first l =
   go 0 l
 
 let () = Printf.printf "return %d\n" (find_first (List.init 5000 (fun i -> i)))
+
+(* An exception raised inside a handler of the loop by a block which does
+   not go back to the loop header, the loop left by an exception only *)
+exception Done of int
+
+let handlers_inside n =
+  let s = Array.make 8 3 in
+  let count = Array.make 1 0 in
+  while true do
+    count.(0) <- count.(0) + 1;
+    try
+      for i = 2 to 7 do
+        let sx = s.(i) in
+        if sx <> 0
+        then (
+          s.(i) <- sx - 1;
+          raise Exit);
+        if count.(0) >= n then raise (Done (count.(0) + i));
+        s.(i) <- i
+      done
+    with Exit -> ()
+  done
+
+let () =
+  try handlers_inside 100_000 with Done n -> Printf.printf "handlers inside %d\n" n
+
+(* (the same, with no variable of the loop used after it) *)
+let handlers_inside' n =
+  let s = Array.make 8 3 in
+  let k = Array.make 1 0 in
+  let count = Array.make 1 0 in
+  while true do
+    count.(0) <- count.(0) + 1;
+    try
+      for i = 2 to 7 do
+        k.(0) <- i;
+        if s.(i) <> 0 then raise Exit;
+        if count.(0) >= n then raise Exit;
+        s.(i) <- i
+      done
+    with _ ->
+      if count.(0) >= n
+      then raise (Done (-count.(0)))
+      else
+        let i = k.(0) in
+        s.(i) <- s.(i) - 1
+  done
+
+let () =
+  try handlers_inside' 100_000 with Done n -> Printf.printf "handlers inside' %d\n" n

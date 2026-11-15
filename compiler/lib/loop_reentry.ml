@@ -254,7 +254,40 @@ let f p =
             Addr.Set.iter add (preds_of pc))
         in
         Addr.Set.iter add back;
-        Some (back, !body)
+        (* With the blocks run inside an exception handler of the loop,
+           which do not go back to its header (they raise the exception
+           caught by the handler, or stop the program): their exceptions
+           must stay in [g]. None if they are reached from out of the loop. *)
+        let extra = ref Addr.Set.empty in
+        let seen = Addr.Hashtbl.create 16 in
+        let rec visit pc depth =
+          if not (Addr.Hashtbl.mem seen pc)
+          then (
+            Addr.Hashtbl.add seen pc ();
+            let b = Addr.Map.find pc !blocks in
+            let next (pc', _) depth =
+              if Addr.Set.mem pc' !body
+              then visit pc' depth
+              else if depth > 0 && pc' <> h
+              then (
+                extra := Addr.Set.add pc' !extra;
+                visit pc' depth)
+            in
+            match b.branch with
+            | Pushtrap (c1, _, c2) ->
+                next c1 (depth + 1);
+                next c2 depth
+            | Poptrap c -> next c (depth - 1)
+            | _ -> List.iter (successors b) ~f:(fun c -> next c depth))
+        in
+        visit h 0;
+        let body = Addr.Set.union !body !extra in
+        if
+          Addr.Set.for_all
+            (fun pc -> Addr.Set.for_all (fun pc' -> Addr.Set.mem pc' body) (preds_of pc))
+            !extra
+        then Some (back, body)
+        else None
     in
     let handled = ref Addr.Set.empty in
     List.iter (Structure.blocks_in_reverse_post_order g) ~f:(fun h ->
