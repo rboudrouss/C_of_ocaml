@@ -69,6 +69,7 @@ let translate_function
     ; framed = false
     ; framed_blocks = None
     ; frame_push = ""
+    ; exn_exits = String.Hashtbl.create 16
     }
   in
   List.iter env ~f:(fun (x, loc) -> Var.Hashtbl.replace ctx.locations x loc);
@@ -581,6 +582,8 @@ let translate_function
   Buffer.add_string
     fb
     "  value r, b, *argv, *bx;\n  (void)r; (void)b; (void)argv; (void)bx;\n";
+  if String.Hashtbl.length ctx.exn_exits > 0
+  then Buffer.add_string fb "  const struct camlc_location *el;\n";
   if entry_poll
   then
     Printf.bprintf
@@ -611,6 +614,12 @@ let translate_function
       (frame_check ~restartable:true)
       initialized;
   Buffer.add_buffer fb ctx.buf;
+  (* The shared exits of the exceptions *)
+  List.iter
+    (List.sort
+       ~cmp:(fun (_, n) (_, n') -> compare n n')
+       (String.Hashtbl.fold (fun code n acc -> (code, n) :: acc) ctx.exn_exits []))
+    ~f:(fun (code, n) -> Printf.bprintf fb " E%d:;\n  %s\n" n code);
   if !segment_label then Printf.bprintf fb " S:;\n  %s\n" (segment_stmt ());
   Buffer.add_string fb "}\n";
   if frame_size > 0 then Buffer.add_string fb "#undef FRAME_SIZE\n";

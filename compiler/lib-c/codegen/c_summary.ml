@@ -122,6 +122,7 @@ let analysis_ctx out facts global_flow_info closures blocks =
   ; framed = false
   ; framed_blocks = None
   ; frame_push = ""
+  ; exn_exits = String.Hashtbl.create 16
   }
 
 let analyze_functions out facts global_flow_info closures blocks functions =

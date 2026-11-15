@@ -68,26 +68,44 @@ type fctx =
   ; mutable framed_blocks : Addr.Set.t option
         (** The blocks where the frame is allocated, if not all *)
   ; mutable frame_push : string  (** Allocates the frame *)
+  ; exn_exits : int String.Hashtbl.t
+        (** The code of the exits taken by exceptions recording a backtrace
+            slot, shared by the sites taking them (the slot in [el]): label
+            [E<n>] *)
   }
 
 (* Record a backtrace slot, if debug information is enabled: [`Call] when
    an exception goes through a call, [`Raise reraise] when one is raised
    (with the exception [e]) *)
-let backtrace_stmt ctx kind e =
+let backtrace_location ctx kind =
   match ctx.position with
-  | Some pi when ctx.out.debug_info -> (
-      match kind with
-      | `Call ->
-          Printf.sprintf
-            "if (Caml_state->backtrace_active) camlc_backtrace_call(%s); "
-            (location ctx.out pi ~fun_name:ctx.source_name ~is_raise:false)
-      | `Raise reraise ->
-          Printf.sprintf
-            "if (Caml_state->backtrace_active) camlc_backtrace_raise(%s, %s, %d); "
-            e
-            (location ctx.out pi ~fun_name:ctx.source_name ~is_raise:true)
-            (if reraise then 1 else 0))
-  | Some _ | None -> ""
+  | Some pi when ctx.out.debug_info ->
+      Some
+        (location
+           ctx.out
+           pi
+           ~fun_name:ctx.source_name
+           ~is_raise:
+             (match kind with
+             | `Call -> false
+             | `Raise _ -> true))
+  | Some _ | None -> None
+
+let backtrace_code kind e loc =
+  match kind with
+  | `Call ->
+      Printf.sprintf "if (Caml_state->backtrace_active) camlc_backtrace_call(%s); " loc
+  | `Raise reraise ->
+      Printf.sprintf
+        "if (Caml_state->backtrace_active) camlc_backtrace_raise(%s, %s, %d); "
+        e
+        loc
+        (if reraise then 1 else 0)
+
+let backtrace_stmt ctx kind e =
+  match backtrace_location ctx kind with
+  | Some loc -> backtrace_code kind e loc
+  | None -> ""
 
 let location ctx x =
   match Var.Hashtbl.find_opt ctx.locations x with
@@ -249,20 +267,35 @@ let return_stmt ?(r = Value) ctx e =
     Printf.sprintf "{ %s res = %s; camlc_sp = fp + FRAME_SIZE; return res; }" (c_type r) e
 
 (* Jump to the handler of the innermost trap, or return the exception
-   result [r] *)
+   result [r]. Recording a backtrace slot, the code of the C variable [r]
+   is shared by the sites with the same target (see [exn_exits]): only the
+   slot differs, on the exceptional paths, after each call. *)
 let raise_stmt ?bt ctx traps r =
-  let pre =
-    match bt with
-    | None -> ""
-    | Some kind -> backtrace_stmt ctx kind (Printf.sprintf "Extract_exception(%s)" r)
-  in
   let stmt =
     match traps with
     | [] -> return_stmt ctx r
     | { exn_var; id; _ } :: _ ->
         Printf.sprintf "{ %s = Extract_exception(%s); goto H%d; }" (slot ctx exn_var) r id
   in
-  if String.equal pre "" then stmt else Printf.sprintf "{ %s%s }" pre stmt
+  match bt with
+  | None -> stmt
+  | Some kind -> (
+      let e = Printf.sprintf "Extract_exception(%s)" r in
+      match backtrace_location ctx kind with
+      | None -> stmt
+      | Some loc when not (String.equal r "r") ->
+          Printf.sprintf "{ %s%s }" (backtrace_code kind e loc) stmt
+      | Some loc ->
+          let code = backtrace_code kind e "el" ^ stmt in
+          let n =
+            match String.Hashtbl.find_opt ctx.exn_exits code with
+            | Some n -> n
+            | None ->
+                let n = String.Hashtbl.length ctx.exn_exits in
+                String.Hashtbl.add ctx.exn_exits code n;
+                n
+          in
+          Printf.sprintf "{ el = %s; goto E%d; }" loc n)
 
 (* An overflow of the shadow stack *)
 let overflow_stmt ctx traps =
