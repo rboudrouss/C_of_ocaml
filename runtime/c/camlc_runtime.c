@@ -707,6 +707,31 @@ static int camlc_compare_val(value v1, value v2, int total, intnat *res)
         else goto next_item;
         return 1;
       }
+    } else if (t == Custom_tag) {
+      /* The boxed integers (as their [compare] custom operation); the
+         other custom blocks, and those of different operations, by the C
+         primitive */
+      const struct custom_operations *ops = Custom_ops_val(v1);
+      if (ops != Custom_ops_val(v2)) return 0;
+      if (ops == &caml_int64_ops) {
+        int64_t i1 = Int64_val(v1), i2 = Int64_val(v2);
+        if (i1 != i2) {
+          *res = i1 < i2 ? -1 : 1;
+          return 1;
+        }
+      } else if (ops == &caml_int32_ops) {
+        int32_t i1 = Int32_val(v1), i2 = Int32_val(v2);
+        if (i1 != i2) {
+          *res = i1 < i2 ? -1 : 1;
+          return 1;
+        }
+      } else if (ops == &caml_nativeint_ops) {
+        intnat i1 = Nativeint_val(v1), i2 = Nativeint_val(v2);
+        if (i1 != i2) {
+          *res = i1 < i2 ? -1 : 1;
+          return 1;
+        }
+      } else return 0;
     } else if (t < Lazy_tag - 2) {
       /* Below the tags of lazy values, continuations and closures */
       mlsize_t sz = Wosize_val(v1);
