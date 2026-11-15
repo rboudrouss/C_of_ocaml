@@ -3,5 +3,7 @@ handlers -114284
 closures 1001000 993
 nested 11839280 2000000
 return 1001
+exits i 1000
+exits' x 2002 i 667
 handlers inside 100002
 handlers inside' -100000

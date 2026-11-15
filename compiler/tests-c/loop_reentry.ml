@@ -73,6 +73,37 @@ let find_first l =
 
 let () = Printf.printf "return %d\n" (find_first (List.init 5000 (fun i -> i)))
 
+(* Several edges out of the loop, each with some of its variables used
+   after it *)
+let exits n m =
+  let rec go i =
+    let x = (i * 3) + opaque 1 in
+    Hashtbl.replace h 0 x;
+    if x > n
+    then Printf.printf "exits x %d i %d\n" x i
+    else if i land 1023 = m
+    then Printf.printf "exits i %d\n" i
+    else go (i + 1)
+  in
+  go 0
+
+let () = exits 3_000_000 1000
+
+(* (the same, called once too, leaving by the other edge) *)
+let exits' n m =
+  let rec go i =
+    let x = (i * 3) + opaque 1 in
+    Hashtbl.replace h 0 x;
+    if x > n
+    then Printf.printf "exits' x %d i %d\n" x i
+    else if i land 1023 = m
+    then Printf.printf "exits' i %d\n" i
+    else go (i + 1)
+  in
+  go 0
+
+let () = exits' 2_000 5_000
+
 (* An exception raised inside a handler of the loop by a block which does
    not go back to the loop header, the loop left by an exception only *)
 exception Done of int

@@ -33,14 +33,16 @@
    mailbox, a block allocated at the start of the program: 0, call [g]
    again with the parameters of the loop header ([limit] doubled, from
    [first_limit] to [max_limit]); [j + 1], take the [j]-th edge out of the
-   loop, with its arguments and the variables of the loop used after it
-   (renamed out of [g]); [n + 1], return the value. [g] is closed (its
-   free variables are parameters): neither it nor the values it returns
-   are allocated. The blocks of the loop move to [g] unchanged, but for its
-   edges. Loops are left as they are when they contain assignments,
-   exception handlers not wholly inside them, parameters holding unboxed
-   numbers (boxed through [g]), little code (which the C compiler may
-   remove), or variables used after them with several edges out. *)
+   loop, with its arguments; [n + 1], return the value. The variables of
+   the loop used after it are in the first fields of the mailbox, which
+   the driver reads after each call (they are renamed out of [g]), and
+   which the mailbox no longer holds once out of the loop. [g] is closed
+   (its free variables are parameters): neither it nor the values it
+   returns are allocated. The blocks of the loop move to [g] unchanged, but
+   for its edges. Loops are left as they are when they contain
+   assignments, exception handlers not wholly inside them, parameters
+   holding unboxed numbers (boxed through [g]), or little code (which the
+   C compiler may remove). *)
 
 open! Stdlib
 open Code
@@ -391,8 +393,7 @@ let f p =
                   body
               in
               let n_exits = List.length exits in
-              (* The edges out of the loop: with the variables used after the
-                 loop, a single one, from a block where they are defined *)
+              (* The edges out of the loop *)
               let exit_edges =
                 Addr.Set.fold
                   (fun pc acc ->
@@ -404,29 +405,27 @@ let f p =
                   body
                   []
               in
-              let live_out_ok =
-                List.is_empty live_out
-                ||
-                match exit_edges with
-                | [ (u, _) ] ->
-                    (not returns)
-                    && List.for_all live_out ~f:(fun x ->
-                        dominates (Var.Map.find x !defined) u)
-                | _ -> false
+              (* The variables used after the loop which an edge out of it
+                 to [pc'] passes on: those defined in a block dominating the
+                 blocks of these edges. The others are not used after these
+                 edges: their uses are dominated by their definitions, which,
+                 in an outermost loop, cannot run again after it. *)
+              let passed_on pc' =
+                List.filter live_out ~f:(fun x ->
+                    let d = Var.Map.find x !defined in
+                    List.for_all exit_edges ~f:(fun (u, pc'') ->
+                        pc'' <> pc' || dominates d u))
               in
               if debug ()
               then
                 Format.eprintf
-                  "loop %d: %d blocks, size %d, %d live out, %d exit edges, ok %b, live \
-                   out ok %b@."
+                  "loop %d: %d blocks, size %d, %d live out, %d exit edges, ok %b@."
                   h
                   (Addr.Set.cardinal body)
                   !size
                   (List.length live_out)
                   (List.length exit_edges)
-                  !ok
-                  live_out_ok;
-              (* The tags of the blocks returned: 0, n_exits + 1 at most *)
+                  !ok;
               (* The free variables of [g], its parameters *)
               let bound = ref Var.Set.empty and used = ref Var.Set.empty in
               Addr.Set.iter
@@ -445,7 +444,6 @@ let f p =
               let free = Var.Set.elements (Var.Set.diff !used !bound) in
               if
                 !ok
-                && live_out_ok
                 && !size >= 8
                 && n_exits + 1 < 200
                 && h <> start
@@ -462,12 +460,16 @@ let f p =
                 in_g := Addr.Set.union gset !in_g;
                 incr count;
                 let header = get h in
+                (* The mailbox: the variables used after the loop, then the
+                   parameters of the loop header, of the block after the
+                   edge out of the loop taken, or the value returned *)
+                let n_live = List.length live_out in
                 let n_fields =
-                  List.fold_left
-                    exits
-                    ~init:(max (List.length header.params) (if returns then 1 else 0))
-                    ~f:(fun n pc' ->
-                      max n (List.length (get pc').params + List.length live_out))
+                  n_live
+                  + List.fold_left
+                      exits
+                      ~init:(max (List.length header.params) (if returns then 1 else 0))
+                      ~f:(fun n pc' -> max n (List.length (get pc').params))
                 in
                 (* The mailbox, allocated at the start of the program *)
                 let mailbox = Var.fresh_n "mailbox" in
@@ -494,7 +496,8 @@ let f p =
                 let mbox = Var.fork mailbox in
                 let limit = Var.fresh_n "limit" in
                 let store vars =
-                  List.mapi vars ~f:(fun i x -> Set_field (mbox, i, Non_float, x))
+                  List.mapi vars ~f:(fun i x ->
+                      Set_field (mbox, n_live + i, Non_float, x))
                 in
                 let answer n body =
                   let c = Var.fresh () in
@@ -525,7 +528,15 @@ let f p =
                 let exit_blocks =
                   List.mapi exits ~f:(fun j pc' ->
                       let params = List.map (get pc').params ~f:Var.fork in
-                      let body, branch = answer (j + 1) (store (params @ live_out)) in
+                      let passed = passed_on pc' in
+                      let live =
+                        List.mapi live_out ~f:(fun i x ->
+                            if List.mem ~eq:Var.equal x passed
+                            then [ Set_field (mbox, i, Non_float, x) ]
+                            else [])
+                        |> List.concat
+                      in
+                      let body, branch = answer (j + 1) (live @ store params) in
                       pc', new_block { params; body; branch })
                 in
                 (* The free variables read from the parameters *)
@@ -597,7 +608,15 @@ let f p =
                 let r = Var.fresh () in
                 let fields n = List.init ~len:n ~f:(fun _ -> Var.fresh ()) in
                 let get_fields vars =
-                  List.mapi vars ~f:(fun i x -> Let (x, Field (mailbox, i, Non_float)))
+                  List.mapi vars ~f:(fun i x ->
+                      Let (x, Field (mailbox, n_live + i, Non_float)))
+                in
+                (* Once out of the loop, the mailbox keeps nothing alive *)
+                let clear () =
+                  let zero = Var.fresh () in
+                  Let (zero, int 0)
+                  :: List.init ~len:n_fields ~f:(fun i ->
+                      Set_field (mailbox, i, Non_float, zero))
                 in
                 let driver = !free_pc in
                 incr free_pc;
@@ -632,16 +651,19 @@ let f p =
                     ; branch = Cond (small, (bdouble, []), (bmax, []))
                     }
                 in
-                let loop_subst = ref Var.Map.empty in
+                (* The variables used after the loop, read from the mailbox
+                   by the driver *)
+                let outs = List.map live_out ~f:Var.fork in
+                let loop_subst =
+                  List.fold_left2 live_out outs ~init:Var.Map.empty ~f:(fun m x x' ->
+                      Var.Map.add x x' m)
+                in
                 let leave =
                   List.map exits ~f:(fun pc' ->
                       let vars = fields (List.length (get pc').params) in
-                      let outs = List.map live_out ~f:Var.fork in
-                      List.iter2 live_out outs ~f:(fun x x' ->
-                          loop_subst := Var.Map.add x x' !loop_subst);
                       new_block
                         { params = []
-                        ; body = get_fields (vars @ outs)
+                        ; body = get_fields vars @ clear ()
                         ; branch = Branch (pc', vars)
                         })
                 in
@@ -650,7 +672,10 @@ let f p =
                   then
                     let x = Var.fresh () in
                     [ new_block
-                        { params = []; body = get_fields [ x ]; branch = Return x }
+                        { params = []
+                        ; body = get_fields [ x ] @ clear ()
+                        ; branch = Return x
+                        }
                     ]
                   else []
                 in
@@ -673,6 +698,8 @@ let f p =
                                 ; exact = true
                                 } )
                         ]
+                        @ List.mapi outs ~f:(fun i x' ->
+                            Let (x', Field (mailbox, i, Non_float)))
                     ; branch =
                         Switch
                           ( r
@@ -684,9 +711,9 @@ let f p =
                 in_g := Addr.Set.union !in_g (Addr.Set.of_list g_blocks);
                 (* The variables of the loop used after it, read from the
                    mailbox: renamed out of [g] *)
-                (if not (Var.Map.is_empty !loop_subst)
+                (if not (Var.Map.is_empty loop_subst)
                  then
-                   let s = Subst.from_map !loop_subst in
+                   let s = Subst.from_map loop_subst in
                    blocks :=
                      Addr.Map.mapi
                        (fun pc b ->
