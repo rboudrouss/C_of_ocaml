@@ -21,6 +21,8 @@
 #   SPLIT       if set, the C code is split (c_of_ocaml --split), in parts of
 #               SPLIT kilobytes
 #   COOC_FLAGS  more flags for c_of_ocaml (--cps-stack for instance)
+#   OCAMLC_FLAGS  more flags for ocamlc (-g: debug information, the
+#               backtrace slots recorded by the compiled code)
 #   TAIL_CALLS  no: compiled without the tail calls of WebAssembly (no
 #               -mtail-call), as ocaml-emcc --no-tail-calls
 #
@@ -83,7 +85,7 @@ run_test() {
     fi
   done
   files=$(ocamlfind ocamldep -sort $deps "$name.ml")
-  ocamlfind ocamlc -package unix -linkpkg -w -a $(ls ./*.mli 2>/dev/null) $files \
+  ocamlfind ocamlc -package unix -linkpkg -w -a ${OCAMLC_FLAGS:-} $(ls ./*.mli 2>/dev/null) $files \
     -o "$name.bc" > build.log 2>&1 || { res SKIP ocamlc; return; }
   local objs=$name.o
   if [ -n "${SPLIT:-}" ]; then
