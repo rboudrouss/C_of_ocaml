@@ -95,6 +95,8 @@ let () =
   (* Custom blocks among closures *)
   let i = Sys.opaque_identity 123456789012L in
   Printf.printf "%Ld\n" ((copy (fun y -> Int64.add i y)) 1L);
+  let a = Bigarray.Array1.of_array Bigarray.int32 Bigarray.c_layout [| 5l; 6l |] in
+  Printf.printf "%ld\n" ((copy (fun j -> Bigarray.Array1.get a j)) 1);
   (* Bytes, buffers and channels *)
   let b = Marshal.to_bytes (fun x -> x - k) [ Marshal.Closures ] in
   Printf.printf "%d\n" ((Marshal.from_bytes b 0 : int -> int) 10);

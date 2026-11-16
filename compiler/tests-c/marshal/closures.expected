@@ -18,6 +18,7 @@ false 15
 13
 3 7 true
 123456789013
+6
 7
 true 28
 Marshal.to_buffer: buffer overflow

@@ -711,11 +711,15 @@ let primitive out name (args : parg list) =
                  domain is spawned (see the runtime) *)
               | "caml_domain_spawn", 2 ->
                   Checked (c_call "camlc_ccall2" ("camlc_domain_spawn" :: args))
-              (* With [Marshal.Closures], marshaled by the runtime *)
+              (* With [Marshal.Closures], marshaled by the runtime, and
+                 unmarshaled by it when OCaml (5.5 or later) refuses the
+                 closures *)
               | ( ( "caml_output_value"
                   | "caml_output_value_to_bytes"
                   | "caml_output_value_to_string"
-                  | "caml_output_value_to_buffer" )
+                  | "caml_output_value_to_buffer"
+                  | "caml_input_value"
+                  | "caml_input_value_from_bytes" )
                 , _ ) ->
                   Checked
                     (c_call

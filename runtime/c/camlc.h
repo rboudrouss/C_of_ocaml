@@ -342,6 +342,8 @@ value camlc_output_value_to_bytes(value v, value flags);
 value camlc_output_value_to_string(value v, value flags);
 value camlc_output_value_to_buffer(value buf, value ofs, value len, value v,
                                    value flags);
+value camlc_input_value(value chan);
+value camlc_input_value_from_bytes(value str, value ofs);
 extern const unsigned char camlc_program_digest[16];
 value camlc_alloc_dummy_function(value size, value arity);
 

@@ -524,6 +524,11 @@ only the same program, linked the same way, can read the closures back. With
 OCaml 4.14, whose marshaler takes code pointers for naked pointers and odd
 ones for integers, the runtime marshals all values.
 
+Since OCaml 5.5, `input_value` checks that closures have the layout of native
+code, and refuses the closures of the compiled code. When it does, the runtime
+unmarshals the value itself. Custom blocks are still unmarshaled by OCaml, one
+at a time.
+
 ### Inlining by V8
 
 V8 gives a wasm module a tenth of its inlining budget when less than a quarter

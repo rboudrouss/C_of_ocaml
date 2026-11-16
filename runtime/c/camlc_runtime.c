@@ -1902,7 +1902,8 @@ code_t caml_next_frame_pointer(value **sp, value **trsp)
    info. Here, it has one only in a closure of several functions, or a CPS
    version with effect handlers (see [closure_layout] in
    compiler/lib-c/codegen/c_translate.ml). The values are then marshaled
-   here, in the format [input_value] reads.
+   here, in the format [input_value] reads (unmarshaled here too with OCaml
+   5.5 or later, see below).
    Without [Marshal.Closures], the marshaler of OCaml is called, but with
    OCaml 4 and naked pointers: it takes the closures for blocks, and their
    code pointers for naked pointers, except the odd ones, which look like
@@ -1923,6 +1924,8 @@ CAMLextern value caml_output_value_to_string(value, value);
 CAMLextern value caml_output_value_to_buffer(value, value, value, value,
                                              value);
 CAMLextern value caml_ml_output_bytes(value, value, value, value);
+CAMLextern value caml_input_value(value);
+CAMLextern value caml_input_value_from_bytes(value, value);
 
 value camlc_no_cps(void)
 {
@@ -2496,6 +2499,683 @@ value camlc_output_value_to_buffer(value buf, value ofs, value len, value v,
   memcpy(Bytes_val(buf) + Long_val(ofs), String_val(s), n);
   CAMLreturn(Val_long(n));
 }
+
+/****************************************************************/
+/* Unmarshaling closures (OCaml 5.5 or later)
+
+   Since OCaml 5.5, the unmarshaler of OCaml checks that the closures have
+   the layout of native code ([well_formed_closure] in intern.c), which
+   those of the compiled code do not have (see above). A value is then
+   unmarshaled by OCaml first and, when OCaml finds a closure ill-formed,
+   again here, in two passes. The first one checks the message and
+   unmarshals its custom blocks, each with OCaml from a message of its
+   own: their length in the message is that of their serialization. The
+   second one allocates the other blocks in the major heap, which never
+   runs the GC, and fills them, as [intern_rec] in intern.c does. */
+
+#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 5)
+#include <caml/io.h>
+
+enum { CAMLC_INTERN_READ, CAMLC_INTERN_SHIFT, CAMLC_INTERN_OID };
+
+struct camlc_intern_item {
+  int op;
+  int code_pointers;            /* READ: of the fields of a closure */
+  value *dest;                  /* READ, SHIFT: where to store the values */
+  value obj;                    /* OID: the object */
+  uintnat n;                    /* READ: number of values, SHIFT: offset */
+};
+
+struct camlc_intern {
+  unsigned char *data;          /* the message, freed at the end */
+  const unsigned char *src, *end;
+  int build;                    /* second pass: allocate the blocks */
+  uintnat obj_counter, num_objects;
+  value *objs;                  /* the blocks (second pass) */
+  value result;
+  value *customs;               /* first pass: a list, second: an array */
+  uintnat *custom_len, ncustoms, custom_cap, next_custom;
+  struct camlc_intern_item *stack;
+  uintnat sp, stack_size;
+};
+
+static void camlc_intern_free(struct camlc_intern *s)
+{
+  free(s->data);
+  free(s->objs);
+  free(s->custom_len);
+  free(s->stack);
+}
+
+CAMLnoreturn_start
+static void camlc_intern_fail(struct camlc_intern *s, const char *msg)
+CAMLnoreturn_end;
+
+static void camlc_intern_fail(struct camlc_intern *s, const char *msg)
+{
+  camlc_intern_free(s);
+  caml_failwith(msg);
+}
+
+static const unsigned char *camlc_intern_take(struct camlc_intern *s,
+                                              uintnat n)
+{
+  const unsigned char *p = s->src;
+  if ((uintnat)(s->end - p) < n)
+    camlc_intern_fail(s, "input_value: truncated object");
+  s->src += n;
+  return p;
+}
+
+static uint64_t camlc_intern_be(struct camlc_intern *s, int bytes)
+{
+  const unsigned char *p = camlc_intern_take(s, bytes);
+  uint64_t n = 0;
+  for (int i = 0; i < bytes; i++) n = n << 8 | p[i];
+  return n;
+}
+
+static void camlc_intern_push(struct camlc_intern *s, int op, value *dest,
+                              uintnat n, int code_pointers, value obj)
+{
+  if (s->sp == s->stack_size) {
+    uintnat size = s->stack_size ? 2 * s->stack_size : 256;
+    struct camlc_intern_item *stack =
+      realloc(s->stack, size * sizeof(struct camlc_intern_item));
+    if (stack == NULL) {
+      camlc_intern_free(s);
+      caml_raise_out_of_memory();
+    }
+    s->stack = stack;
+    s->stack_size = size;
+  }
+  s->stack[s->sp].op = op;
+  s->stack[s->sp].dest = dest;
+  s->stack[s->sp].n = n;
+  s->stack[s->sp].code_pointers = code_pointers;
+  s->stack[s->sp].obj = obj;
+  s->sp++;
+}
+
+/* Record the block [v], for the shared references (none without
+   sharing, when the message has no objects) */
+static void camlc_intern_record(struct camlc_intern *s, value v)
+{
+  if (s->num_objects == 0) return;
+  if (s->obj_counter >= s->num_objects)
+    camlc_intern_fail(s, "input_value: ill-formed message");
+  if (s->build) s->objs[s->obj_counter] = v;
+  s->obj_counter++;
+}
+
+/* A block of [wosize] words, [Val_unit] in the first pass */
+static value camlc_intern_alloc(struct camlc_intern *s, mlsize_t wosize,
+                                tag_t tag)
+{
+  value v = Val_unit;
+  if (wosize > Max_wosize)
+    camlc_intern_fail(s, "input_value: block size too large");
+  if (s->build) {
+    v = caml_alloc_shr_noexc(wosize, tag);
+    if (v == 0) {
+      camlc_intern_free(s);
+      caml_raise_out_of_memory();
+    }
+  }
+  camlc_intern_record(s, v);
+  return v;
+}
+
+static void camlc_intern_double(double *dst, const unsigned char *p, int big)
+{
+  unsigned char b[8];
+  memcpy(b, p, 8);
+#if ARCH_FLOAT_ENDIANNESS == 0x01234567
+  if (big)
+#else
+  if (!big)
+#endif
+    for (int i = 0; i < 4; i++) {
+      unsigned char c = b[i];
+      b[i] = b[7 - i];
+      b[7 - i] = c;
+    }
+  memcpy(dst, b, 8);
+}
+
+static value camlc_try_input_block(const char *data, intnat len)
+{
+  CAMLC_CCALL(caml_input_value_from_block(data, len));
+}
+
+static value camlc_output_custom(value v)
+{
+  char *data;
+  intnat len;
+  caml_output_value_to_malloc(v, Val_emptylist, &data, &len);
+  return (value)data;
+}
+
+static value camlc_try_output_custom(value v)
+{
+  CAMLC_CCALL(camlc_output_custom(v));
+}
+
+/* Raise the exception result [r] of a call */
+static void camlc_intern_raise(struct camlc_intern *s, value r)
+{
+  camlc_intern_free(s);
+  caml_raise(Extract_exception(r));
+}
+
+/* The size in words, with its header, of the custom block whose code is
+   at [p], as [intern_rec] allocates it (3 when its identifier is unknown:
+   OCaml then fails) */
+static uintnat camlc_intern_custom_whsize(const unsigned char *p,
+                                         const unsigned char *end)
+{
+  const unsigned char *name = p + 1, *nul;
+  const struct custom_operations *ops;
+  uintnat bsize = sizeof(value);
+  nul = memchr(name, 0, end - name);
+  if (nul != NULL && (ops = caml_find_custom_operations((char *)name))) {
+    p = nul + 1;
+    if (*(name - 1) == CODE_CUSTOM_FIXED && ops->fixed_length != NULL) {
+#ifdef ARCH_SIXTYFOUR
+      bsize = ops->fixed_length->bsize_64;
+#else
+      bsize = ops->fixed_length->bsize_32;
+#endif
+    } else if (end - p >= 12) {
+      bsize = 0;
+#ifdef ARCH_SIXTYFOUR
+      for (int i = 4; i < 12; i++) bsize = bsize << 8 | p[i];
+#else
+      for (int i = 0; i < 4; i++) bsize = bsize << 8 | p[i];
+#endif
+    }
+  }
+  return 2 + (bsize + sizeof(value) - 1) / sizeof(value);
+}
+
+/* First pass: unmarshal the custom block of the message from its code,
+   with OCaml, and the length of its serialization */
+static void camlc_intern_custom(struct camlc_intern *s)
+{
+  CAMLparam0();
+  CAMLlocal2(v, cell);
+  const unsigned char *start = s->src - 1;
+  uintnat rest = s->end - start, len, header_len, whsize;
+  unsigned char *msg, *p;
+  value r;
+  int big = 0;
+#ifdef ARCH_SIXTYFOUR
+  big = rest >= (uintnat)1 << 32;
+#endif
+  header_len = big ? 32 : 20;
+  whsize = camlc_intern_custom_whsize(start, s->end);
+  msg = malloc(header_len + rest);
+  if (msg == NULL) {
+    camlc_intern_free(s);
+    caml_raise_out_of_memory();
+  }
+  /* A message of one object: OCaml reads the custom block only */
+  if (big) {
+    camlc_store(msg, 4, Intext_magic_number_big);
+    camlc_store(msg + 4, 4, 0);
+    camlc_store(msg + 8, 8, rest);
+    camlc_store(msg + 16, 8, 1);
+    camlc_store(msg + 24, 8, whsize);
+  } else {
+    camlc_store(msg, 4, Intext_magic_number_small);
+    camlc_store(msg + 4, 4, rest);
+    camlc_store(msg + 8, 4, 1);
+    camlc_store(msg + 12, 4, whsize);
+    camlc_store(msg + 16, 4, whsize);
+  }
+  memcpy(msg + header_len, start, rest);
+  r = camlc_try_input_block((char *)msg, header_len + rest);
+  free(msg);
+  if (Is_exception_result(r)) camlc_intern_raise(s, r);
+  v = r;
+  if (Is_long(v) || Tag_val(v) != Custom_tag)
+    camlc_intern_fail(s, "input_value: ill-formed message");
+  /* Its serialization, without the header, is the custom block of the
+     message */
+  r = camlc_try_output_custom(v);
+  if (Is_exception_result(r)) camlc_intern_raise(s, r);
+  p = (unsigned char *)r;
+  header_len = (((uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3])
+                == Intext_magic_number_small) ? 20 : 32;
+  len = (p[4] << 24 | p[5] << 16 | p[6] << 8 | (uintnat)p[7]);
+  if (header_len == 32) {
+    len = 0;
+    for (int i = 8; i < 16; i++) len = len << 8 | p[i];
+  }
+  if (len > rest || memcmp(p + header_len, start, len) != 0) {
+    free(p);
+    camlc_intern_fail(s, "input_value: custom block not reproducible");
+  }
+  free(p);
+  s->src = start + len;
+  if (s->ncustoms == s->custom_cap) {
+    uintnat cap = s->custom_cap ? 2 * s->custom_cap : 16;
+    uintnat *l = realloc(s->custom_len, cap * sizeof(uintnat));
+    if (l == NULL) {
+      camlc_intern_free(s);
+      caml_raise_out_of_memory();
+    }
+    s->custom_len = l;
+    s->custom_cap = cap;
+  }
+  s->custom_len[s->ncustoms++] = len;
+  cell = caml_alloc_small(2, 0);
+  Field(cell, 0) = v;
+  Field(cell, 1) = *s->customs;
+  *s->customs = cell;
+  CAMLreturn0;
+}
+
+/* A block of the message, [size] words with tag [tag] */
+static value camlc_intern_block(struct camlc_intern *s, mlsize_t size,
+                                tag_t tag)
+{
+  value v;
+  value *fields;
+  if (size == 0) {
+    if (tag >= Forcing_tag)
+      camlc_intern_fail(s, "input_value: bad atom tag");
+    return Atom(tag);
+  }
+  if (tag >= No_scan_tag || tag == Infix_tag || tag == Cont_tag)
+    camlc_intern_fail(s, "input_value: bad block tag");
+  v = camlc_intern_alloc(s, size, tag);
+  fields = s->build ? (value *)&Field(v, 0) : NULL;
+  switch (tag) {
+  case Closure_tag:
+    camlc_intern_push(s, CAMLC_INTERN_READ, fields, size, 1, 0);
+    break;
+  case Object_tag:
+    if (size < 2) camlc_intern_fail(s, "input_value: bad object block");
+    if (size > 2)
+      camlc_intern_push(s, CAMLC_INTERN_READ, fields ? fields + 2 : NULL,
+                        size - 2, 0, 0);
+    camlc_intern_push(s, CAMLC_INTERN_OID, NULL, 0, 0, v);
+    camlc_intern_push(s, CAMLC_INTERN_READ, fields, 2, 0, 0);
+    break;
+  default:
+    camlc_intern_push(s, CAMLC_INTERN_READ, fields, size, 0, 0);
+  }
+  return v;
+}
+
+static value camlc_intern_string(struct camlc_intern *s, uintnat len)
+{
+  mlsize_t size;
+  const unsigned char *p;
+  value v;
+  if (len > Bsize_wsize(Max_wosize) - 1)
+    camlc_intern_fail(s, "input_value: string too large");
+  size = (len + sizeof(value)) / sizeof(value);
+  v = camlc_intern_alloc(s, size, String_tag);
+  p = camlc_intern_take(s, len);
+  if (s->build) {
+    mlsize_t ofs = Bsize_wsize(size) - 1;
+    Field(v, size - 1) = 0;
+    Byte(v, ofs) = ofs - len;
+    memcpy(Bytes_val(v), p, len);
+  }
+  return v;
+}
+
+static value camlc_intern_double_array(struct camlc_intern *s, uintnat len,
+                                       int big)
+{
+  const unsigned char *p;
+  value v;
+  if (len == 0 || len > Max_wosize / Double_wosize)
+    camlc_intern_fail(s, "input_value: invalid double_array");
+  v = camlc_intern_alloc(s, len * Double_wosize, Double_array_tag);
+  p = camlc_intern_take(s, 8 * len);
+  if (s->build)
+    for (uintnat i = 0; i < len; i++)
+      camlc_intern_double((double *)v + i, p + 8 * i, big);
+  return v;
+}
+
+static value camlc_intern_code_pointer(struct camlc_intern *s)
+{
+  uintnat ofs = camlc_intern_be(s, 4);
+  unsigned char digest[16];
+  struct code_fragment *cf;
+  memcpy(digest, camlc_intern_take(s, 16), 16);
+  cf = caml_find_code_fragment_by_digest(digest);
+  if (cf == NULL || ofs >= (uintnat)(cf->code_end - cf->code_start))
+    camlc_intern_fail(s, "input_value: unknown code module");
+  return (value)(cf->code_start + ofs);
+}
+
+static void camlc_intern_walk(struct camlc_intern *s)
+{
+  s->obj_counter = 0;
+  s->sp = 0;
+  camlc_intern_push(s, CAMLC_INTERN_READ, s->build ? &s->result : NULL, 1, 0,
+                    0);
+  while (s->sp > 0) {
+    struct camlc_intern_item *it = &s->stack[s->sp - 1];
+    value *dest = it->dest, v;
+    int code_pointers = it->code_pointers, code;
+    uintnat ofs;
+    switch (it->op) {
+    case CAMLC_INTERN_SHIFT:
+      if (dest != NULL) *dest += it->n;
+      s->sp--;
+      continue;
+    case CAMLC_INTERN_OID:
+      if (s->build && Long_val(Field(it->obj, 1)) >= 0)
+        caml_set_oo_id(it->obj);
+      s->sp--;
+      continue;
+    }
+    if (dest != NULL) it->dest++;
+    if (--it->n == 0) s->sp--;
+    code = *camlc_intern_take(s, 1);
+    if (code >= PREFIX_SMALL_INT) {
+      if (code >= PREFIX_SMALL_BLOCK)
+        v = camlc_intern_block(s, (code >> 4) & 0x7, code & 0xF);
+      else
+        v = Val_int(code & 0x3F);
+    } else if (code >= PREFIX_SMALL_STRING) {
+      v = camlc_intern_string(s, code & 0x1F);
+    } else {
+      switch (code) {
+      case CODE_INT8: v = Val_long((int8_t)camlc_intern_be(s, 1)); break;
+      case CODE_INT16: v = Val_long((int16_t)camlc_intern_be(s, 2)); break;
+      case CODE_INT32: v = Val_long((int32_t)camlc_intern_be(s, 4)); break;
+#ifdef ARCH_SIXTYFOUR
+      case CODE_INT64: v = Val_long((intnat)camlc_intern_be(s, 8)); break;
+#endif
+      case CODE_SHARED8: ofs = camlc_intern_be(s, 1); goto shared;
+      case CODE_SHARED16: ofs = camlc_intern_be(s, 2); goto shared;
+      case CODE_SHARED32: ofs = camlc_intern_be(s, 4); goto shared;
+#ifdef ARCH_SIXTYFOUR
+      case CODE_SHARED64: ofs = camlc_intern_be(s, 8); goto shared;
+#endif
+      shared:
+        ofs = s->obj_counter - ofs;
+        if (ofs >= s->obj_counter)
+          camlc_intern_fail(s, "input_value: invalid shared reference");
+        v = s->build ? s->objs[ofs] : Val_unit;
+        break;
+      case CODE_BLOCK32: {
+        header_t hd = (header_t)camlc_intern_be(s, 4);
+        v = camlc_intern_block(s, Wosize_hd(hd), Tag_hd(hd));
+        break;
+      }
+#ifdef ARCH_SIXTYFOUR
+      case CODE_BLOCK64: {
+        header_t hd = (header_t)camlc_intern_be(s, 8);
+        v = camlc_intern_block(s, Wosize_hd(hd), Tag_hd(hd));
+        break;
+      }
+#endif
+      case CODE_STRING8: v = camlc_intern_string(s, camlc_intern_be(s, 1)); break;
+      case CODE_STRING32: v = camlc_intern_string(s, camlc_intern_be(s, 4)); break;
+#ifdef ARCH_SIXTYFOUR
+      case CODE_STRING64: v = camlc_intern_string(s, camlc_intern_be(s, 8)); break;
+#endif
+      case CODE_DOUBLE_LITTLE:
+      case CODE_DOUBLE_BIG: {
+        const unsigned char *p;
+        v = camlc_intern_alloc(s, Double_wosize, Double_tag);
+        p = camlc_intern_take(s, 8);
+        if (s->build) camlc_intern_double((double *)v, p, code == CODE_DOUBLE_BIG);
+        break;
+      }
+      case CODE_DOUBLE_ARRAY8_LITTLE:
+      case CODE_DOUBLE_ARRAY8_BIG:
+        v = camlc_intern_double_array(s, camlc_intern_be(s, 1),
+                                      code == CODE_DOUBLE_ARRAY8_BIG);
+        break;
+      case CODE_DOUBLE_ARRAY32_LITTLE:
+      case CODE_DOUBLE_ARRAY32_BIG:
+        v = camlc_intern_double_array(s, camlc_intern_be(s, 4),
+                                      code == CODE_DOUBLE_ARRAY32_BIG);
+        break;
+#ifdef ARCH_SIXTYFOUR
+      case CODE_DOUBLE_ARRAY64_LITTLE:
+      case CODE_DOUBLE_ARRAY64_BIG:
+        v = camlc_intern_double_array(s, camlc_intern_be(s, 8),
+                                      code == CODE_DOUBLE_ARRAY64_BIG);
+        break;
+#endif
+      case CODE_CODEPOINTER:
+        if (!code_pointers)
+          camlc_intern_fail(s, "input_value: code pointer outside closure");
+        v = camlc_intern_code_pointer(s);
+        if (!s->build) v = Val_unit;
+        break;
+      case CODE_INFIXPOINTER:
+        /* The closure, then offset by [ofs] */
+        ofs = camlc_intern_be(s, 4);
+        camlc_intern_push(s, CAMLC_INTERN_SHIFT, dest, ofs, 0, 0);
+        camlc_intern_push(s, CAMLC_INTERN_READ, dest, 1, 0, 0);
+        continue;
+      case CODE_CUSTOM_LEN:
+      case CODE_CUSTOM_FIXED:
+        if (s->build) {
+          v = Field(*s->customs, s->next_custom);
+          s->src += s->custom_len[s->next_custom++] - 1;
+        } else {
+          camlc_intern_custom(s);
+          v = Val_unit;
+        }
+        camlc_intern_record(s, v);
+        break;
+      default:
+        camlc_intern_fail(s, "input_value: ill-formed message");
+      }
+    }
+    if (dest == NULL) continue;
+    if (dest == &s->result) *dest = v;
+    else caml_initialize(dest, v);
+  }
+}
+
+/* Unmarshal the message [data] of [len] bytes (malloc'ed, freed here) */
+static value camlc_intern_value(unsigned char *data, uintnat len)
+{
+  CAMLparam0();
+  CAMLlocal2(customs, list);
+  struct camlc_intern s = { 0 };
+  uintnat header_len, data_len;
+  value l;
+  s.data = data;
+  s.src = data;
+  s.end = data + len;
+  switch (camlc_intern_be(&s, 4)) {
+  case Intext_magic_number_small:
+    header_len = 20;
+    data_len = camlc_intern_be(&s, 4);
+    s.num_objects = camlc_intern_be(&s, 4);
+    break;
+#ifdef ARCH_SIXTYFOUR
+  case Intext_magic_number_big:
+    header_len = 32;
+    camlc_intern_be(&s, 4);
+    data_len = camlc_intern_be(&s, 8);
+    s.num_objects = camlc_intern_be(&s, 8);
+    break;
+#endif
+  default:
+    camlc_intern_fail(&s, "input_value: bad object");
+  }
+  if (data_len > len - header_len)
+    camlc_intern_fail(&s, "input_value: bad length");
+  s.src = data + header_len;
+  s.end = s.src + data_len;
+  /* First pass: the custom blocks */
+  customs = Val_emptylist;
+  s.customs = &customs;
+  camlc_intern_walk(&s);
+  list = customs;
+  customs = caml_alloc(s.ncustoms, 0);
+  l = list;
+  for (uintnat i = s.ncustoms; i > 0; i--, l = Field(l, 1))
+    Store_field(customs, i - 1, Field(l, 0));
+  /* Second pass: the other blocks */
+  if (s.num_objects > 0) {
+    s.objs = malloc(s.num_objects * sizeof(value));
+    if (s.objs == NULL) {
+      camlc_intern_free(&s);
+      caml_raise_out_of_memory();
+    }
+  }
+  s.build = 1;
+  s.src = data + header_len;
+  camlc_intern_walk(&s);
+  camlc_intern_free(&s);
+  CAMLreturn(s.result);
+}
+
+/* Whether [exn] is the failure of OCaml on a closure of the compiled code */
+static int camlc_ill_formed_closure(value exn)
+{
+  value msg;
+  if (Is_long(exn) || Tag_val(exn) != 0 || Wosize_val(exn) < 2) return 0;
+  msg = Field(exn, 1);
+  return Is_block(msg) && Tag_val(msg) == String_tag
+    && strstr(String_val(msg), "ill-formed function closure") != NULL;
+}
+
+/* The value of the message [msg] of [len] bytes (malloc'ed, freed here) */
+static value camlc_input_message_value(unsigned char *msg, uintnat len)
+{
+  value r = camlc_try_input_block((char *)msg, len), exn;
+  if (!Is_exception_result(r)) {
+    free(msg);
+    return r;
+  }
+  exn = Extract_exception(r);
+  if (camlc_ill_formed_closure(exn)) return camlc_intern_value(msg, len);
+  free(msg);
+  caml_raise(exn);
+}
+
+static uint64_t camlc_load_be(const unsigned char *p, int bytes)
+{
+  uint64_t n = 0;
+  for (int i = 0; i < bytes; i++) n = n << 8 | p[i];
+  return n;
+}
+
+/* Read a message from [chan], as [caml_input_val] */
+static unsigned char *camlc_input_message(struct channel *chan,
+                                          uintnat *len)
+{
+  unsigned char header[MAX_INTEXT_HEADER_SIZE], *msg;
+  uintnat header_len, data_len;
+  intnat r;
+  if (!caml_channel_binary_mode(chan))
+    caml_failwith("input_value: not a binary channel");
+  r = caml_really_getblock(chan, (char *)header, 5);
+  if (r == 0) caml_raise_end_of_file();
+  if (r < 5) caml_failwith("input_value: truncated object");
+  switch (camlc_load_be(header, 4)) {
+  case Intext_magic_number_big: header_len = 32; break;
+  case Intext_magic_number_compressed: header_len = header[4] & 0x3F; break;
+  default: header_len = 20;
+  }
+  if (header_len <= 5 || header_len > MAX_INTEXT_HEADER_SIZE
+      || caml_really_getblock(chan, (char *)header + 5, header_len - 5)
+         < (intnat)header_len - 5)
+    caml_failwith("input_value: truncated object");
+  switch (camlc_load_be(header, 4)) {
+  case Intext_magic_number_small:
+    data_len = camlc_load_be(header + 4, 4);
+    break;
+  case Intext_magic_number_big:
+    data_len = camlc_load_be(header + 8, 8);
+    break;
+  case Intext_magic_number_compressed: {
+    /* A variable-length quantity, after the header length */
+    const unsigned char *p = header + 5;
+    data_len = 0;
+    do {
+      if (p == header + header_len)
+        caml_failwith("input_value: bad object");
+      data_len = data_len << 7 | (*p & 0x7F);
+    } while (*p++ & 0x80);
+    break;
+  }
+  default:
+    caml_failwith("input_value: bad object");
+  }
+  if (data_len > (uintnat)-1 - header_len) caml_raise_out_of_memory();
+  msg = malloc(header_len + data_len);
+  if (msg == NULL) caml_raise_out_of_memory();
+  memcpy(msg, header, header_len);
+  if ((uintnat)caml_really_getblock(chan, (char *)msg + header_len, data_len)
+      < data_len) {
+    free(msg);
+    caml_failwith("input_value: truncated object");
+  }
+  *len = header_len + data_len;
+  return msg;
+}
+
+value camlc_input_value(value vchan)
+{
+  CAMLparam1(vchan);
+  struct channel *chan = Channel(vchan);
+  unsigned char *msg;
+  uintnat len;
+  caml_channel_lock(chan);
+  msg = camlc_input_message(chan, &len);
+  caml_channel_unlock(chan);
+  CAMLreturn(camlc_input_message_value(msg, len));
+}
+
+static value camlc_try_input_bytes(value str, value ofs)
+{
+  CAMLC_CCALL(caml_input_value_from_bytes(str, ofs));
+}
+
+value camlc_input_value_from_bytes(value str, value ofs)
+{
+  CAMLparam1(str);
+  value r = camlc_try_input_bytes(str, ofs), exn;
+  const unsigned char *p;
+  unsigned char *msg;
+  uintnat len;
+  if (!Is_exception_result(r)) CAMLreturn(r);
+  exn = Extract_exception(r);
+  if (!camlc_ill_formed_closure(exn)) caml_raise(exn);
+  /* OCaml checked the header and the length (and may have moved [str]) */
+  p = Bytes_val(str) + Long_val(ofs);
+  if (camlc_load_be(p, 4) == Intext_magic_number_big)
+    len = 32 + camlc_load_be(p + 8, 8);
+  else
+    len = 20 + camlc_load_be(p + 4, 4);
+  msg = malloc(len);
+  if (msg == NULL) caml_raise_out_of_memory();
+  memcpy(msg, p, len);
+  CAMLreturn(camlc_intern_value(msg, len));
+}
+
+#else
+
+value camlc_input_value(value chan)
+{
+  return caml_input_value(chan);
+}
+
+value camlc_input_value_from_bytes(value str, value ofs)
+{
+  return caml_input_value_from_bytes(str, ofs);
+}
+
+#endif
 
 /****************************************************************/
 /* Compilation units and plugins (see camlc.h) */
