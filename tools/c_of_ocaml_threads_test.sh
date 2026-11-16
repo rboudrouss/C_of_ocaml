@@ -6,7 +6,7 @@
 #   tools/c_of_ocaml_threads_test.sh
 #
 # The outputs are compared with threads.expected and, with OCaml 5,
-# domains.expected. Prints PASS or FAIL.
+# domains.expected. Prints PASS or FAIL, and exits with 1 on FAIL.
 #
 # Environment:
 #   C_OF_OCAML  the compiler (default: the one built by dune in this tree)
@@ -56,3 +56,4 @@ for t in $tests; do
   if ! diff $t.txt "$TEST/$t.expected"; then result=FAIL; fi
 done
 echo $result
+[ $result = PASS ]

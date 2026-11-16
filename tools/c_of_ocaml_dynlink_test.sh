@@ -8,7 +8,7 @@
 # -sMAIN_MODULE=2, exporting the symbols the plugins need; the plugins
 # (.cmo and .cma files) are compiled by c_of_ocaml to side modules
 # (-sSIDE_MODULE=1), which it loads with dlopen. Its output is compared with
-# dynlink.expected. Prints PASS or FAIL.
+# dynlink.expected. Prints PASS or FAIL, and exits with 1 on FAIL.
 #
 # Environment:
 #   WORD_SIZE   32 (wasm32, the default) or 64 (wasm64)
@@ -203,3 +203,4 @@ if [ -n "${DOMAINS:-}" ]; then
   grep -q '^pdomain: 1$' domain.txt || { cat domain.txt; result=FAIL; }
 fi
 echo $result
+[ $result = PASS ]

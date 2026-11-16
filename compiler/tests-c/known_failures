@@ -1,0 +1,39 @@
+# The tests of compiler/tests-ocaml which tools/c_of_ocaml_tests.sh expects
+# to fail. Each line gives the versions of OCaml where the test fails (a
+# shell pattern) and the test.
+
+# They need arguments or files
+*     basic-io/wc
+*     basic-io-2/io
+*     lib-channels/close_out
+
+# They expect the behaviour of the JavaScript runtime
+*     lib-digest/blake2_long_key
+*     lib-obj/new_obj
+
+# Deep recursions, also disabled for js_of_ocaml and wasm_of_ocaml
+*     misc/gcwords
+*     misc/pr7168
+*     misc/sieve
+
+# They start domains, and the tests are linked without threads
+5.*   effects/test_lazy
+5.*   lazy/lazy2
+5.*   lazy/lazy3
+5.*   lazy/lazy5
+5.*   lazy/lazy6
+5.*   lazy/lazy7
+5.*   lazy/lazy8
+5.*   lib-marshal/intext_par
+
+# The expected output has the name dune gives to the module
+5.*   effects/reperform
+
+# The expected output is that of OCaml 5 (they fail natively with 4.14)
+4.*   basic-more/labels_evaluation_order
+4.*   basic-more/pr10338
+4.*   lib-buffer/test
+4.*   lib-channels/close_in
+4.*   lib-random/defaultinit
+4.*   lib-random/testvectors
+4.*   runtime-objects/toplevel_lets

@@ -8,7 +8,9 @@
 # runtime built by ocaml-emcc, run with node, and its output compared with
 # its .expected file. Prints one line per test: PASS, FAIL or SKIP (the
 # test could not be compiled with ocamlc, usually because of its test
-# infrastructure).
+# infrastructure). The tests listed in compiler/tests-c/known_failures for
+# this version of OCaml are expected to fail. The script exits with 1 when
+# another test fails.
 #
 # Environment:
 #   WORD_SIZE   32 (wasm32, the default) or 64 (wasm64)
@@ -138,4 +140,21 @@ if [ $# -gt 0 ]; then
 else
   mapfile -t tests < <(ls "$ROOT"/compiler/tests-ocaml/*/*.ml)
 fi
-printf '%s\n' "${tests[@]}" | xargs -P "$JOBS" -I{} bash -c 'run_test "$1"' _ {}
+printf '%s\n' "${tests[@]}" | xargs -P "$JOBS" -I{} bash -c 'run_test "$1"' _ {} \
+  | tee "$WORKDIR/results.txt"
+
+version=$(ocamlfind ocamlc -vnum)
+unexpected=
+for t in $(grep '^FAIL' "$WORKDIR/results.txt" | cut -d' ' -f2); do
+  known=
+  while read -r v k; do
+    case $v in '' | '#'*) continue ;; esac
+    # shellcheck disable=SC2053
+    if [[ $version == $v && $t == "$k" ]]; then known=1; fi
+  done < "$ROOT/compiler/tests-c/known_failures"
+  [ -n "$known" ] || unexpected="$unexpected $t"
+done
+if [ -n "$unexpected" ]; then
+  echo "Unexpected failures:$unexpected"
+  exit 1
+fi

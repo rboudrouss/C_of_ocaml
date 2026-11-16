@@ -559,13 +559,12 @@ script documents its environment variables.
 | `tools/c_of_ocaml_segments_test.sh` | The segmented stack with JSPI and node 24 (`compiler/tests-c/segments`), or `MODE=cps` for `--cps-stack`, including recursions through callbacks from C. |
 | `dune build @compiler/tests-c/runtest` | The primitives called by a program using `Js_of_ocaml.Js.Unsafe`. |
 
-All tests pass on both wasm32 and wasm64, except those which use domains,
-those which need arguments or files (`basic-io`, `basic-io-2`,
-`lib-channels/close_out`), those which expect the behaviour of the JavaScript
-runtime (`lib-digest/blake2_long_key`, `lib-obj/new_obj`,
-`lib-bytes/test_bytes`), and the deep recursion tests (`misc/gcwords`,
-`misc/sieve`, `misc/pr7168`), also disabled for js_of_ocaml and
-wasm_of_ocaml.
+The tests of `compiler/tests-ocaml` which fail with c_of_ocaml are listed in
+`compiler/tests-c/known_failures`, with the reason. They need arguments or
+files, expect the behaviour of the JavaScript runtime, recurse deeply, start
+domains, or expect the output of OCaml 5. `tools/c_of_ocaml_tests.sh` exits
+with 1 when another test fails, and so do the other scripts when one of
+their tests fails.
 
 ## Source layout
 

@@ -11,7 +11,7 @@
 # those of callbacks.ml (with callbacks_stubs.c) with callbacks.expected and
 # 0, and with OCaml 5.4 or later, those of ramp_up.ml with ramp_up.expected
 # and 0. Prints PASS or FAIL for each, or SKIP when node does not support
-# JSPI.
+# JSPI, and exits with 1 when one fails.
 #
 # Environment:
 #   MODE        jspi (the default) or cps
@@ -104,9 +104,11 @@ check() {
     echo "PASS $1"
   else
     echo "FAIL $1 (exit code $rc)"
+    failed=1
   fi
 }
 
+failed=
 emcc $CCFLAGS -c "$RT/camlc_runtime.c" -o camlc_runtime.o
 if [ -n "$HOST" ]; then emcc $CCFLAGS -c "$TEST/jspi_host.c" -o "$HOST"; fi
 build segments
@@ -118,3 +120,4 @@ if [ "$(printf '%s\n' 5.4 "$(ocamlfind ocamlc -vnum)" | sort -V | head -1)" = 5.
   build ramp_up
   check ramp_up 0
 fi
+[ -z "$failed" ]
