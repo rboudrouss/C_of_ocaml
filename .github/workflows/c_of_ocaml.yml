@@ -1,0 +1,143 @@
+name: c_of_ocaml
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  EMSDK_VERSION: 6.0.11
+  # ocaml-emcc rebuilds the runtime from the sources of the compiler, kept in
+  # the switch (which setup-ocaml caches for all the jobs)
+  OPAMKEEPBUILDDIR: true
+  PPX_DEVTOOLS: git+https://github.com/ocsigen/ppx_devtools.git#f62719d5087fa8d7f2bd0616c1fa91fd660eb27e
+  OCAML_EMCC: git+https://github.com/rboudrouss/ocaml-emcc.git#main
+
+jobs:
+  # c_of_ocaml builds without warnings, the primitives of compiler/tests-c,
+  # and the threads and domains compiled natively (no emscripten needed)
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        ocaml: ['4.14', '5.5']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+      - name: Install the dependencies
+        run: |
+          opam pin add -n -y ppx_devtools-optcomp.dev "$PPX_DEVTOOLS"
+          opam install -y --deps-only ./js_of_ocaml-compiler.opam ./js_of_ocaml.opam
+          opam install -y ocamlfind
+      - run: opam exec -- dune build compiler/bin-c_of_ocaml/c_of_ocaml.exe
+      - run: opam exec -- dune build @compiler/tests-c/runtest
+      - run: opam exec -- tools/c_of_ocaml_threads_test.sh
+
+  # the tests of compiler/tests-ocaml compiled by c_of_ocaml and emcc, run
+  # with node, in other modes of c_of_ocaml for the last ones
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        ocaml: ['4.14', '5.5']
+        target: [wasm32, wasm64]
+        mode: [default]
+        include:
+          - { ocaml: '5.5', target: wasm32, mode: cps-stack }
+          - { ocaml: '5.5', target: wasm32, mode: no-tail-calls }
+          - { ocaml: '5.5', target: wasm32, mode: split }
+    name: suite (${{ matrix.ocaml }}, ${{ matrix.target }}, ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EMSDK: ${{ github.workspace }}/../emsdk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+      # wasm64 needs node 24 or later
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: ./.github/actions/emcc-setup
+        with:
+          target: ${{ matrix.target }}
+      - name: tools/c_of_ocaml_tests.sh
+        run: |
+          case ${{ matrix.mode }} in
+            cps-stack) export COOC_FLAGS=--cps-stack ;;
+            # the stack of node is small without wasm tail calls: the deep
+            # recursions go on in CPS
+            no-tail-calls)
+              export TAIL_CALLS=no
+              export COOC_FLAGS='--effects=double-translation --cps-stack' ;;
+            # the C code in small parts, and the toplevel code cut at every
+            # point it can be
+            split)
+              export SPLIT=64
+              export COOC_FLAGS='--toplevel-chunk-size 1' ;;
+          esac
+          WORD_SIZE=${{ matrix.target == 'wasm64' && '64' || '32' }} \
+            opam exec -- tools/c_of_ocaml_tests.sh
+
+  # the features tested apart: tail calls, Marshal.Closures, Gc.Memprof,
+  # plugins, the segmented stack
+  features:
+    strategy:
+      fail-fast: false
+      matrix:
+        ocaml: ['4.14', '5.5']
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EMSDK: ${{ github.workspace }}/../emsdk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+      # node 24 for JSPI
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: ./.github/actions/emcc-setup
+        with:
+          target: wasm32
+      # cps_jump0 recurses deeply, it is run with --cps-stack below
+      - name: tail calls, Marshal.Closures, Gc.Memprof
+        run: |
+          opam exec -- tools/c_of_ocaml_tests.sh \
+            $(ls compiler/tests-c/{tailcalls,marshal,gc}/*.ml | grep -v cps_jump0)
+      - name: tail calls without wasm tail calls, deep recursions in CPS
+        run: |
+          TAIL_CALLS=no COOC_FLAGS='--effects=double-translation --cps-stack' \
+            opam exec -- tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml
+      - name: the same with --dynlink, where unknown calls may perform effects
+        if: matrix.ocaml != '4.14'
+        run: |
+          TAIL_CALLS=no COOC_FLAGS='--effects=double-translation --cps-stack --dynlink' \
+            opam exec -- tools/c_of_ocaml_tests.sh compiler/tests-c/tailcalls/*.ml
+      - name: plugins
+        run: opam exec -- tools/c_of_ocaml_dynlink_test.sh
+      - name: plugins with --cps-stack
+        run: CPS_STACK=1 opam exec -- tools/c_of_ocaml_dynlink_test.sh
+      - name: plugins with JSPI
+        run: JSPI=1 opam exec -- tools/c_of_ocaml_dynlink_test.sh
+      - name: plugins performing effects, starting a domain
+        if: matrix.ocaml != '4.14'
+        run: |
+          EFFECTS=double-translation opam exec -- tools/c_of_ocaml_dynlink_test.sh
+          DOMAINS=1 opam exec -- tools/c_of_ocaml_dynlink_test.sh
+      - name: segmented stack with JSPI
+        run: opam exec -- tools/c_of_ocaml_segments_test.sh
+      - name: segmented stack with --cps-stack
+        run: MODE=cps opam exec -- tools/c_of_ocaml_segments_test.sh

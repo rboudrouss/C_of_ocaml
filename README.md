@@ -566,6 +566,11 @@ domains, or expect the output of OCaml 5. `tools/c_of_ocaml_tests.sh` exits
 with 1 when another test fails, and so do the other scripts when one of
 their tests fails.
 
+The CI (`.github/workflows/c_of_ocaml.yml`) runs these commands on OCaml
+4.14 and 5.5, the suite of `compiler/tests-ocaml` on wasm32 and wasm64, and
+its other modes on OCaml 5.5 and wasm32. The sysroot is built by the `main`
+branch of ocaml-emcc.
+
 ## Source layout
 
 The `c_of_ocaml` command is in `compiler/bin-c_of_ocaml/`. The C backend

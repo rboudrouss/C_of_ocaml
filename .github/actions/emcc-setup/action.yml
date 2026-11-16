@@ -1,0 +1,38 @@
+name: emcc-setup
+description: >
+  emsdk, c_of_ocaml built by dune, and the sysroot of ocaml-emcc for the
+  target (the OCaml runtime compiled by emcc), in the opam switch of
+  setup-ocaml. Needs $EMSDK, and OPAMKEEPBUILDDIR=true when the switch is
+  created.
+
+inputs:
+  target:
+    description: wasm32 or wasm64
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v6
+      with:
+        path: ${{ env.EMSDK }}
+        key: emsdk-${{ runner.os }}-${{ env.EMSDK_VERSION }}
+    - name: Install emsdk
+      shell: bash
+      run: |
+        [ -d "$EMSDK" ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK"
+        "$EMSDK/emsdk" install "$EMSDK_VERSION"
+        "$EMSDK/emsdk" activate "$EMSDK_VERSION"
+        echo "$EMSDK/upstream/emscripten" >> "$GITHUB_PATH"
+    - name: Build c_of_ocaml
+      shell: bash
+      run: |
+        opam pin add -n -y ppx_devtools-optcomp.dev "$PPX_DEVTOOLS"
+        opam install -y --deps-only ./js_of_ocaml-compiler.opam
+        opam install -y ocamlfind
+        opam exec -- dune build compiler/bin-c_of_ocaml/c_of_ocaml.exe
+    - name: Build the sysroot of ocaml-emcc
+      shell: bash
+      run: |
+        opam pin add -y ocaml-emcc "$OCAML_EMCC"
+        opam exec -- ocaml-emcc --target ${{ inputs.target }} setup
