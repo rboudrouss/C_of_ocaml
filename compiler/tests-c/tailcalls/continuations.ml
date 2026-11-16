@@ -1,7 +1,9 @@
 (* Tail calls only, through closures of different arities and continuations
    [next], in the shape of Constr_matching.sub_match of Rocq: a loop of tail
    calls which goes through unknown calls *)
-type t = Leaf of int | Node of t * t
+type t =
+  | Leaf of int
+  | Node of t * t
 
 let flag = ref true
 
@@ -16,7 +18,10 @@ let rec aux c mk_ctx next =
     match c with
     | Leaf _ -> next ()
     | Node (a, b) ->
-        let next_mk_ctx = function [ a; b ] -> mk_ctx (Node (a, b)) | _ -> assert false in
+        let next_mk_ctx = function
+          | [ a; b ] -> mk_ctx (Node (a, b))
+          | _ -> assert false
+        in
         try_aux [ a; b ] next_mk_ctx next
   in
   here next

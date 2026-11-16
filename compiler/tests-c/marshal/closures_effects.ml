@@ -35,7 +35,8 @@ let () =
   Printf.printf "%d\n" (run (fun () -> effectful get 1));
   Printf.printf
     "%d\n"
-    (run (fun () -> List.fold_left (fun a f -> a + f 1) 0 [ pure; effectful get; pap get ]));
+    (run (fun () ->
+         List.fold_left (fun a f -> a + f 1) 0 [ pure; effectful get; pap get ]));
   let rec even p n = if n = 0 then p () else odd p (n - 1)
   and odd p n = if n = 0 then -p () else even p (n - 1) in
   let even', odd' = copy (even, odd) in

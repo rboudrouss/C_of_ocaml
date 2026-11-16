@@ -62,5 +62,7 @@ let () =
   Printf.printf "over %d\n" (over 1_000_000 0);
   Printf.printf "two %d\n" (h n);
   Printf.printf "caught %d\n" (caught n);
-  Printf.printf "sum %d\n" (List.fold_left (fun acc k -> acc + states.(0) k) 0 [ n; n + 1; n + 2 ]);
+  Printf.printf
+    "sum %d\n"
+    (List.fold_left (fun acc k -> acc + states.(0) k) 0 [ n; n + 1; n + 2 ]);
   Printf.printf "deep %d\n" (deep 10_000)
