@@ -213,7 +213,16 @@ let as_repr ctx r x =
   then e
   else
     match own with
-    | Value -> unbox r e
+    | Value -> (
+        match Typing.var_type ctx.out.types x with
+        | Int _ ->
+            (* An integer where a number is expected: in dead code, or the
+               sentinel the dead code elimination puts in place of the dead
+               fields of a float block and of the dead arguments and return
+               values. Its value is not used, but it must not be read as a
+               boxed number *)
+            zero_repr r
+        | _ -> unbox r e)
     | Double | Unboxed_int64 | Unboxed_int32 | Unboxed_nativeint ->
         failwith (Format.asprintf "c_of_ocaml: %a would need to be boxed" Var.print x)
 

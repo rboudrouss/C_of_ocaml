@@ -109,4 +109,13 @@ let unbox r e =
   | Unboxed_int32 -> Printf.sprintf "Int32_val(%s)" e
   | Unboxed_nativeint -> Printf.sprintf "Nativeint_val(%s)" e
 
+(* A number of representation [r], when its value does not matter *)
+let zero_repr r =
+  match r with
+  | Value -> "Val_unit"
+  | Double -> "0.0"
+  | Unboxed_int64 -> "((int64_t)0)"
+  | Unboxed_int32 -> "((int32_t)0)"
+  | Unboxed_nativeint -> "((intnat)0)"
+
 let repr_equal (r : repr) r' = Poly.equal r r'

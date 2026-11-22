@@ -24,3 +24,31 @@
  (alias runtest)
  (action
   (diff js_prims.expected js_prims.output)))
+
+(executable
+ (name dead_fields)
+ (modules dead_fields)
+ (ocamlc_flags
+  (:standard -w -69))
+ (modes byte))
+
+(executable
+ (name dead_fields_check)
+ (modules dead_fields_check)
+ (libraries str))
+
+(rule
+ (target dead_fields.c)
+ (deps dead_fields.bc)
+ (action
+  (run %{exe:../bin-c_of_ocaml/c_of_ocaml.exe} %{deps} -o %{target})))
+
+(rule
+ (with-stdout-to
+  dead_fields_check.output
+  (run ./dead_fields_check.exe %{dep:dead_fields.c})))
+
+(rule
+ (alias runtest)
+ (action
+  (diff dead_fields_check.expected dead_fields_check.output)))
