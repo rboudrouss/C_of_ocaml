@@ -26,6 +26,9 @@ jobs:
           fetch-depth: 0
       - uses: ocaml/setup-ocaml@v3
         with:
+          # (the opam files of the tree are not pinned: c_of_ocaml.dev would hide
+          # the version of tools/c_of_ocaml_opam_test.sh)
+          opam-pin: false
           ocaml-compiler: '5.5'
       - run: opam install -y dune
       - name: c_of_ocaml.opam is up to date with dune-project
@@ -52,8 +55,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        ocaml: ['4.14', '5.0', '5.1', '5.2', '5.3', '5.4', '5.5']
+        ocaml: ['4.14', '5.1', '5.2', '5.3', '5.4', '5.5']
         include:
+          # GCC 15 (C23) does not compile OCaml 5.0
+          - { os: ubuntu-24.04, ocaml: '5.0' }
           - { os: macos-latest, ocaml: '4.14' }
           - { os: macos-latest, ocaml: '5.5' }
     name: install (${{ matrix.os }}, ${{ matrix.ocaml }})
@@ -62,6 +67,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ocaml/setup-ocaml@v3
         with:
+          # (the opam files of the tree are not pinned: c_of_ocaml.dev would hide
+          # the version of tools/c_of_ocaml_opam_test.sh)
+          opam-pin: false
           ocaml-compiler: ${{ matrix.ocaml }}
       - run: OPAM_ARGS=--with-test opam exec -- tools/c_of_ocaml_opam_test.sh
 
@@ -75,6 +83,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ocaml/setup-ocaml@v3
         with:
+          # (the opam files of the tree are not pinned: c_of_ocaml.dev would hide
+          # the version of tools/c_of_ocaml_opam_test.sh)
+          opam-pin: false
           ocaml-compiler: ${{ matrix.ocaml }}
       - run: LOWER_BOUNDS=1 opam exec -- tools/c_of_ocaml_opam_test.sh
 
@@ -85,6 +96,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ocaml/setup-ocaml@v3
         with:
+          # (the opam files of the tree are not pinned: c_of_ocaml.dev would hide
+          # the version of tools/c_of_ocaml_opam_test.sh)
+          opam-pin: false
           ocaml-compiler: '5.5'
       - run: opam install -y js_of_ocaml-compiler
       - run: opam exec -- tools/c_of_ocaml_opam_test.sh
@@ -104,8 +118,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ocaml/setup-ocaml@v3
         with:
+          # (the opam files of the tree are not pinned: c_of_ocaml.dev would hide
+          # the version of tools/c_of_ocaml_opam_test.sh)
+          opam-pin: false
           ocaml-compiler: '5.5'
           windows-environment: ${{ matrix.environment }}
       - run: opam install -y --deps-only ./c_of_ocaml.opam
       - run: opam exec -- dune build -p c_of_ocaml,js_of_ocaml-compiler c_of_ocaml.install
-      - run: opam exec -- _build/install/default/bin/c_of_ocaml --version
+      - run: opam exec -- _build/install/default/bin/c_of_ocaml.exe --version
