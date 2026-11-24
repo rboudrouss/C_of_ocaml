@@ -84,8 +84,15 @@ ocamlc -g hello.ml -o hello.bc
 mkdir rt
 c_of_ocaml --runtime-files rt
 c_of_ocaml --word-size "$WORD_SIZE" hello.bc -o hello.c
+# The tables of the primitives of the interpreter (ocamlc writes them for
+# a custom runtime), which members of libcamlrun.a that macOS's linker
+# takes refer to: the C code calls the primitives directly
+cat > prims.c <<'EOF'
+void *caml_builtin_cprim[] = { 0 };
+char *caml_names_of_builtin_cprim[] = { 0 };
+EOF
 "$CC" -O1 -fno-strict-aliasing -fwrapv -w -Irt -I"$STDLIB" hello.c \
-  rt/camlc_runtime.c "$STDLIB/libcamlrun.a" -lm -lpthread -o hello
+  rt/camlc_runtime.c prims.c "$STDLIB/libcamlrun.a" -lm -lpthread -o hello
 out=$(./hello)
 echo "$out"
 [ "$out" = "hello 6765 a,b" ]
