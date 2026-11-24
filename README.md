@@ -38,6 +38,16 @@ library it is built with, modified by c_of_ocaml, comes from this tree.
 
 ocaml-emcc looks for c_of_ocaml in `$OCAML_EMCC_C_OF_OCAML`, then in `PATH`.
 
+### Versions
+
+c_of_ocaml has its own version numbers, unrelated to those of js_of_ocaml:
+0.x for now, the minor version changed with the options, the C code or the
+runtime support (what ocaml-emcc depends on), the patch version for fixes.
+Each version is based on a commit of js_of_ocaml's master, which `c_of_ocaml
+--version` prints and [CHANGES_c_of_ocaml.md](CHANGES_c_of_ocaml.md) gives,
+with the changes. See [RELEASING_c_of_ocaml.md](RELEASING_c_of_ocaml.md) to
+merge js_of_ocaml and make a release.
+
 ## Usage
 
 In a dune project, ocaml-emcc does everything.
