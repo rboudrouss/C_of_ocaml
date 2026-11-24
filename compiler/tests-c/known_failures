@@ -13,6 +13,9 @@
 # With REF=bytecode, ocamlrun has the bug the test checks
 5.0.*  effects/marshal
 4.13.* lib-obj/reachable_words_bug
+# With REF=bytecode, ocamlrun takes the branch for the bytecode, which
+# allocates a string of Sys.max_string_length: out of memory on 64 bits
+5.5.*  lib-string/test_string
 
 # They expect the behaviour of the JavaScript runtime
 *     lib-digest/blake2_long_key
