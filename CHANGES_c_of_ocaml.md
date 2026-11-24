@@ -9,4 +9,4 @@ Based on js_of_ocaml master
 (after 6.5.0).
 
 First release, for ocaml-emcc: OCaml bytecode executables and plugins
-compiled to C, for wasm32 and wasm64, with OCaml 4.14 to 5.5.
+compiled to C, for wasm32 and wasm64, with OCaml 4.14, and 5.3 to 5.5.

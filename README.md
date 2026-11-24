@@ -10,8 +10,9 @@ c_of_ocaml is a fork of [js_of_ocaml](https://github.com/ocsigen/js_of_ocaml).
 
 ## Installation
 
-c_of_ocaml needs OCaml 4.14 to 5.5. Install it in the switch of your project,
-since it reads the bytecode of the switch's compiler.
+c_of_ocaml needs OCaml 4.14, or 5.3 to 5.5 (the runtime support of its C
+code). Install it in the switch of your project, since it reads the bytecode
+of the switch's compiler.
 
 ```sh
 opam install c_of_ocaml

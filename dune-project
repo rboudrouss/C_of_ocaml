@@ -180,7 +180,11 @@
  (license "GPL-2.0-or-later" "LGPL-2.1-or-later WITH OCaml-LGPL-linking-exception")
  (maintenance_intent "(latest)")
  (depends
-  (ocaml (and (>= 4.14) (< 5.6)))
+  ; the runtime support of the C code: OCaml 4.14, and 5.3 to 5.5
+  (ocaml
+   (or
+    (and (>= 4.14) (< 5.0))
+    (and (>= 5.3) (< 5.6))))
   (ppx_devtools-optcomp (>= 0.1))
   (ppxlib (>= 0.33))
   (ocaml-compiler-libs (>= v0.12.4))
