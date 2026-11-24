@@ -1,0 +1,16 @@
+# The executable links the js_of_ocaml-compiler library of this tree, which
+# c_of_ocaml modifies: it is built from these sources, not taken from the
+# js_of_ocaml-compiler package. Only c_of_ocaml.install is read by opam, so
+# nothing is installed under the name of js_of_ocaml-compiler.
+build: [
+  ["dune" "subst"] {dev}
+  [
+    "dune"
+    "build"
+    "-p"
+    "%{name}%,js_of_ocaml-compiler"
+    "-j"
+    jobs
+    "%{name}%.install"
+  ]
+]

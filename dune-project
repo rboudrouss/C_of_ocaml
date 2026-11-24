@@ -164,3 +164,28 @@
   (ocamlfind (< 1.5.1))
   (js_of_ocaml (< 3.0))
 ))
+
+(package
+ (name c_of_ocaml)
+ (synopsis "Compiler from OCaml bytecode to C, for WebAssembly with emscripten")
+ (description
+  "c_of_ocaml compiles OCaml bytecode executables and plugins to C. Compiled by emscripten together with the OCaml runtime and the C stubs of the program, as ocaml-emcc does, the program then runs as compiled WebAssembly instead of being interpreted by an ocamlrun built for wasm. c_of_ocaml is a fork of js_of_ocaml, whose front-end and optimizer it reuses; it is not maintained by the Ocsigen team. Building it needs neither emscripten nor a C compiler.")
+ (authors
+  "Ocsigen team <dev@ocsigen.org>"
+  "rboudrouss <r.boudrouss@gmail.com>")
+ (maintainers "rboudrouss <r.boudrouss@gmail.com>")
+ (source (github rboudrouss/C_of_ocaml))
+ (homepage "https://github.com/rboudrouss/C_of_ocaml")
+ (documentation "https://github.com/rboudrouss/C_of_ocaml#readme")
+ (license "GPL-2.0-or-later" "LGPL-2.1-or-later WITH OCaml-LGPL-linking-exception")
+ (maintenance_intent "(latest)")
+ (depends
+  (ocaml (and (>= 4.14) (< 5.6)))
+  (ppx_devtools-optcomp (>= 0.1))
+  (ppxlib (>= 0.33))
+  (ocaml-compiler-libs (>= v0.12.4))
+  (sedlex (>= 3.8.1))
+  (menhir (>= 20180523))
+  menhirLib
+  menhirSdk
+  (yojson (>= 2.1))))
