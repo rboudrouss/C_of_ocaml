@@ -32,9 +32,9 @@ let memory () =
       (mb st.heap_words)
       (mb st.top_heap_words)
 
-(* No release: ocaml-emcc runs --version only to check that the options before it are
-   known *)
-let version = "dev"
+(* The version of the opam release, changed when tagging one. ocaml-emcc runs
+   --version only to check that the options before it are known *)
+let version = "0.1.0"
 
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
