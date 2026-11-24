@@ -7,6 +7,13 @@
 *     basic-io-2/io
 *     lib-channels/close_out
 
+# Natively (NATIVE=1): Marshal.Closures needs the runtime of ocaml-emcc
+*     runtime-objects/Tests
+
+# With REF=bytecode, ocamlrun has the bug the test checks
+5.0.*  effects/marshal
+4.13.* lib-obj/reachable_words_bug
+
 # They expect the behaviour of the JavaScript runtime
 *     lib-digest/blake2_long_key
 *     lib-obj/new_obj

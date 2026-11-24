@@ -27,35 +27,59 @@
 #               backtrace slots recorded by the compiled code)
 #   TAIL_CALLS  no: compiled without the tail calls of WebAssembly (no
 #               -mtail-call), as ocaml-emcc --no-tail-calls
+#   REF         bytecode: the expected output of a test is that of its
+#               bytecode run by the ocamlrun of the switch, instead of its
+#               .expected file (those of the latest OCaml)
+#   NATIVE      if set, natively: the C code compiled by $CC (default cc)
+#               and linked with the bytecode runtime of the switch
+#               (libcamlrun.a), the program run directly. Neither emcc nor
+#               node nor a sysroot is needed (WORD_SIZE and SYSROOT unused)
 #
 # emcc, node and ocamlfind must be in PATH (node >= 24 for wasm64).
 
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-WORD_SIZE=${WORD_SIZE:-32}
-SYSROOT=${SYSROOT:-$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm$WORD_SIZE}
 C_OF_OCAML=${C_OF_OCAML:-$ROOT/_build/default/compiler/bin-c_of_ocaml/c_of_ocaml.exe}
 JOBS=${JOBS:-$(nproc)}
 RT=$ROOT/runtime/c
-CFLAGS="-O1 -fno-strict-aliasing -fwrapv -fno-strict-overflow \
-  -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
-[ "${TAIL_CALLS:-yes}" = no ] || CFLAGS="$CFLAGS -mtail-call"
 COOC_FLAGS=${COOC_FLAGS:-}
-LDFLAGS=
-if [ "$WORD_SIZE" = 64 ]; then
-  CFLAGS="$CFLAGS -m64"
-  COOC_FLAGS="$COOC_FLAGS --word-size 64"
-  LDFLAGS="-sMAXIMUM_MEMORY=16GB"
+if [ -n "${NATIVE:-}" ]; then
+  # (the C compiler, the runtime and the libraries of the switch)
+  CCX=${CC:-cc}
+  LIBDIR=$(ocamlfind ocamlc -where)
+  WORD_SIZE=$(ocamlfind ocamlc -config | sed -n 's/^word_size: //p')
+  CFLAGS="-O1 -fno-strict-aliasing -fwrapv -fno-strict-overflow -I$RT -I$LIBDIR"
+  COOC_FLAGS="$COOC_FLAGS --word-size $WORD_SIZE"
+  LDFLAGS="-lm -lpthread -ldl"
+  CCFLAGS=$CFLAGS
+  RUN=
+else
+  CCX=emcc
+  WORD_SIZE=${WORD_SIZE:-32}
+  SYSROOT=${SYSROOT:-$OPAM_SWITCH_PREFIX/emcc-sysroot/wasm$WORD_SIZE}
+  LIBDIR=$SYSROOT/lib
+  CFLAGS="-O1 -fno-strict-aliasing -fwrapv -fno-strict-overflow \
+    -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -I$RT -I$SYSROOT/lib/ocaml"
+  [ "${TAIL_CALLS:-yes}" = no ] || CFLAGS="$CFLAGS -mtail-call"
+  LDFLAGS="-lm -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1"
+  if [ "$WORD_SIZE" = 64 ]; then
+    CFLAGS="$CFLAGS -m64"
+    COOC_FLAGS="$COOC_FLAGS --word-size 64"
+    LDFLAGS="$LDFLAGS -sMAXIMUM_MEMORY=16GB"
+  fi
+  # The C code is compiled as the runtime of the sysroot, with -pthread if
+  # it is (its thread-local variables), then linked without, as ocaml-emcc
+  # does
+  CCFLAGS=$CFLAGS
+  if grep -qs '^cflags=.*-pthread' "$SYSROOT/manifest"; then CCFLAGS="$CCFLAGS -pthread"; fi
+  RUN=node
 fi
-# The C code is compiled as the runtime of the sysroot, with -pthread if it
-# is (its thread-local variables), then linked without, as ocaml-emcc does
-CCFLAGS=$CFLAGS
-if grep -qs '^cflags=.*-pthread' "$SYSROOT/manifest"; then CCFLAGS="$CCFLAGS -pthread"; fi
 # The C part of the unix library (libunix.a before OCaml 5)
-UNIX_LIB=$SYSROOT/lib/libunixbyt.a
-[ -f "$UNIX_LIB" ] || UNIX_LIB=$SYSROOT/lib/libunix.a
-export SYSROOT C_OF_OCAML RT CFLAGS CCFLAGS UNIX_LIB COOC_FLAGS LDFLAGS
+UNIX_LIB=$LIBDIR/libunixbyt.a
+[ -f "$UNIX_LIB" ] || UNIX_LIB=$LIBDIR/libunix.a
+CAMLRUN_LIB=$LIBDIR/libcamlrun.a
+export C_OF_OCAML RT CCX CFLAGS CCFLAGS UNIX_LIB CAMLRUN_LIB COOC_FLAGS LDFLAGS RUN
 
 run_test() {
   local ml=$1
@@ -89,27 +113,35 @@ run_test() {
   files=$(ocamlfind ocamldep -sort $deps "$name.ml")
   ocamlfind ocamlc -package unix -linkpkg -w -a ${OCAMLC_FLAGS:-} $(ls ./*.mli 2>/dev/null) $files \
     -o "$name.bc" > build.log 2>&1 || { res SKIP ocamlc; return; }
+  if [ "${REF:-}" = bytecode ]; then
+    exp=$w/ocamlrun.txt
+    timeout 60 ocamlrun "./$name.bc" > "$exp" 2>&1
+  fi
   local objs=$name.o
   if [ -n "${SPLIT:-}" ]; then
     "$C_OF_OCAML" $COOC_FLAGS "$name.bc" --split parts --part-size "$SPLIT" > cooc.log 2>&1 \
       || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
     objs=
     for c in parts/*.c; do
-      emcc $CCFLAGS -Wno-everything -c "$c" -o "${c%.c}.o" >> cc.log 2>&1 \
+      $CCX $CCFLAGS -w -c "$c" -o "${c%.c}.o" >> cc.log 2>&1 \
         || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
       objs="$objs ${c%.c}.o"
     done
   else
     "$C_OF_OCAML" $COOC_FLAGS "$name.bc" -o "$name.c" > cooc.log 2>&1 \
       || { res FAIL "c_of_ocaml: $(head -c 150 cooc.log | tr '\n' ' ')"; return; }
-    emcc $CCFLAGS -Wno-everything -c "$name.c" -o "$name.o" > cc.log 2>&1 \
+    $CCX $CCFLAGS -w -c "$name.c" -o "$name.o" > cc.log 2>&1 \
       || { res FAIL "cc: $(grep -m1 error cc.log | head -c 150)"; return; }
   fi
-  emcc $CFLAGS $objs "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" \
-    "$SYSROOT/lib/libcamlrun.a" -lm \
-    -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 $LDFLAGS -o "$name.js" > ld.log 2>&1 \
+  $CCX $CFLAGS $objs "$WORKDIR/camlc_runtime.o" "$UNIX_LIB" "$CAMLRUN_LIB" \
+    $LDFLAGS -o "$name.js" > ld.log 2>&1 \
     || { res FAIL "ld: $(grep -m1 error ld.log | head -c 150)"; return; }
-  timeout 60 node "$name.js" > out.txt 2>&1
+  # (natively, $name.js is the executable)
+  if [ -n "$RUN" ]; then
+    timeout 60 "$RUN" "$name.js" > out.txt 2>&1
+  else
+    timeout 60 "./$name.js" > out.txt 2>&1
+  fi
   rc=$?
   if [ -f "$exp" ]; then
     # Ignore a missing newline at the end of the expected output
@@ -133,7 +165,7 @@ if [ -z "${WORKDIR:-}" ]; then
 fi
 mkdir -p "$WORKDIR"
 export WORKDIR
-emcc $CCFLAGS -c "$RT/camlc_runtime.c" -o "$WORKDIR/camlc_runtime.o" || exit 1
+$CCX $CCFLAGS -c "$RT/camlc_runtime.c" -o "$WORKDIR/camlc_runtime.o" || exit 1
 
 if [ $# -gt 0 ]; then
   tests=("$@")
