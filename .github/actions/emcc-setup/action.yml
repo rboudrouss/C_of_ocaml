@@ -33,5 +33,9 @@ runs:
     - name: Build the sysroot of ocaml-emcc
       shell: bash
       run: |
+        # ocaml-emcc depends on c_of_ocaml: the one of this tree, with its
+        # version (a pin without one is ~dev, which ocaml-emcc refuses)
+        version=$(sed -n 's/^let version = "\(.*\)"$/\1/p' compiler/bin-c_of_ocaml/c_of_ocaml.ml)
+        opam pin add -n -y "c_of_ocaml.$version" .
         opam pin add -y ocaml-emcc "$OCAML_EMCC"
         opam exec -- ocaml-emcc --target ${{ inputs.target }} setup
