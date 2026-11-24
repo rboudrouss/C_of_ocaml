@@ -53,8 +53,7 @@
 #include <signal.h>
 #endif
 
-#define CAMLC_OCAML_5_5 \
-  (OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 5))
+#define CAMLC_OCAML_5_5 CAMLC_OCAML_AT_LEAST(5, 5)
 
 /* Defined by the generated code */
 extern value camlc_program(void);
@@ -130,7 +129,7 @@ _Thread_local struct camlc_thread camlc_thread;
    parameter) */
 #define camlc_bounce_args_n(b) ((b) < 0 ? -(b) - 1 : (b))
 
-#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 3)
+#if CAMLC_OCAML_AT_LEAST(5, 3)
 #define CAMLC_MAX_DOMAINS (caml_params->max_domains)
 #elif OCAML_VERSION_MAJOR >= 5
 #define CAMLC_MAX_DOMAINS Max_domains
@@ -358,7 +357,7 @@ static value camlc_take_async_exn(void)
 
 value camlc_poll(void)
 {
-#if OCAML_VERSION_MAJOR >= 5
+#if CAMLC_OCAML_AT_LEAST(5, 3)
   caml_result r = caml_process_pending_actions_res();
   if (caml_result_is_exception(r)) return Make_exception_result(r.data);
   if (CAMLC_UNLIKELY(camlc_thread.async_exn != Val_unit))
@@ -374,6 +373,16 @@ value camlc_poll(void)
 }
 
 #if OCAML_VERSION_MAJOR >= 5
+#if !CAMLC_OCAML_AT_LEAST(5, 2)
+/* (from the runtime of OCaml 5.2) */
+static void caml_process_external_interrupt(void)
+{
+  if (atomic_load_explicit(&Caml_state->requested_external_interrupt,
+                           memory_order_acquire))
+    caml_domain_external_interrupt_hook();
+}
+#endif
+
 void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
 {
   if (atomic_load_relaxed(&dom_st->requested_external_interrupt)) {
@@ -393,6 +402,7 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
      before this allocation, which would then seldom be sampled */
   int later = 0;
   if (camlc_thread.async_exn == Val_unit && caml_check_pending_actions()) {
+#if CAMLC_OCAML_AT_LEAST(5, 3)
     if (dom_st->young_ptr < dom_st->memprof_young_trigger)
       later = 1;
     else {
@@ -402,6 +412,15 @@ void camlc_alloc_small_gc(caml_domain_state *dom_st, mlsize_t wosize)
       dom_st->young_ptr -= Whsize_wosize(wosize);
       if (caml_result_is_exception(r)) camlc_thread.async_exn = r.data;
     }
+#else
+    /* (no Gc.Memprof before OCaml 5.3) */
+    value r;
+    dom_st->young_ptr += Whsize_wosize(wosize);
+    r = caml_process_pending_actions_exn();
+    dom_st->young_ptr -= Whsize_wosize(wosize);
+    if (Is_exception_result(r))
+      camlc_thread.async_exn = Extract_exception(r);
+#endif
   }
   caml_alloc_small_dispatch(dom_st, wosize, CAML_DO_TRACK | CAML_FROM_C, 1,
                             NULL);
@@ -1546,7 +1565,7 @@ CAMLexport value caml_callbackN_exn(value closure, int narg, value args[])
   return res;
 }
 
-#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 4)
+#if CAMLC_OCAML_AT_LEAST(5, 4)
 /* Gc.ramp_up: the runtime calls the function back at once, which runs as
    if called by the code (Rocq loads its libraries under it) */
 extern value caml_ml_gc_ramp_up(value callback);
@@ -1586,7 +1605,7 @@ CAMLexport value caml_callback3_exn(value closure, value arg1, value arg2,
   return caml_callbackN_exn(closure, 3, arg);
 }
 
-#if OCAML_VERSION_MAJOR >= 5
+#if CAMLC_OCAML_AT_LEAST(5, 3)
 static inline caml_result camlc_result_encoded(value encoded)
 {
   if (Is_exception_result(encoded))
@@ -1659,7 +1678,11 @@ struct named_value {
 static struct named_value *named_value_table[Named_value_size] = { NULL, };
 #if OCAML_VERSION_MAJOR >= 5
 static caml_plat_mutex named_value_lock = CAML_PLAT_MUTEX_INITIALIZER;
+#if CAMLC_OCAML_AT_LEAST(5, 3)
 #define Named_value_lock() caml_plat_lock_non_blocking(&named_value_lock)
+#else
+#define Named_value_lock() caml_plat_lock(&named_value_lock)
+#endif
 #define Named_value_unlock() caml_plat_unlock(&named_value_lock)
 #define Named_value_ptr(nv) Op_val((nv)->val)
 #else
@@ -1803,7 +1826,7 @@ void caml_debuginfo_location(debuginfo dbg, struct caml_loc_info *li)
   li->loc_filename = (char *)loc->filename;
   li->loc_defname = (char *)loc->defname;
   li->loc_is_inlined = 0;
-#if OCAML_VERSION_MAJOR >= 5
+#if CAMLC_OCAML_AT_LEAST(5, 2)
   li->loc_start_lnum = li->loc_end_lnum = loc->line;
   li->loc_start_chr = loc->start_chr;
   li->loc_end_chr = loc->end_chr;
@@ -2115,8 +2138,11 @@ static void camlc_extern_header(struct camlc_extern *s, mlsize_t sz,
     camlc_extern_byte(s, PREFIX_SMALL_BLOCK + tag + (sz << 4));
   else {
     /* The colour of extern.c, ignored by intern.c */
-#if OCAML_VERSION_MAJOR >= 5
+#if CAMLC_OCAML_AT_LEAST(5, 1)
     uintnat hd = Make_header(sz, tag, 3 << HEADER_COLOR_SHIFT);
+#elif OCAML_VERSION_MAJOR >= 5
+    /* (NOT_MARKABLE, the colour bits after the tag) */
+    uintnat hd = Make_header(sz, tag, 3 << 8);
 #else
     uintnat hd = Make_header(sz, tag, 0);
 #endif
@@ -2513,7 +2539,7 @@ value camlc_output_value_to_buffer(value buf, value ofs, value len, value v,
    second one allocates the other blocks in the major heap, which never
    runs the GC, and fills them, as [intern_rec] in intern.c does. */
 
-#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 5)
+#if CAMLC_OCAML_AT_LEAST(5, 5)
 #include <caml/io.h>
 
 enum { CAMLC_INTERN_READ, CAMLC_INTERN_SHIFT, CAMLC_INTERN_OID };
@@ -3449,7 +3475,7 @@ CAMLprim value caml_dynlink_parse_ld_conf(value stdlib)
 }
 #else
 /* (const from OCaml 5.4) */
-#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 4)
+#if CAMLC_OCAML_AT_LEAST(5, 4)
 CAMLexport const char_os *caml_get_stdlib_location(void)
 #else
 CAMLexport char_os *caml_get_stdlib_location(void)
