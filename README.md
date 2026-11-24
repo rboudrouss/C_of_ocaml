@@ -10,15 +10,31 @@ c_of_ocaml is a fork of [js_of_ocaml](https://github.com/ocsigen/js_of_ocaml).
 
 ## Installation
 
-c_of_ocaml needs OCaml 4.14 or later and is not in opam. Build it in the
-switch of your project.
+c_of_ocaml needs OCaml 4.14 to 5.5. Install it in the switch of your project,
+since it reads the bytecode of the switch's compiler.
+
+```sh
+opam install c_of_ocaml
+```
+
+The development version is pinned from this repository:
+
+```sh
+opam pin add c_of_ocaml git+https://github.com/rboudrouss/C_of_ocaml.git
+```
+
+To work on c_of_ocaml, build it in this tree:
 
 ```sh
 git clone https://github.com/rboudrouss/C_of_ocaml.git && cd C_of_ocaml
-opam install -y --deps-only ./js_of_ocaml-compiler.opam
+opam install -y --deps-only ./c_of_ocaml.opam
 dune build --profile release compiler/bin-c_of_ocaml/c_of_ocaml.exe
 export OCAML_EMCC_C_OF_OCAML=$PWD/_build/default/compiler/bin-c_of_ocaml/c_of_ocaml.exe
 ```
+
+The `c_of_ocaml` package installs the command only. It does not need, and does
+not conflict with, the `js_of_ocaml-compiler` package: the js_of_ocaml compiler
+library it is built with, modified by c_of_ocaml, comes from this tree.
 
 ocaml-emcc looks for c_of_ocaml in `$OCAML_EMCC_C_OF_OCAML`, then in `PATH`.
 
