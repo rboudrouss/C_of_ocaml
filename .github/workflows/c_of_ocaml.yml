@@ -39,6 +39,35 @@ jobs:
       - run: opam exec -- dune build @compiler/tests-c/runtest
       - run: opam exec -- tools/c_of_ocaml_threads_test.sh
 
+  # the tests of compiler/tests-ocaml compiled by c_of_ocaml for each
+  # version of OCaml, natively (with clang: GCC 16 miscompiles comparisons
+  # of NaN at -O1), their outputs compared with those of the bytecode
+  # run by ocamlrun
+  native-suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        ocaml: ['4.14', '5.1', '5.2', '5.3', '5.4', '5.5']
+        include:
+          # GCC 15 (C23) does not compile OCaml 4.13 and 5.0
+          - { os: ubuntu-24.04, ocaml: '4.13' }
+          - { os: ubuntu-24.04, ocaml: '5.0' }
+    name: native-suite (${{ matrix.ocaml }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+          opam-pin: false
+      - name: Install the dependencies
+        run: |
+          opam install -y --deps-only ./c_of_ocaml.opam
+          opam install -y ocamlfind
+      - run: opam exec -- dune build compiler/bin-c_of_ocaml/c_of_ocaml.exe
+      - run: CC=clang REF=bytecode NATIVE=1 opam exec -- tools/c_of_ocaml_tests.sh
+
   # the tests of compiler/tests-ocaml compiled by c_of_ocaml and emcc, run
   # with node, in other modes of c_of_ocaml for the last ones
   suite:
