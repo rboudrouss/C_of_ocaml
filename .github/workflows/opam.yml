@@ -1,0 +1,111 @@
+name: opam
+
+# What opam-repository's CI does with c_of_ocaml.opam: lint, install the
+# package from its release archive with every OCaml it supports, with the
+# oldest dependencies, next to js_of_ocaml-compiler, on macOS and Windows.
+# tools/c_of_ocaml_opam_test.sh installs it, then compiles and runs a
+# program with the installed command.
+on:
+  push:
+    branches: [master]
+    # the releases (tags named ocaml-emcc-* are not)
+    tags: ['[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.5'
+      - run: opam install -y dune
+      - name: c_of_ocaml.opam is up to date with dune-project
+        run: |
+          opam exec -- dune build c_of_ocaml.opam
+          git diff --exit-code c_of_ocaml.opam
+      - run: opam lint c_of_ocaml.opam
+      - name: js_of_ocaml_base is the last commit of js_of_ocaml merged
+        run: |
+          git fetch -q https://github.com/ocsigen/js_of_ocaml.git master
+          base=$(git merge-base HEAD FETCH_HEAD)
+          if ! grep -q "^let js_of_ocaml_base = \"$base\"$" compiler/bin-c_of_ocaml/c_of_ocaml.ml; then
+            echo "::error::js_of_ocaml_base (compiler/bin-c_of_ocaml/c_of_ocaml.ml) is not $base, the last commit of js_of_ocaml merged"
+            exit 1
+          fi
+      - name: the tag is the version of c_of_ocaml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          grep -q "^let version = \"$GITHUB_REF_NAME\"$" compiler/bin-c_of_ocaml/c_of_ocaml.ml
+          grep -q "^## $GITHUB_REF_NAME (" CHANGES_c_of_ocaml.md
+
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        ocaml: ['4.14', '5.0', '5.1', '5.2', '5.3', '5.4', '5.5']
+        include:
+          - { os: macos-latest, ocaml: '4.14' }
+          - { os: macos-latest, ocaml: '5.5' }
+    name: install (${{ matrix.os }}, ${{ matrix.ocaml }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+      - run: OPAM_ARGS=--with-test opam exec -- tools/c_of_ocaml_opam_test.sh
+
+  lower-bounds:
+    strategy:
+      fail-fast: false
+      matrix:
+        ocaml: ['4.14', '5.5']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+      - run: LOWER_BOUNDS=1 opam exec -- tools/c_of_ocaml_opam_test.sh
+
+  # no conflict with js_of_ocaml-compiler, installed from opam-repository
+  with-js_of_ocaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.5'
+      - run: opam install -y js_of_ocaml-compiler
+      - run: opam exec -- tools/c_of_ocaml_opam_test.sh
+      - run: opam exec -- js_of_ocaml --version
+
+  # a mingw switch under Cygwin or MSYS2, as opam-repository's CI: the
+  # package is built and installed, the C code is not compiled
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [cygwin, msys2]
+    runs-on: windows-latest
+    steps:
+      # the sources as in the release archive, without CRLF
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.5'
+          windows-environment: ${{ matrix.environment }}
+      - run: opam install -y --deps-only ./c_of_ocaml.opam
+      - run: opam exec -- dune build -p c_of_ocaml,js_of_ocaml-compiler c_of_ocaml.install
+      - run: opam exec -- _build/install/default/bin/c_of_ocaml --version
