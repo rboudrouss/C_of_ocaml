@@ -3448,7 +3448,8 @@ CAMLprim value caml_dynlink_parse_ld_conf(value stdlib)
   return Val_emptylist;
 }
 #else
-#if OCAML_VERSION_MAJOR >= 5
+/* (const from OCaml 5.4) */
+#if OCAML_VERSION_MAJOR > 5 || (OCAML_VERSION_MAJOR == 5 && OCAML_VERSION_MINOR >= 4)
 CAMLexport const char_os *caml_get_stdlib_location(void)
 #else
 CAMLexport char_os *caml_get_stdlib_location(void)
