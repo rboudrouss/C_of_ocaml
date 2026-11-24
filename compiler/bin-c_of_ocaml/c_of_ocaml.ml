@@ -36,6 +36,11 @@ let memory () =
    --version only to check that the options before it are known *)
 let version = "0.1.0"
 
+(* The last commit of js_of_ocaml merged into this tree, [git merge-base HEAD
+   upstream/master], changed with each merge (the CI checks it). Its VERSION file,
+   [Compiler_version.s], is that of the release before *)
+let js_of_ocaml_base = "bfba9bafc4b6cfbb8b7f496f1c805f5d948c79f4"
+
 let usage =
   "Usage: c_of_ocaml [options] program.bc -o program.c\n\
   \       c_of_ocaml [options] program.bc --split DIR\n\
@@ -590,9 +595,13 @@ let () =
     ; ( "--version"
       , Arg.Unit
           (fun () ->
-            print_endline version;
+            Printf.printf
+              "%s (js_of_ocaml %s, after %s)\n"
+              version
+              (String.sub js_of_ocaml_base ~pos:0 ~len:8)
+              Compiler_version.s;
             exit 0)
-      , " Print the version and exit" )
+      , " Print the version, and the commit of js_of_ocaml it is based on, and exit" )
     ; "--debug", Arg.String Debug.enable, "NAME Enable the debug output NAME"
     ; "--enable", Arg.String (flag Config.Flag.enable), "OPT Enable the option OPT"
     ; "--disable", Arg.String (flag Config.Flag.disable), "OPT Disable the option OPT"
