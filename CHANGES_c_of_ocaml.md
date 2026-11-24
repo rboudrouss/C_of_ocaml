@@ -2,7 +2,7 @@
 
 (Those of js_of_ocaml are in [CHANGES.md](CHANGES.md).)
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-24)
 
 Based on js_of_ocaml master
 [bfba9baf](https://github.com/ocsigen/js_of_ocaml/commit/bfba9bafc4b6cfbb8b7f496f1c805f5d948c79f4)
