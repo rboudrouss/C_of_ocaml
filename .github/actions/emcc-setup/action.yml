@@ -27,8 +27,7 @@ runs:
     - name: Build c_of_ocaml
       shell: bash
       run: |
-        opam pin add -n -y ppx_devtools-optcomp.dev "$PPX_DEVTOOLS"
-        opam install -y --deps-only ./js_of_ocaml-compiler.opam
+        opam install -y --deps-only ./c_of_ocaml.opam
         opam install -y ocamlfind
         opam exec -- dune build compiler/bin-c_of_ocaml/c_of_ocaml.exe
     - name: Build the sysroot of ocaml-emcc

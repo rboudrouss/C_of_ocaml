@@ -15,7 +15,6 @@ env:
   # ocaml-emcc rebuilds the runtime from the sources of the compiler, kept in
   # the switch (which setup-ocaml caches for all the jobs)
   OPAMKEEPBUILDDIR: true
-  PPX_DEVTOOLS: git+https://github.com/ocsigen/ppx_devtools.git#f62719d5087fa8d7f2bd0616c1fa91fd660eb27e
   OCAML_EMCC: git+https://github.com/rboudrouss/ocaml-emcc.git#main
 
 jobs:
@@ -34,7 +33,6 @@ jobs:
           ocaml-compiler: ${{ matrix.ocaml }}
       - name: Install the dependencies
         run: |
-          opam pin add -n -y ppx_devtools-optcomp.dev "$PPX_DEVTOOLS"
           opam install -y --deps-only ./js_of_ocaml-compiler.opam ./js_of_ocaml.opam
           opam install -y ocamlfind
       - run: opam exec -- dune build compiler/bin-c_of_ocaml/c_of_ocaml.exe
