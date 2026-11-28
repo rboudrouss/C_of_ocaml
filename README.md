@@ -8,6 +8,21 @@ wasm_of_ocaml, instead of being interpreted by an `ocamlrun` built for wasm.
 
 c_of_ocaml is a fork of [js_of_ocaml](https://github.com/ocsigen/js_of_ocaml).
 
+## Quick start
+
+c_of_ocaml is installed with ocaml-emcc, which runs it on dune executables:
+
+```sh
+opam install ocaml-emcc             # c_of_ocaml comes with it
+source /path/to/emsdk/emsdk_env.sh  # emcc in PATH
+ocaml-emcc build main.js            # in a dune project
+node main.js
+```
+
+See the [ocaml-emcc README](https://github.com/rboudrouss/ocaml-emcc) for
+browsers, WASI, plugins and threads. To run c_of_ocaml without it, see
+[Without ocaml-emcc](#without-ocaml-emcc).
+
 ## Installation
 
 c_of_ocaml needs OCaml 4.13 to 5.5. Install it in the switch of your project,
@@ -36,7 +51,8 @@ The `c_of_ocaml` package installs the command only. It does not need, and does
 not conflict with, the `js_of_ocaml-compiler` package: the js_of_ocaml compiler
 library it is built with, modified by c_of_ocaml, comes from this tree.
 
-ocaml-emcc looks for c_of_ocaml in `$OCAML_EMCC_C_OF_OCAML`, then in `PATH`.
+ocaml-emcc looks for c_of_ocaml in `$OCAML_EMCC_C_OF_OCAML`, then in the
+switch, then in `PATH`.
 
 ### Versions
 
@@ -48,20 +64,7 @@ Each version is based on a commit of js_of_ocaml's master, which `c_of_ocaml
 with the changes. See [RELEASING_c_of_ocaml.md](RELEASING_c_of_ocaml.md) to
 merge js_of_ocaml and make a release.
 
-## Usage
-
-In a dune project, ocaml-emcc does everything.
-
-```sh
-ocaml-emcc build main.js
-node main.js
-```
-
-See the [ocaml-emcc README](https://github.com/rboudrouss/ocaml-emcc) for
-browsers, WASI, plugins and threads. To run c_of_ocaml without it, see
-[Without ocaml-emcc](#without-ocaml-emcc).
-
-### Options
+## Options
 
 | Option | Effect |
 | --- | --- |
